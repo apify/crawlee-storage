@@ -1,0 +1,16 @@
+[package]
+name = "crawlee-storage-node"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js bindings for crawlee-storage"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crawlee-storage = { path = "../crawlee-storage" }
+napi = { version = "2", features = ["async", "serde-json"] }
+napi-derive = "2"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crawlee-storage",
+    "crawlee-storage-python",
+    "crawlee-storage-node",
+]
+resolver = "2"
