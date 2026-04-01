@@ -5,3 +5,15 @@ members = [
     "crawlee-storage-node",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
