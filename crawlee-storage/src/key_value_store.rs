@@ -128,6 +128,14 @@ impl FileSystemKeyValueStoreClient {
         let value_path = self.path.join(&encoded);
         let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
 
+        // Always update accessed_at on read, even for missing keys
+        {
+            let mut meta = self.metadata.lock().await;
+            meta.base.accessed_at = Utc::now();
+            let json = json_dumps_value(&*meta)?;
+            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
+        }
+
         if !value_path.exists() || !sidecar_path.exists() {
             return Ok(None);
         }
@@ -137,22 +145,15 @@ impl FileSystemKeyValueStoreClient {
         let record_meta: KeyValueStoreRecordMetadata =
             serde_json::from_str(&sidecar_content)?;
 
-        // Read value based on content type
-        let value = self.read_value(&value_path, &record_meta.content_type).await?;
+        // Read raw bytes once, then parse based on content type
         let raw_bytes = fs::read(&value_path).await?;
-
-        // Update accessed_at
-        {
-            let mut meta = self.metadata.lock().await;
-            meta.base.accessed_at = Utc::now();
-            let json = json_dumps_value(&*meta)?;
-            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
-        }
+        let size = raw_bytes.len();
+        let value = self.parse_value(&raw_bytes, &record_meta.content_type)?;
 
         Ok(Some(KeyValueStoreRecord {
             key: key.to_string(),
             content_type: record_meta.content_type,
-            size: Some(raw_bytes.len()),
+            size: Some(size),
             value,
         }))
     }
@@ -307,27 +308,28 @@ impl FileSystemKeyValueStoreClient {
 
     // ─── Private ────────────────────────────────────────────────────────────
 
-    async fn read_value(&self, path: &Path, content_type: &str) -> Result<Value> {
+    fn parse_value(&self, raw_bytes: &[u8], content_type: &str) -> Result<Value> {
         if content_type == "application/x-none" {
             return Ok(Value::Null);
         }
 
         if content_type == "application/json" {
-            let text = fs::read_to_string(path).await?;
-            let parsed = serde_json::from_str::<Value>(&text)?;
+            let text = std::str::from_utf8(raw_bytes)
+                .map_err(|e| StorageError::InvalidArgs(format!("Invalid UTF-8 in JSON value: {e}")))?;
+            let parsed = serde_json::from_str::<Value>(text)?;
             return Ok(parsed);
         }
 
         if content_type.starts_with("text/") {
-            let text = fs::read_to_string(path).await?;
+            let text = String::from_utf8(raw_bytes.to_vec())
+                .map_err(|e| StorageError::InvalidArgs(format!("Invalid UTF-8 in text value: {e}")))?;
             return Ok(Value::String(text));
         }
 
-        // Binary data — read as bytes and return as base64 string
-        // (the binding layer may want to handle this differently)
-        let bytes = fs::read(path).await?;
+        // Binary data — return as base64-encoded string.
+        // The binding layer decodes this back to native bytes (e.g. Python `bytes`).
         use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_bytes);
         Ok(Value::String(encoded))
     }
 
@@ -486,6 +488,45 @@ mod tests {
         // With limit
         let keys = client.iterate_keys(None, Some(2)).await.unwrap();
         assert_eq!(keys.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_binary_value_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Store binary data as base64 (this is how the binding layer sends bytes)
+        let raw_bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x89, 0xFF];
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+
+        client
+            .set_value(
+                "binary-key",
+                Value::String(b64),
+                Some("application/octet-stream".to_string()),
+            )
+            .await
+            .unwrap();
+
+        // Read it back
+        let record = client.get_value("binary-key").await.unwrap().unwrap();
+        assert_eq!(record.content_type, "application/octet-stream");
+        assert_eq!(record.size, Some(raw_bytes.len()));
+
+        // The value should be a base64-encoded string that decodes to the original bytes
+        if let Value::String(ref b64_out) = record.value {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64_out)
+                .unwrap();
+            assert_eq!(decoded, raw_bytes);
+        } else {
+            panic!("Expected base64 string value for binary content type");
+        }
     }
 
     #[tokio::test]

@@ -354,6 +354,15 @@ impl FileSystemRequestQueueClient {
 
         let content = fs::read_to_string(&file_path).await?;
         let request: Value = serde_json::from_str(&content)?;
+
+        // Update accessed_at
+        {
+            let mut inner = self.inner.lock().await;
+            inner.metadata.base.accessed_at = Utc::now();
+            let json = json_dumps_value(&inner.metadata)?;
+            atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
+        }
+
         Ok(Some(request))
     }
 
@@ -370,7 +379,9 @@ impl FileSystemRequestQueueClient {
             let request = match inner.request_cache.pop_front() {
                 Some(r) => r,
                 None => {
-                    inner.is_empty_cache = Some(true);
+                    // Cache is empty, but the queue is only truly empty if
+                    // there are also no in-progress requests.
+                    inner.is_empty_cache = Some(inner.in_progress_set.is_empty());
                     return Ok(None);
                 }
             };
@@ -428,6 +439,16 @@ impl FileSystemRequestQueueClient {
 
         let mut inner = self.inner.lock().await;
 
+        // Already handled — return immediately with was_already_handled: true
+        if inner.handled_set.contains(&unique_key) {
+            return Ok(Some(ProcessedRequest {
+                id: None,
+                unique_key,
+                was_already_present: true,
+                was_already_handled: true,
+            }));
+        }
+
         // Must be in progress
         if !inner.in_progress_set.contains(&unique_key) {
             return Ok(None);
@@ -439,6 +460,20 @@ impl FileSystemRequestQueueClient {
         if let Value::Object(ref mut map) = request {
             map.insert("handledAt".to_string(), Value::String(handled_at_str.clone()));
             map.insert("handled_at".to_string(), Value::String(handled_at_str));
+
+            // Advance crawlee request state from ERROR_HANDLER (5) to ERROR (6).
+            // When all retries are exhausted, the framework sets state=5 and runs the
+            // error handler. Once that completes and the request is marked as handled,
+            // the final state should be ERROR (6).
+            if let Some(user_data) = map.get_mut("userData").and_then(|v| v.as_object_mut()) {
+                if let Some(crawlee) =
+                    user_data.get_mut("__crawlee").and_then(|v| v.as_object_mut())
+                {
+                    if crawlee.get("state").and_then(|v| v.as_u64()) == Some(5) {
+                        crawlee.insert("state".to_string(), Value::Number(6.into()));
+                    }
+                }
+            }
         }
 
         // Write updated request file
@@ -474,7 +509,7 @@ impl FileSystemRequestQueueClient {
             id: None,
             unique_key,
             was_already_present: true,
-            was_already_handled: false,
+            was_already_handled: true,
         }))
     }
 
@@ -510,6 +545,12 @@ impl FileSystemRequestQueueClient {
             .queue_state
             .in_progress_requests
             .retain(|k| k != &unique_key);
+
+        // Write updated request to disk (the caller may have modified fields
+        // like userData.__crawlee.state, retryCount, etc.)
+        let file_path = self.get_request_path(&unique_key);
+        let json = json_dumps(&request)?;
+        atomic_write(&file_path, json.as_bytes()).await?;
 
         // Re-add to queue
         if forefront {
@@ -551,7 +592,7 @@ impl FileSystemRequestQueueClient {
 
     /// Check if the queue is empty (no pending or in-progress requests).
     pub async fn is_empty(&self) -> bool {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
 
         if let Some(cached) = inner.is_empty_cache {
             return cached;
@@ -570,7 +611,16 @@ impl FileSystemRequestQueueClient {
             .filter(|k| !inner.handled_set.contains(**k))
             .count();
 
-        unhandled == 0
+        let result = unhandled == 0;
+        inner.is_empty_cache = Some(result);
+
+        // Update accessed_at (best-effort — is_empty returns bool, not Result)
+        inner.metadata.base.accessed_at = Utc::now();
+        if let Ok(json) = json_dumps_value(&inner.metadata) {
+            let _ = atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await;
+        }
+
+        result
     }
 
     /// Explicitly persist the current queue state via the callback.
@@ -611,6 +661,8 @@ impl FileSystemRequestQueueClient {
         let request_files = Self::get_request_files(&self.path).await?;
 
         let mut inner = self.inner.lock().await;
+        let mut discovered_pending = 0usize;
+        let mut discovered_handled = 0usize;
 
         for file_path in request_files {
             match fs::read_to_string(&file_path).await {
@@ -651,6 +703,7 @@ impl FileSystemRequestQueueClient {
                                     .queue_state
                                     .handled_requests
                                     .push(unique_key);
+                                discovered_handled += 1;
                             } else {
                                 inner.queue_state.sequence_counter += 1;
                                 let seq = inner.queue_state.sequence_counter;
@@ -658,6 +711,7 @@ impl FileSystemRequestQueueClient {
                                     unique_key,
                                     Value::Number(seq.into()),
                                 );
+                                discovered_pending += 1;
                             }
                         }
                         Err(e) => {
@@ -677,6 +731,21 @@ impl FileSystemRequestQueueClient {
                     );
                 }
             }
+        }
+
+        // Recalculate metadata counts from authoritative state (not incremental,
+        // because metadata loaded from disk may already reflect these requests).
+        if discovered_pending > 0 || discovered_handled > 0 {
+            let handled = inner.handled_set.len();
+            let pending = inner.queue_state.regular_requests.len()
+                + inner.queue_state.forefront_requests.len()
+                + inner.in_progress_set.len();
+            inner.metadata.handled_request_count = handled;
+            inner.metadata.pending_request_count = pending;
+            inner.metadata.total_request_count = handled + pending;
+
+            let json = json_dumps_value(&inner.metadata)?;
+            atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
         }
 
         Ok(())
@@ -904,6 +973,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_request_updates_accessed_at() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        client
+            .add_batch_of_requests(
+                vec![serde_json::json!({
+                    "uniqueKey": "req1",
+                    "url": "https://example.com/1",
+                    "method": "GET"
+                })],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let accessed_before = client.get_metadata().await.base.accessed_at;
+
+        // Small delay so timestamps differ
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let _request = client.get_request("req1").await.unwrap();
+
+        let accessed_after = client.get_metadata().await.base.accessed_at;
+        assert!(
+            accessed_after > accessed_before,
+            "get_request should update accessed_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_empty_updates_accessed_at() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        let accessed_before = client.get_metadata().await.base.accessed_at;
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let _empty = client.is_empty().await;
+
+        let accessed_after = client.get_metadata().await.base.accessed_at;
+        assert!(
+            accessed_after > accessed_before,
+            "is_empty should update accessed_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_handled_returns_was_already_handled_true() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        client
+            .add_batch_of_requests(
+                vec![serde_json::json!({
+                    "uniqueKey": "req1",
+                    "url": "https://example.com/1",
+                    "method": "GET"
+                })],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+        let result = client
+            .mark_request_as_handled(request.clone())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // After marking as handled, was_already_handled should be true
+        assert!(
+            result.was_already_handled,
+            "mark_request_as_handled should return was_already_handled=true"
+        );
+
+        // Calling again should also return was_already_handled: true
+        let result2 = client
+            .mark_request_as_handled(request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result2.was_already_handled,
+            "re-marking handled request should return was_already_handled=true"
+        );
+    }
+
+    #[tokio::test]
     async fn test_forefront() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
@@ -942,5 +1117,193 @@ mod tests {
         // Forefront should come first
         let first = client.fetch_next_request().await.unwrap().unwrap();
         assert_eq!(first["uniqueKey"], "priority");
+    }
+
+    #[tokio::test]
+    async fn test_reopen_does_not_duplicate_counts() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Create a queue and add requests
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        client
+            .add_batch_of_requests(
+                vec![
+                    serde_json::json!({
+                        "uniqueKey": "req1",
+                        "url": "https://example.com/1",
+                        "method": "GET"
+                    }),
+                    serde_json::json!({
+                        "uniqueKey": "req2",
+                        "url": "https://example.com/2",
+                        "method": "GET"
+                    }),
+                ],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.total_request_count, 2);
+        assert_eq!(meta.pending_request_count, 2);
+        drop(client);
+
+        // Reopen the same queue (no persistence — state starts empty, discovery runs)
+        let client2 =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        let meta2 = client2.get_metadata().await;
+        assert_eq!(
+            meta2.total_request_count, 2,
+            "total_request_count should not double on reopen"
+        );
+        assert_eq!(
+            meta2.pending_request_count, 2,
+            "pending_request_count should not double on reopen"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_empty_false_while_request_in_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        client
+            .add_batch_of_requests(
+                vec![serde_json::json!({
+                    "uniqueKey": "req1",
+                    "url": "https://example.com/1",
+                    "method": "GET"
+                })],
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Fetch the request (marks it as in-progress)
+        let request = client.fetch_next_request().await.unwrap();
+        assert!(request.is_some());
+
+        // No more requests to fetch, but one is still in-progress
+        let next = client.fetch_next_request().await.unwrap();
+        assert!(next.is_none());
+
+        // Queue must NOT report as empty — the in-progress request isn't handled yet
+        assert!(
+            !client.is_empty().await,
+            "is_empty() must return false while a request is in-progress"
+        );
+
+        // After handling, queue should be empty
+        client
+            .mark_request_as_handled(request.unwrap())
+            .await
+            .unwrap();
+        assert!(
+            client.is_empty().await,
+            "is_empty() should return true after all requests are handled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_handled_advances_error_handler_to_error_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        // Add a request with state=5 (ERROR_HANDLER) to simulate exhausted retries
+        client
+            .add_batch_of_requests(
+                vec![serde_json::json!({
+                    "uniqueKey": "failing-req",
+                    "url": "https://example.com/fail",
+                    "method": "GET",
+                    "userData": {
+                        "__crawlee": {
+                            "state": 5
+                        }
+                    }
+                })],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+
+        // Simulate: the error handler ran, now mark as handled
+        let result = client
+            .mark_request_as_handled(request.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.was_already_handled);
+
+        // Read the request file back from disk and verify state was advanced to 6
+        let on_disk = client.get_request("failing-req").await.unwrap().unwrap();
+        let state = on_disk["userData"]["__crawlee"]["state"].as_u64().unwrap();
+        assert_eq!(
+            state, 6,
+            "mark_request_as_handled should advance state from ERROR_HANDLER(5) to ERROR(6)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_handled_does_not_change_normal_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+                .await
+                .unwrap();
+
+        // Add a request with state=1 (BEFORE_NAV) — normal successful processing
+        client
+            .add_batch_of_requests(
+                vec![serde_json::json!({
+                    "uniqueKey": "normal-req",
+                    "url": "https://example.com/ok",
+                    "method": "GET",
+                    "userData": {
+                        "__crawlee": {
+                            "state": 1
+                        }
+                    }
+                })],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+        client
+            .mark_request_as_handled(request)
+            .await
+            .unwrap();
+
+        let on_disk = client.get_request("normal-req").await.unwrap().unwrap();
+        let state = on_disk["userData"]["__crawlee"]["state"].as_u64().unwrap();
+        assert_eq!(
+            state, 1,
+            "mark_request_as_handled should NOT change state when it's not ERROR_HANDLER(5)"
+        );
     }
 }

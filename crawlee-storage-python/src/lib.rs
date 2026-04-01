@@ -58,9 +58,42 @@ fn py_to_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Value> {
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Value::String(s));
     }
+    // Check for bytes/bytearray BEFORE list, but use isinstance to avoid matching lists
+    // of small ints (PyO3's extract::<Vec<u8>> happily converts [1, 2, 3] to bytes).
+    if obj.is_instance_of::<pyo3::types::PyBytes>()
+        || obj.is_instance_of::<pyo3::types::PyByteArray>()
+    {
+        if let Ok(bytes) = obj.extract::<Vec<u8>>() {
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return Ok(Value::String(encoded));
+        }
+    }
     if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         let mut arr = Vec::new();
         for item in list.iter() {
+            arr.push(py_to_value(&item)?);
+        }
+        return Ok(Value::Array(arr));
+    }
+    // Also handle tuples and sets as JSON arrays
+    if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
+        let mut arr = Vec::new();
+        for item in tuple.iter() {
+            arr.push(py_to_value(&item)?);
+        }
+        return Ok(Value::Array(arr));
+    }
+    if let Ok(set) = obj.cast::<pyo3::types::PySet>() {
+        let mut arr = Vec::new();
+        for item in set.iter() {
+            arr.push(py_to_value(&item)?);
+        }
+        return Ok(Value::Array(arr));
+    }
+    if let Ok(frozenset) = obj.cast::<pyo3::types::PyFrozenSet>() {
+        let mut arr = Vec::new();
+        for item in frozenset.iter() {
             arr.push(py_to_value(&item)?);
         }
         return Ok(Value::Array(arr));
@@ -86,6 +119,47 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
 fn metadata_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyAny>> {
     let val = serde_json::to_value(meta).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     value_to_py(py, &val)
+}
+
+/// Convert a KVS record to a Python dict, decoding binary values to Python `bytes`.
+fn record_to_py(
+    py: Python<'_>,
+    record: &crawlee_storage::models::KeyValueStoreRecord,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+
+    let dict = PyDict::new(py);
+    dict.set_item("key", &record.key)?;
+    dict.set_item("content_type", &record.content_type)?;
+    dict.set_item("size", record.size)?;
+
+    // For binary (non-text, non-json, non-null) content types, decode the base64 value
+    // back to Python bytes.
+    let ct = &record.content_type;
+    let is_binary = ct != "application/x-none"
+        && ct != "application/json"
+        && !ct.starts_with("text/");
+
+    if is_binary {
+        if let Value::String(ref b64) = record.value {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(bytes) => {
+                    dict.set_item("value", pyo3::types::PyBytes::new(py, &bytes))?;
+                }
+                Err(_) => {
+                    // Fallback: return as string
+                    dict.set_item("value", value_to_py(py, &record.value)?)?;
+                }
+            }
+        } else {
+            dict.set_item("value", value_to_py(py, &record.value)?)?;
+        }
+    } else {
+        dict.set_item("value", value_to_py(py, &record.value)?)?;
+    }
+
+    Ok(dict.into_pyobject(py)?.into_any().unbind())
 }
 
 // ─── Dataset Client ─────────────────────────────────────────────────────────
@@ -304,7 +378,7 @@ impl FileSystemKeyValueStoreClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let record = client.get_value(&key).await.map_err(storage_err)?;
             Python::attach(|py| match record {
-                Some(r) => metadata_to_py(py, &r),
+                Some(r) => record_to_py(py, &r),
                 None => Ok(py.None()),
             })
         })
@@ -319,6 +393,15 @@ impl FileSystemKeyValueStoreClient {
         value: &Bound<'py, pyo3::PyAny>,
         content_type: Option<String>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        // If the Python value is bytes/bytearray and no content_type was given,
+        // default to application/octet-stream (not text/plain).
+        let is_bytes = value.is_instance_of::<pyo3::types::PyBytes>()
+            || value.is_instance_of::<pyo3::types::PyByteArray>();
+        let content_type = if is_bytes && content_type.is_none() {
+            Some("application/octet-stream".to_string())
+        } else {
+            content_type
+        };
         let val = py_to_value(value)?;
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

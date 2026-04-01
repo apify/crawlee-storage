@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+base64 = "0.22"
 crawlee-storage = { path = "../crawlee-storage" }
 pyo3 = "0.28"
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
