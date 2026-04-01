@@ -477,7 +477,7 @@ struct FileSystemRequestQueueClient {
 #[pymethods]
 impl FileSystemRequestQueueClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", state_loader=None, state_saver=None, state_clearer=None))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -485,73 +485,14 @@ impl FileSystemRequestQueueClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &str,
-        state_loader: Option<Py<PyAny>>,
-        state_saver: Option<Py<PyAny>>,
-        state_clearer: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
-
-        // Build persistence callbacks if all three are provided
-        let persistence = match (state_loader, state_saver, state_clearer) {
-            (Some(loader), Some(saver), Some(clearer)) => {
-                let loader: Arc<Py<PyAny>> = Arc::new(loader);
-                let saver: Arc<Py<PyAny>> = Arc::new(saver);
-                let clearer: Arc<Py<PyAny>> = Arc::new(clearer);
-
-                Some(crawlee_storage::request_queue::RqStatePersistence {
-                    load: Arc::new({
-                        let loader = loader.clone();
-                        move || {
-                            let loader = loader.clone();
-                            Box::pin(async move {
-                                let result: Option<Value> = Python::attach(|py| {
-                                    let coro = loader.call0(py)?;
-                                    // Convert the coroutine result
-                                    // For now, we'll handle this synchronously
-                                    // In a real implementation, we'd await the coroutine
-                                    let _ = coro;
-                                    Ok::<_, PyErr>(None)
-                                })
-                                .unwrap_or(None);
-                                result
-                            })
-                                as std::pin::Pin<
-                                    Box<dyn std::future::Future<Output = Option<Value>> + Send>,
-                                >
-                        }
-                    }),
-                    save: Arc::new({
-                        let _saver = saver.clone();
-                        move |_state: Value| {
-                            let _saver = _saver.clone();
-                            Box::pin(async move {
-                                // TODO: Call Python saver callback with state
-                            })
-                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                        }
-                    }),
-                    clear: Arc::new({
-                        let _clearer = clearer.clone();
-                        move || {
-                            let _clearer = _clearer.clone();
-                            Box::pin(async move {
-                                // TODO: Call Python clearer callback
-                            })
-                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-                        }
-                    }),
-                })
-            }
-            _ => None,
-        };
-
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
                 id,
                 name,
                 alias,
                 &storage_dir,
-                persistence,
             )
             .await
             .map_err(storage_err)?;

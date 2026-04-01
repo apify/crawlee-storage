@@ -1,8 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -10,6 +7,7 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::key_value_store::FileSystemKeyValueStoreClient;
 use crate::models::{
     AddRequestsResponse, ProcessedRequest, RequestQueueMetadata, RequestQueueState,
 };
@@ -22,18 +20,44 @@ const STORAGE_SUBDIR: &str = "request_queues";
 const DEFAULT_NAME: &str = "default";
 const MAX_REQUESTS_IN_CACHE: usize = 100_000;
 
-/// A boxed future that is `Send`.
-type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+/// Handles persisting RQ state to a key in the default KVS directory.
+struct StatePersistence {
+    kvs: FileSystemKeyValueStoreClient,
+    key: String,
+}
 
-/// Callbacks for persisting request queue state.
-/// The Python/JS side wires these to a KeyValueStore + event system.
-pub struct RqStatePersistence {
-    /// Load previously persisted state. Returns None if no prior state.
-    pub load: Arc<dyn Fn() -> BoxFuture<Option<Value>> + Send + Sync>,
-    /// Save state (called periodically and on shutdown).
-    pub save: Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>,
-    /// Clear persisted state.
-    pub clear: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>,
+impl StatePersistence {
+    /// Open (or create) the default KVS and build a state-persistence handle.
+    async fn open(storage_dir: &Path, queue_id: &str) -> Result<Self> {
+        let kvs =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir).await?;
+        Ok(Self {
+            kvs,
+            key: format!("__RQ_STATE_{queue_id}"),
+        })
+    }
+
+    async fn load(&self) -> Option<RequestQueueState> {
+        match self.kvs.get_value(&self.key).await {
+            Ok(Some(record)) => {
+                serde_json::from_value::<RequestQueueState>(record.value).ok()
+            }
+            _ => None,
+        }
+    }
+
+    async fn save(&self, state: &RequestQueueState) {
+        if let Ok(val) = serde_json::to_value(state) {
+            let _ = self
+                .kvs
+                .set_value(&self.key, val, Some("application/json".to_string()))
+                .await;
+        }
+    }
+
+    async fn clear(&self) {
+        let _ = self.kvs.delete_value(&self.key).await;
+    }
 }
 
 /// Internal state protected by a mutex.
@@ -64,7 +88,7 @@ struct InnerState {
 pub struct FileSystemRequestQueueClient {
     inner: Mutex<InnerState>,
     path: PathBuf,
-    persistence: Option<RqStatePersistence>,
+    persistence: StatePersistence,
 }
 
 impl FileSystemRequestQueueClient {
@@ -74,15 +98,17 @@ impl FileSystemRequestQueueClient {
     /// - `name`: Open by name (used as directory name, written to metadata).
     /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
-    /// - `persistence`: Optional callbacks for persisting queue state.
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
+    ///
+    /// Queue state is automatically persisted to the default key-value store
+    /// under the key `__RQ_STATE_{queue_id}`. Call [`persist_state`] from
+    /// the framework's event system to flush state periodically.
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
-        persistence: Option<RqStatePersistence>,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
 
@@ -114,20 +140,30 @@ impl FileSystemRequestQueueClient {
             meta
         };
 
-        // Load persisted queue state via callback, or use default
-        let queue_state = if let Some(ref p) = persistence {
-            let loaded = (p.load)().await;
-            match loaded {
-                Some(val) => serde_json::from_value::<RequestQueueState>(val).unwrap_or_default(),
-                None => RequestQueueState::default(),
-            }
-        } else {
-            RequestQueueState::default()
-        };
+        // Open the default KVS for state persistence, then load any prior state.
+        let persistence = StatePersistence::open(storage_dir, &metadata.base.id).await?;
+        let mut queue_state = persistence.load().await.unwrap_or_default();
 
-        // Build lookup sets from loaded state
-        let in_progress_set: HashSet<String> =
-            queue_state.in_progress_requests.iter().cloned().collect();
+        // After a restart, any previously in-progress requests are no longer
+        // being processed. Reclaim them back into the regular queue so they
+        // can be fetched again (matches Python master behaviour).
+        if !queue_state.in_progress_requests.is_empty() {
+            for key in queue_state.in_progress_requests.drain(..) {
+                if !queue_state.regular_requests.contains_key(&key)
+                    && !queue_state.forefront_requests.contains_key(&key)
+                {
+                    queue_state.sequence_counter += 1;
+                    let seq = queue_state.sequence_counter;
+                    queue_state
+                        .regular_requests
+                        .insert(key, Value::Number(seq.into()));
+                }
+            }
+        }
+
+        // Build lookup sets from (cleaned-up) loaded state.
+        // in_progress_set starts empty because we just reclaimed everything.
+        let in_progress_set: HashSet<String> = HashSet::new();
         let handled_set: HashSet<String> = queue_state.handled_requests.iter().cloned().collect();
 
         let client = Self {
@@ -168,9 +204,7 @@ impl FileSystemRequestQueueClient {
     /// Delete the entire queue directory.
     pub async fn drop_storage(&self) -> Result<()> {
         // Clear persisted state
-        if let Some(ref p) = self.persistence {
-            (p.clear)().await;
-        }
+        self.persistence.clear().await;
 
         if self.path.exists() {
             fs::remove_dir_all(&self.path).await?;
@@ -215,11 +249,8 @@ impl FileSystemRequestQueueClient {
         let json = json_dumps_value(&inner.metadata)?;
         atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
 
-        // Clear persisted state
-        if let Some(ref p) = self.persistence {
-            let state_val = serde_json::to_value(&inner.queue_state)?;
-            (p.save)(state_val).await;
-        }
+        // Persist the reset state
+        self.persistence.save(&inner.queue_state).await;
 
         Ok(())
     }
@@ -831,11 +862,7 @@ impl FileSystemRequestQueueClient {
     }
 
     async fn persist_state_inner(&self, inner: &InnerState) {
-        if let Some(ref p) = self.persistence {
-            if let Ok(val) = serde_json::to_value(&inner.queue_state) {
-                (p.save)(val).await;
-            }
-        }
+        self.persistence.save(&inner.queue_state).await;
     }
 }
 
@@ -849,7 +876,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -879,7 +906,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -907,7 +934,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -935,7 +962,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -967,7 +994,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1002,7 +1029,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1024,7 +1051,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1070,7 +1097,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1111,7 +1138,7 @@ mod tests {
         let storage_dir = temp_dir.path();
 
         // Create a queue and add requests
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1140,7 +1167,7 @@ mod tests {
         drop(client);
 
         // Reopen the same queue (no persistence — state starts empty, discovery runs)
-        let client2 = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client2 = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1160,7 +1187,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1206,7 +1233,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -1252,7 +1279,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
