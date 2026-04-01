@@ -12,14 +12,22 @@ fn fixup_async_stubs(path: &std::path::Path) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
     let mut output = String::with_capacity(content.len());
 
-    for line in content.lines() {
+    let lines: Vec<&str> = content.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
 
         if let Some(after_def) = trimmed.strip_prefix("def ") {
             // Extract method name: "foo(" -> "foo"
             let method_name = after_def.split('(').next().unwrap_or("");
 
-            let is_sync = SYNC_METHODS.contains(&method_name) || method_name.starts_with("__");
+            // Check if the previous non-empty line is a @property decorator
+            let is_property = (0..i)
+                .rev()
+                .find(|&j| !lines[j].trim().is_empty())
+                .is_some_and(|j| lines[j].trim() == "@property");
+
+            let is_sync =
+                SYNC_METHODS.contains(&method_name) || method_name.starts_with("__") || is_property;
 
             if !is_sync {
                 // Replace "def " with "async def " preserving indentation

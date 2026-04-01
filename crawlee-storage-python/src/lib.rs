@@ -120,6 +120,18 @@ impl FileSystemDatasetClient {
         })
     }
 
+    /// Path to the dataset directory.
+    #[getter]
+    fn path_to_dataset(&self) -> PathBuf {
+        self.inner.path().to_path_buf()
+    }
+
+    /// Path to the metadata file.
+    #[getter]
+    fn path_to_metadata(&self) -> PathBuf {
+        self.inner.metadata_path()
+    }
+
     #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
     fn get_metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
@@ -241,6 +253,18 @@ impl FileSystemKeyValueStoreClient {
                 inner: Arc::new(client),
             })
         })
+    }
+
+    /// Path to the key-value store directory.
+    #[getter]
+    fn path_to_kvs(&self) -> PathBuf {
+        self.inner.path().to_path_buf()
+    }
+
+    /// Path to the metadata file.
+    #[getter]
+    fn path_to_metadata(&self) -> PathBuf {
+        self.inner.metadata_path()
     }
 
     #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
@@ -457,6 +481,18 @@ impl FileSystemRequestQueueClient {
                 inner: Arc::new(client),
             })
         })
+    }
+
+    /// Path to the request queue directory.
+    #[getter]
+    fn path_to_rq(&self) -> PathBuf {
+        self.inner.path().to_path_buf()
+    }
+
+    /// Path to the metadata file.
+    #[getter]
+    fn path_to_metadata(&self) -> PathBuf {
+        self.inner.metadata_path()
     }
 
     #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]

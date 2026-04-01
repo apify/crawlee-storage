@@ -151,6 +151,11 @@ impl FileSystemRequestQueueClient {
         &self.path
     }
 
+    /// Path to the metadata file.
+    pub fn metadata_path(&self) -> PathBuf {
+        self.path.join(METADATA_FILENAME)
+    }
+
     /// Delete the entire queue directory.
     pub async fn drop_storage(&self) -> Result<()> {
         // Clear persisted state

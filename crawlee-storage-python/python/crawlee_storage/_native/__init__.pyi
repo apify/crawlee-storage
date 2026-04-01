@@ -2,6 +2,7 @@
 # ruff: noqa: E501, F401, F403, F405
 
 import builtins
+import pathlib
 import typing
 __all__ = [
     "FileSystemDatasetClient",
@@ -11,6 +12,16 @@ __all__ = [
 
 @typing.final
 class FileSystemDatasetClient:
+    @property
+    def path_to_dataset(self) -> pathlib.Path:
+        r"""
+        Path to the dataset directory.
+        """
+    @property
+    def path_to_metadata(self) -> pathlib.Path:
+        r"""
+        Path to the metadata file.
+        """
     @staticmethod
     async def open(id: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None, storage_dir: builtins.str = './storage') -> FileSystemDatasetClient: ...
     async def get_metadata(self) -> dict[str, typing.Any]: ...
@@ -22,6 +33,16 @@ class FileSystemDatasetClient:
 
 @typing.final
 class FileSystemKeyValueStoreClient:
+    @property
+    def path_to_kvs(self) -> pathlib.Path:
+        r"""
+        Path to the key-value store directory.
+        """
+    @property
+    def path_to_metadata(self) -> pathlib.Path:
+        r"""
+        Path to the metadata file.
+        """
     @staticmethod
     async def open(id: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None, storage_dir: builtins.str = './storage') -> FileSystemKeyValueStoreClient: ...
     async def get_metadata(self) -> dict[str, typing.Any]: ...
@@ -36,6 +57,16 @@ class FileSystemKeyValueStoreClient:
 
 @typing.final
 class FileSystemRequestQueueClient:
+    @property
+    def path_to_rq(self) -> pathlib.Path:
+        r"""
+        Path to the request queue directory.
+        """
+    @property
+    def path_to_metadata(self) -> pathlib.Path:
+        r"""
+        Path to the metadata file.
+        """
     @staticmethod
     async def open(id: typing.Optional[builtins.str] = None, name: typing.Optional[builtins.str] = None, storage_dir: builtins.str = './storage', state_loader: typing.Optional[typing.Any] = None, state_saver: typing.Optional[typing.Any] = None, state_clearer: typing.Optional[typing.Any] = None) -> FileSystemRequestQueueClient: ...
     async def get_metadata(self) -> dict[str, typing.Any]: ...
