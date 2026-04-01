@@ -1,0 +1,12 @@
+# Configuration for typos spell checker
+# https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = [
+    "*.lock",
+    "**/CHANGELOG.md",
+]
+
+[default.extend-words]
+# Rust module path component (serde_json::ser)
+ser = "ser"

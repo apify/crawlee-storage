@@ -1,0 +1,58 @@
+name: CI (main)
+
+on:
+  push:
+    branches:
+      - main
+    tags-ignore:
+      - "**" # Ignore all tags to avoid duplicate executions triggered by tag pushes.
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  code_checks:
+    name: Code checks
+    uses: ./.github/workflows/_check_code.yaml
+
+  changelog_update:
+    # Run this only for commits that would trigger a version bump.
+    if: >-
+      startsWith(github.event.head_commit.message, 'feat') ||
+      startsWith(github.event.head_commit.message, 'fix') ||
+      startsWith(github.event.head_commit.message, 'perf') ||
+      startsWith(github.event.head_commit.message, 'refactor') ||
+      startsWith(github.event.head_commit.message, 'style')
+    name: Changelog update
+    needs: [code_checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: apify/workflows/git-cliff-release@main
+        id: release_metadata
+        name: Prepare release metadata
+        with:
+          release_type: prerelease
+          existing_changelog_path: CHANGELOG.md
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Write changelog
+        uses: DamianReeves/write-file-action@master
+        with:
+          path: CHANGELOG.md
+          contents: ${{ steps.release_metadata.outputs.changelog }}
+          write-mode: overwrite
+
+      - name: Commit changelog
+        uses: EndBug/add-and-commit@v10
+        with:
+          add: CHANGELOG.md
+          message: "chore(release): Update changelog [skip ci]"
+          default_author: github_actions
