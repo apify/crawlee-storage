@@ -37,14 +37,18 @@ impl FileSystemDatasetClient {
     /// Open an existing dataset or create a new one.
     ///
     /// - `id`: Open by ID (scans directories for matching metadata).
-    /// - `name`: Open by name (used as directory name). Defaults to "default".
+    /// - `name`: Open by name (used as directory name, written to metadata).
+    /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
+    ///
+    /// At most one of `id`, `name`, or `alias` may be provided.
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &Path,
     ) -> Result<Self> {
-        validate_exclusive_args(&id, &name)?;
+        validate_exclusive_args(&id, &name, &alias)?;
 
         let path = if let Some(ref id_val) = id {
             // Find existing dataset by scanning metadata files
@@ -54,7 +58,11 @@ impl FileSystemDatasetClient {
                     StorageError::NotFound(format!("Dataset with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name.as_deref().unwrap_or(DEFAULT_NAME);
+            // alias determines directory name just like name does
+            let dir_name = name
+                .as_deref()
+                .or(alias.as_deref())
+                .unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
         };
 
@@ -65,7 +73,7 @@ impl FileSystemDatasetClient {
             let content = fs::read_to_string(&metadata_path).await?;
             serde_json::from_str::<DatasetMetadata>(&content)?
         } else {
-            // Create new dataset
+            // Create new dataset — only `name` goes into metadata, not alias
             let new_id = id.unwrap_or_else(|| crypto_random_object_id(17));
             let meta = DatasetMetadata::new(new_id, name);
             fs::create_dir_all(&path).await?;
@@ -283,7 +291,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemDatasetClient::open(None, None, storage_dir)
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -314,7 +322,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemDatasetClient::open(None, None, storage_dir)
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -348,7 +356,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemDatasetClient::open(None, None, storage_dir)
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -367,7 +375,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemDatasetClient::open(None, None, storage_dir)
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -383,23 +391,162 @@ mod tests {
         let storage_dir = temp_dir.path();
 
         // Create and populate
-        let client = FileSystemDatasetClient::open(None, Some("my-ds".to_string()), storage_dir)
-            .await
-            .unwrap();
+        let client =
+            FileSystemDatasetClient::open(None, Some("my-ds".to_string()), None, storage_dir)
+                .await
+                .unwrap();
         client.push_data(serde_json::json!({"x": 1})).await.unwrap();
 
         let id = client.get_metadata().await.base.id.clone();
 
         // Reopen by name
-        let client2 = FileSystemDatasetClient::open(None, Some("my-ds".to_string()), storage_dir)
-            .await
-            .unwrap();
+        let client2 =
+            FileSystemDatasetClient::open(None, Some("my-ds".to_string()), None, storage_dir)
+                .await
+                .unwrap();
         assert_eq!(client2.get_metadata().await.item_count, 1);
 
         // Reopen by id
-        let client3 = FileSystemDatasetClient::open(Some(id), None, storage_dir)
+        let client3 = FileSystemDatasetClient::open(Some(id), None, None, storage_dir)
             .await
             .unwrap();
         assert_eq!(client3.get_metadata().await.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_alias_creates_dir_but_metadata_name_is_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Open via alias
+        let client = FileSystemDatasetClient::open(
+            None,
+            None,
+            Some("my-alias".to_string()),
+            storage_dir,
+        )
+        .await
+        .unwrap();
+
+        // Directory should be named after the alias
+        assert!(storage_dir
+            .join("datasets")
+            .join("my-alias")
+            .exists());
+
+        // But metadata.name should be None
+        let meta = client.get_metadata().await;
+        assert!(
+            meta.base.name.is_none(),
+            "alias storage should have name=None in metadata"
+        );
+
+        // Push data and verify it works
+        client
+            .push_data(serde_json::json!({"x": 1}))
+            .await
+            .unwrap();
+        assert_eq!(client.get_metadata().await.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_alias_reopen_preserves_name_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Create via alias
+        let client = FileSystemDatasetClient::open(
+            None,
+            None,
+            Some("run-ds".to_string()),
+            storage_dir,
+        )
+        .await
+        .unwrap();
+
+        client
+            .push_data(serde_json::json!({"x": 1}))
+            .await
+            .unwrap();
+        let id = client.get_metadata().await.base.id.clone();
+
+        // Reopen by alias
+        let client2 = FileSystemDatasetClient::open(
+            None,
+            None,
+            Some("run-ds".to_string()),
+            storage_dir,
+        )
+        .await
+        .unwrap();
+        assert!(client2.get_metadata().await.base.name.is_none());
+        assert_eq!(client2.get_metadata().await.item_count, 1);
+
+        // Reopen by ID
+        let client3 = FileSystemDatasetClient::open(Some(id), None, None, storage_dir)
+            .await
+            .unwrap();
+        assert!(
+            client3.get_metadata().await.base.name.is_none(),
+            "reopening alias storage by ID should still have name=None"
+        );
+        assert_eq!(client3.get_metadata().await.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_name_vs_alias_difference() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Open via name
+        let named = FileSystemDatasetClient::open(
+            None,
+            Some("my-name".to_string()),
+            None,
+            storage_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            named.get_metadata().await.base.name.as_deref(),
+            Some("my-name"),
+        );
+
+        // Open via alias
+        let aliased = FileSystemDatasetClient::open(
+            None,
+            None,
+            Some("my-alias".to_string()),
+            storage_dir,
+        )
+        .await
+        .unwrap();
+        assert!(aliased.get_metadata().await.base.name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_args_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Providing both name and alias should fail
+        let result = FileSystemDatasetClient::open(
+            None,
+            Some("name".to_string()),
+            Some("alias".to_string()),
+            storage_dir,
+        )
+        .await;
+        assert!(result.is_err());
+
+        // Providing both id and alias should fail
+        let result = FileSystemDatasetClient::open(
+            Some("id".to_string()),
+            None,
+            Some("alias".to_string()),
+            storage_dir,
+        )
+        .await;
+        assert!(result.is_err());
     }
 }

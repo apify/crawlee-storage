@@ -134,14 +134,18 @@ pub fn infer_mime_type(value: &serde_json::Value) -> &'static str {
 
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
-pub fn validate_exclusive_args(id: &Option<String>, name: &Option<String>) -> Result<()> {
-    let count = [id.is_some(), name.is_some()]
+pub fn validate_exclusive_args(
+    id: &Option<String>,
+    name: &Option<String>,
+    alias: &Option<String>,
+) -> Result<()> {
+    let count = [id.is_some(), name.is_some(), alias.is_some()]
         .iter()
         .filter(|&&x| x)
         .count();
     if count > 1 {
         return Err(StorageError::InvalidArgs(
-            "At most one of 'id' or 'name' may be specified".to_string(),
+            "At most one of 'id', 'name', or 'alias' may be specified".to_string(),
         ));
     }
     Ok(())

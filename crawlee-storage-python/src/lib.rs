@@ -173,20 +173,25 @@ struct FileSystemDatasetClient {
 #[pymethods]
 impl FileSystemDatasetClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, storage_dir="./storage"))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
     #[gen_stub(override_return_type(type_repr = "FileSystemDatasetClient"))]
     fn open<'py>(
         py: Python<'py>,
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &str,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client =
-                crawlee_storage::dataset::FileSystemDatasetClient::open(id, name, &storage_dir)
-                    .await
-                    .map_err(storage_err)?;
+            let client = crawlee_storage::dataset::FileSystemDatasetClient::open(
+                id,
+                name,
+                alias,
+                &storage_dir,
+            )
+            .await
+            .map_err(storage_err)?;
             Ok(FileSystemDatasetClient {
                 inner: Arc::new(client),
             })
@@ -305,12 +310,13 @@ struct FileSystemKeyValueStoreClient {
 #[pymethods]
 impl FileSystemKeyValueStoreClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, storage_dir="./storage"))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
     #[gen_stub(override_return_type(type_repr = "FileSystemKeyValueStoreClient"))]
     fn open<'py>(
         py: Python<'py>,
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &str,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
@@ -318,6 +324,7 @@ impl FileSystemKeyValueStoreClient {
             let client = crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open(
                 id,
                 name,
+                alias,
                 &storage_dir,
             )
             .await
@@ -470,12 +477,13 @@ struct FileSystemRequestQueueClient {
 #[pymethods]
 impl FileSystemRequestQueueClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, storage_dir="./storage", state_loader=None, state_saver=None, state_clearer=None))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", state_loader=None, state_saver=None, state_clearer=None))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &str,
         state_loader: Option<Py<PyAny>>,
         state_saver: Option<Py<PyAny>>,
@@ -541,6 +549,7 @@ impl FileSystemRequestQueueClient {
             let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
                 id,
                 name,
+                alias,
                 &storage_dir,
                 persistence,
             )

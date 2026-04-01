@@ -34,12 +34,20 @@ pub struct FileSystemKeyValueStoreClient {
 
 impl FileSystemKeyValueStoreClient {
     /// Open an existing KVS or create a new one.
+    ///
+    /// - `id`: Open by ID (scans directories for matching metadata).
+    /// - `name`: Open by name (used as directory name, written to metadata).
+    /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
+    /// - `storage_dir`: Base storage directory (e.g., "./storage").
+    ///
+    /// At most one of `id`, `name`, or `alias` may be provided.
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &Path,
     ) -> Result<Self> {
-        validate_exclusive_args(&id, &name)?;
+        validate_exclusive_args(&id, &name, &alias)?;
 
         let path = if let Some(ref id_val) = id {
             find_storage_by_id(storage_dir, STORAGE_SUBDIR, id_val)
@@ -48,7 +56,10 @@ impl FileSystemKeyValueStoreClient {
                     StorageError::NotFound(format!("Key-value store with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name.as_deref().unwrap_or(DEFAULT_NAME);
+            let dir_name = name
+                .as_deref()
+                .or(alias.as_deref())
+                .unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
         };
 
@@ -58,6 +69,7 @@ impl FileSystemKeyValueStoreClient {
             let content = fs::read_to_string(&metadata_path).await?;
             serde_json::from_str::<KeyValueStoreMetadata>(&content)?
         } else {
+            // Only `name` goes into metadata, not alias
             let new_id = id.unwrap_or_else(|| crypto_random_object_id(17));
             let meta = KeyValueStoreMetadata::new(new_id, name);
             fs::create_dir_all(&path).await?;
@@ -382,7 +394,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -404,7 +416,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -427,7 +439,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -443,7 +455,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -462,7 +474,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -492,7 +504,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 
@@ -531,7 +543,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
 

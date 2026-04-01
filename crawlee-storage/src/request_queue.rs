@@ -69,13 +69,22 @@ pub struct FileSystemRequestQueueClient {
 
 impl FileSystemRequestQueueClient {
     /// Open an existing request queue or create a new one.
+    ///
+    /// - `id`: Open by ID (scans directories for matching metadata).
+    /// - `name`: Open by name (used as directory name, written to metadata).
+    /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
+    /// - `storage_dir`: Base storage directory (e.g., "./storage").
+    /// - `persistence`: Optional callbacks for persisting queue state.
+    ///
+    /// At most one of `id`, `name`, or `alias` may be provided.
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
+        alias: Option<String>,
         storage_dir: &Path,
         persistence: Option<RqStatePersistence>,
     ) -> Result<Self> {
-        validate_exclusive_args(&id, &name)?;
+        validate_exclusive_args(&id, &name, &alias)?;
 
         let path = if let Some(ref id_val) = id {
             find_storage_by_id(storage_dir, STORAGE_SUBDIR, id_val)
@@ -84,7 +93,10 @@ impl FileSystemRequestQueueClient {
                     StorageError::NotFound(format!("Request queue with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name.as_deref().unwrap_or(DEFAULT_NAME);
+            let dir_name = name
+                .as_deref()
+                .or(alias.as_deref())
+                .unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
         };
 
@@ -837,7 +849,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -867,7 +879,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -895,7 +907,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -923,7 +935,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -955,7 +967,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -990,7 +1002,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1012,7 +1024,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1058,7 +1070,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1099,7 +1111,7 @@ mod tests {
         let storage_dir = temp_dir.path();
 
         // Create a queue and add requests
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1128,7 +1140,7 @@ mod tests {
         drop(client);
 
         // Reopen the same queue (no persistence — state starts empty, discovery runs)
-        let client2 = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client2 = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1148,7 +1160,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1194,7 +1206,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
@@ -1240,7 +1252,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir, None)
             .await
             .unwrap();
 
