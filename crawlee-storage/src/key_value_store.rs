@@ -8,9 +8,8 @@ use tracing::warn;
 
 use crate::models::{KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata};
 use crate::utils::{
-    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id,
-    infer_mime_type, json_dumps, json_dumps_value, validate_exclusive_args, Result, StorageError,
-    METADATA_FILENAME,
+    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, infer_mime_type,
+    json_dumps, json_dumps_value, validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -142,8 +141,7 @@ impl FileSystemKeyValueStoreClient {
 
         // Read sidecar metadata
         let sidecar_content = fs::read_to_string(&sidecar_path).await?;
-        let record_meta: KeyValueStoreRecordMetadata =
-            serde_json::from_str(&sidecar_content)?;
+        let record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
 
         // Read raw bytes once, then parse based on content type
         let raw_bytes = fs::read(&value_path).await?;
@@ -314,15 +312,17 @@ impl FileSystemKeyValueStoreClient {
         }
 
         if content_type == "application/json" {
-            let text = std::str::from_utf8(raw_bytes)
-                .map_err(|e| StorageError::InvalidArgs(format!("Invalid UTF-8 in JSON value: {e}")))?;
+            let text = std::str::from_utf8(raw_bytes).map_err(|e| {
+                StorageError::InvalidArgs(format!("Invalid UTF-8 in JSON value: {e}"))
+            })?;
             let parsed = serde_json::from_str::<Value>(text)?;
             return Ok(parsed);
         }
 
         if content_type.starts_with("text/") {
-            let text = String::from_utf8(raw_bytes.to_vec())
-                .map_err(|e| StorageError::InvalidArgs(format!("Invalid UTF-8 in text value: {e}")))?;
+            let text = String::from_utf8(raw_bytes.to_vec()).map_err(|e| {
+                StorageError::InvalidArgs(format!("Invalid UTF-8 in text value: {e}"))
+            })?;
             return Ok(Value::String(text));
         }
 
@@ -431,10 +431,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .set_value("empty", Value::Null, None)
-            .await
-            .unwrap();
+        client.set_value("empty", Value::Null, None).await.unwrap();
 
         let record = client.get_value("empty").await.unwrap().unwrap();
         assert_eq!(record.content_type, "application/x-none");

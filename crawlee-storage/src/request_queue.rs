@@ -22,17 +22,18 @@ const STORAGE_SUBDIR: &str = "request_queues";
 const DEFAULT_NAME: &str = "default";
 const MAX_REQUESTS_IN_CACHE: usize = 100_000;
 
+/// A boxed future that is `Send`.
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
 /// Callbacks for persisting request queue state.
 /// The Python/JS side wires these to a KeyValueStore + event system.
 pub struct RqStatePersistence {
     /// Load previously persisted state. Returns None if no prior state.
-    pub load:
-        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync>,
+    pub load: Arc<dyn Fn() -> BoxFuture<Option<Value>> + Send + Sync>,
     /// Save state (called periodically and on shutdown).
-    pub save:
-        Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    pub save: Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>,
     /// Clear persisted state.
-    pub clear: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    pub clear: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>,
 }
 
 /// Internal state protected by a mutex.
@@ -80,9 +81,7 @@ impl FileSystemRequestQueueClient {
             find_storage_by_id(storage_dir, STORAGE_SUBDIR, id_val)
                 .await?
                 .ok_or_else(|| {
-                    StorageError::NotFound(format!(
-                        "Request queue with id '{id_val}' not found"
-                    ))
+                    StorageError::NotFound(format!("Request queue with id '{id_val}' not found"))
                 })?
         } else {
             let dir_name = name.as_deref().unwrap_or(DEFAULT_NAME);
@@ -107,8 +106,7 @@ impl FileSystemRequestQueueClient {
         let queue_state = if let Some(ref p) = persistence {
             let loaded = (p.load)().await;
             match loaded {
-                Some(val) => serde_json::from_value::<RequestQueueState>(val)
-                    .unwrap_or_default(),
+                Some(val) => serde_json::from_value::<RequestQueueState>(val).unwrap_or_default(),
                 None => RequestQueueState::default(),
             }
         } else {
@@ -118,8 +116,7 @@ impl FileSystemRequestQueueClient {
         // Build lookup sets from loaded state
         let in_progress_set: HashSet<String> =
             queue_state.in_progress_requests.iter().cloned().collect();
-        let handled_set: HashSet<String> =
-            queue_state.handled_requests.iter().cloned().collect();
+        let handled_set: HashSet<String> = queue_state.handled_requests.iter().cloned().collect();
 
         let client = Self {
             inner: Mutex::new(InnerState {
@@ -257,10 +254,7 @@ impl FileSystemRequestQueueClient {
             }
 
             // Check if already present (in regular or forefront queues)
-            let already_in_regular = inner
-                .queue_state
-                .regular_requests
-                .contains_key(&unique_key);
+            let already_in_regular = inner.queue_state.regular_requests.contains_key(&unique_key);
             let already_in_forefront = inner
                 .queue_state
                 .forefront_requests
@@ -288,10 +282,10 @@ impl FileSystemRequestQueueClient {
                 inner.queue_state.regular_requests.remove(&unique_key);
                 inner.queue_state.forefront_sequence_counter += 1;
                 let seq = inner.queue_state.forefront_sequence_counter;
-                inner.queue_state.forefront_requests.insert(
-                    unique_key.clone(),
-                    Value::Number(seq.into()),
-                );
+                inner
+                    .queue_state
+                    .forefront_requests
+                    .insert(unique_key.clone(), Value::Number(seq.into()));
                 // Add to front of cache
                 inner.request_cache.push_front(request);
                 inner.request_cache_needs_refresh = true;
@@ -300,18 +294,18 @@ impl FileSystemRequestQueueClient {
                 if forefront {
                     inner.queue_state.forefront_sequence_counter += 1;
                     let seq = inner.queue_state.forefront_sequence_counter;
-                    inner.queue_state.forefront_requests.insert(
-                        unique_key.clone(),
-                        Value::Number(seq.into()),
-                    );
+                    inner
+                        .queue_state
+                        .forefront_requests
+                        .insert(unique_key.clone(), Value::Number(seq.into()));
                     inner.request_cache.push_front(request);
                 } else {
                     inner.queue_state.sequence_counter += 1;
                     let seq = inner.queue_state.sequence_counter;
-                    inner.queue_state.regular_requests.insert(
-                        unique_key.clone(),
-                        Value::Number(seq.into()),
-                    );
+                    inner
+                        .queue_state
+                        .regular_requests
+                        .insert(unique_key.clone(), Value::Number(seq.into()));
                     inner.request_cache.push_back(request);
                 }
 
@@ -458,7 +452,10 @@ impl FileSystemRequestQueueClient {
         let now = Utc::now();
         let handled_at_str = now.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
         if let Value::Object(ref mut map) = request {
-            map.insert("handledAt".to_string(), Value::String(handled_at_str.clone()));
+            map.insert(
+                "handledAt".to_string(),
+                Value::String(handled_at_str.clone()),
+            );
             map.insert("handled_at".to_string(), Value::String(handled_at_str));
 
             // Advance crawlee request state from ERROR_HANDLER (5) to ERROR (6).
@@ -466,8 +463,9 @@ impl FileSystemRequestQueueClient {
             // error handler. Once that completes and the request is marked as handled,
             // the final state should be ERROR (6).
             if let Some(user_data) = map.get_mut("userData").and_then(|v| v.as_object_mut()) {
-                if let Some(crawlee) =
-                    user_data.get_mut("__crawlee").and_then(|v| v.as_object_mut())
+                if let Some(crawlee) = user_data
+                    .get_mut("__crawlee")
+                    .and_then(|v| v.as_object_mut())
                 {
                     if crawlee.get("state").and_then(|v| v.as_u64()) == Some(5) {
                         crawlee.insert("state".to_string(), Value::Number(6.into()));
@@ -556,18 +554,18 @@ impl FileSystemRequestQueueClient {
         if forefront {
             inner.queue_state.forefront_sequence_counter += 1;
             let seq = inner.queue_state.forefront_sequence_counter;
-            inner.queue_state.forefront_requests.insert(
-                unique_key.clone(),
-                Value::Number(seq.into()),
-            );
+            inner
+                .queue_state
+                .forefront_requests
+                .insert(unique_key.clone(), Value::Number(seq.into()));
             inner.request_cache.push_front(request);
         } else {
             inner.queue_state.sequence_counter += 1;
             let seq = inner.queue_state.sequence_counter;
-            inner.queue_state.regular_requests.insert(
-                unique_key.clone(),
-                Value::Number(seq.into()),
-            );
+            inner
+                .queue_state
+                .regular_requests
+                .insert(unique_key.clone(), Value::Number(seq.into()));
             inner.request_cache.push_back(request);
         }
 
@@ -699,18 +697,15 @@ impl FileSystemRequestQueueClient {
 
                             if is_handled {
                                 inner.handled_set.insert(unique_key.clone());
-                                inner
-                                    .queue_state
-                                    .handled_requests
-                                    .push(unique_key);
+                                inner.queue_state.handled_requests.push(unique_key);
                                 discovered_handled += 1;
                             } else {
                                 inner.queue_state.sequence_counter += 1;
                                 let seq = inner.queue_state.sequence_counter;
-                                inner.queue_state.regular_requests.insert(
-                                    unique_key,
-                                    Value::Number(seq.into()),
-                                );
+                                inner
+                                    .queue_state
+                                    .regular_requests
+                                    .insert(unique_key, Value::Number(seq.into()));
                                 discovered_pending += 1;
                             }
                         }
@@ -724,11 +719,7 @@ impl FileSystemRequestQueueClient {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to read request file {}: {}",
-                        file_path.display(),
-                        e
-                    );
+                    warn!("Failed to read request file {}: {}", file_path.display(), e);
                 }
             }
         }
@@ -846,10 +837,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         let requests = vec![serde_json::json!({
             "uniqueKey": "https://example.com",
@@ -857,10 +847,7 @@ mod tests {
             "method": "GET"
         })];
 
-        let response = client
-            .add_batch_of_requests(requests, false)
-            .await
-            .unwrap();
+        let response = client.add_batch_of_requests(requests, false).await.unwrap();
         assert_eq!(response.processed_requests.len(), 1);
         assert!(!response.processed_requests[0].was_already_present);
 
@@ -880,10 +867,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         let req = serde_json::json!({
             "uniqueKey": "https://example.com",
@@ -909,10 +895,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -927,10 +912,7 @@ mod tests {
             .unwrap();
 
         let request = client.fetch_next_request().await.unwrap().unwrap();
-        let result = client
-            .mark_request_as_handled(request)
-            .await
-            .unwrap();
+        let result = client.mark_request_as_handled(request).await.unwrap();
         assert!(result.is_some());
 
         assert!(client.is_empty().await);
@@ -941,10 +923,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -961,10 +942,7 @@ mod tests {
         let request = client.fetch_next_request().await.unwrap().unwrap();
 
         // Reclaim it
-        let result = client
-            .reclaim_request(request, false)
-            .await
-            .unwrap();
+        let result = client.reclaim_request(request, false).await.unwrap();
         assert!(result.is_some());
 
         // Should be fetchable again
@@ -977,10 +955,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -1013,10 +990,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         let accessed_before = client.get_metadata().await.base.accessed_at;
 
@@ -1036,10 +1012,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -1083,10 +1058,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         // Add regular request first
         client
@@ -1125,10 +1099,9 @@ mod tests {
         let storage_dir = temp_dir.path();
 
         // Create a queue and add requests
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -1155,10 +1128,9 @@ mod tests {
         drop(client);
 
         // Reopen the same queue (no persistence — state starts empty, discovery runs)
-        let client2 =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client2 = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         let meta2 = client2.get_metadata().await;
         assert_eq!(
@@ -1176,10 +1148,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         client
             .add_batch_of_requests(
@@ -1223,10 +1194,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         // Add a request with state=5 (ERROR_HANDLER) to simulate exhausted retries
         client
@@ -1270,10 +1240,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, storage_dir, None)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, storage_dir, None)
+            .await
+            .unwrap();
 
         // Add a request with state=1 (BEFORE_NAV) — normal successful processing
         client
@@ -1294,10 +1263,7 @@ mod tests {
             .unwrap();
 
         let request = client.fetch_next_request().await.unwrap().unwrap();
-        client
-            .mark_request_as_handled(request)
-            .await
-            .unwrap();
+        client.mark_request_as_handled(request).await.unwrap();
 
         let on_disk = client.get_request("normal-req").await.unwrap().unwrap();
         let state = on_disk["userData"]["__crawlee"]["state"].as_u64().unwrap();

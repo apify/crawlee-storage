@@ -50,7 +50,9 @@ impl FileSystemDatasetClient {
             // Find existing dataset by scanning metadata files
             find_storage_by_id(storage_dir, STORAGE_SUBDIR, id_val)
                 .await?
-                .ok_or_else(|| StorageError::NotFound(format!("Dataset with id '{id_val}' not found")))?
+                .ok_or_else(|| {
+                    StorageError::NotFound(format!("Dataset with id '{id_val}' not found"))
+                })?
         } else {
             let dir_name = name.as_deref().unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
@@ -221,7 +223,9 @@ impl FileSystemDatasetClient {
         skip_empty: bool,
     ) -> Result<Vec<Value>> {
         let effective_limit = limit.unwrap_or(usize::MAX);
-        let page = self.get_data(offset, effective_limit, desc, skip_empty).await?;
+        let page = self
+            .get_data(offset, effective_limit, desc, skip_empty)
+            .await?;
         Ok(page.items)
     }
 
@@ -348,10 +352,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .push_data(serde_json::json!({"x": 1}))
-            .await
-            .unwrap();
+        client.push_data(serde_json::json!({"x": 1})).await.unwrap();
         assert_eq!(client.get_metadata().await.item_count, 1);
 
         client.purge().await.unwrap();
@@ -370,10 +371,7 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .push_data(serde_json::json!({"x": 1}))
-            .await
-            .unwrap();
+        client.push_data(serde_json::json!({"x": 1})).await.unwrap();
 
         client.drop_storage().await.unwrap();
         assert!(!client.path().exists());
@@ -388,10 +386,7 @@ mod tests {
         let client = FileSystemDatasetClient::open(None, Some("my-ds".to_string()), storage_dir)
             .await
             .unwrap();
-        client
-            .push_data(serde_json::json!({"x": 1}))
-            .await
-            .unwrap();
+        client.push_data(serde_json::json!({"x": 1})).await.unwrap();
 
         let id = client.get_metadata().await.base.id.clone();
 

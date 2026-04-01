@@ -134,10 +134,7 @@ pub fn infer_mime_type(value: &serde_json::Value) -> &'static str {
 
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
-pub fn validate_exclusive_args(
-    id: &Option<String>,
-    name: &Option<String>,
-) -> Result<()> {
+pub fn validate_exclusive_args(id: &Option<String>, name: &Option<String>) -> Result<()> {
     let count = [id.is_some(), name.is_some()]
         .iter()
         .filter(|&&x| x)
@@ -181,7 +178,11 @@ pub async fn find_storage_by_id(
                 }
             }
             Err(e) => {
-                warn!("Failed to read metadata file {}: {}", metadata_path.display(), e);
+                warn!(
+                    "Failed to read metadata file {}: {}",
+                    metadata_path.display(),
+                    e
+                );
             }
         }
     }

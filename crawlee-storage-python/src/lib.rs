@@ -136,9 +136,8 @@ fn record_to_py(
     // For binary (non-text, non-json, non-null) content types, decode the base64 value
     // back to Python bytes.
     let ct = &record.content_type;
-    let is_binary = ct != "application/x-none"
-        && ct != "application/json"
-        && !ct.starts_with("text/");
+    let is_binary =
+        ct != "application/x-none" && ct != "application/json" && !ct.starts_with("text/");
 
     if is_binary {
         if let Value::String(ref b64) = record.value {
@@ -369,11 +368,7 @@ impl FileSystemKeyValueStoreClient {
     }
 
     #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
-    fn get_value<'py>(
-        &self,
-        py: Python<'py>,
-        key: String,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let record = client.get_value(&key).await.map_err(storage_err)?;
@@ -414,11 +409,7 @@ impl FileSystemKeyValueStoreClient {
     }
 
     #[gen_stub(override_return_type(type_repr = "None"))]
-    fn delete_value<'py>(
-        &self,
-        py: Python<'py>,
-        key: String,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    fn delete_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client.delete_value(&key).await.map_err(storage_err)?;
@@ -528,9 +519,7 @@ impl FileSystemRequestQueueClient {
                             Box::pin(async move {
                                 // TODO: Call Python saver callback with state
                             })
-                                as std::pin::Pin<
-                                    Box<dyn std::future::Future<Output = ()> + Send>,
-                                >
+                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
                         }
                     }),
                     clear: Arc::new({
@@ -540,9 +529,7 @@ impl FileSystemRequestQueueClient {
                             Box::pin(async move {
                                 // TODO: Call Python clearer callback
                             })
-                                as std::pin::Pin<
-                                    Box<dyn std::future::Future<Output = ()> + Send>,
-                                >
+                                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
                         }
                     }),
                 })
@@ -551,15 +538,14 @@ impl FileSystemRequestQueueClient {
         };
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client =
-                crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
-                    id,
-                    name,
-                    &storage_dir,
-                    persistence,
-                )
-                .await
-                .map_err(storage_err)?;
+            let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
+                id,
+                name,
+                &storage_dir,
+                persistence,
+            )
+            .await
+            .map_err(storage_err)?;
             Ok(FileSystemRequestQueueClient {
                 inner: Arc::new(client),
             })
@@ -700,9 +686,7 @@ impl FileSystemRequestQueueClient {
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
     fn is_empty<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(client.is_empty().await)
-        })
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(client.is_empty().await) })
     }
 
     #[gen_stub(override_return_type(type_repr = "None"))]
