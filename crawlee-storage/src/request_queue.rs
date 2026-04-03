@@ -29,8 +29,7 @@ struct StatePersistence {
 impl StatePersistence {
     /// Open (or create) the default KVS and build a state-persistence handle.
     async fn open(storage_dir: &Path, queue_id: &str) -> Result<Self> {
-        let kvs =
-            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir).await?;
+        let kvs = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir).await?;
         Ok(Self {
             kvs,
             key: format!("__RQ_STATE_{queue_id}"),
@@ -39,9 +38,7 @@ impl StatePersistence {
 
     async fn load(&self) -> Option<RequestQueueState> {
         match self.kvs.get_value(&self.key).await {
-            Ok(Some(record)) => {
-                serde_json::from_value::<RequestQueueState>(record.value).ok()
-            }
+            Ok(Some(record)) => serde_json::from_value::<RequestQueueState>(record.value).ok(),
             _ => None,
         }
     }
@@ -119,10 +116,7 @@ impl FileSystemRequestQueueClient {
                     StorageError::NotFound(format!("Request queue with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name
-                .as_deref()
-                .or(alias.as_deref())
-                .unwrap_or(DEFAULT_NAME);
+            let dir_name = name.as_deref().or(alias.as_deref()).unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
         };
 

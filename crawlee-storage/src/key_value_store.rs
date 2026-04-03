@@ -56,10 +56,7 @@ impl FileSystemKeyValueStoreClient {
                     StorageError::NotFound(format!("Key-value store with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name
-                .as_deref()
-                .or(alias.as_deref())
-                .unwrap_or(DEFAULT_NAME);
+            let dir_name = name.as_deref().or(alias.as_deref()).unwrap_or(DEFAULT_NAME);
             storage_dir.join(STORAGE_SUBDIR).join(dir_name)
         };
 
