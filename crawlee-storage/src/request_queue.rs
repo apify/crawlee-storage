@@ -1206,5 +1206,4 @@ mod tests {
             "is_empty() should return true after all requests are handled"
         );
     }
-
 }
