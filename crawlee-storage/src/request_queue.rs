@@ -668,10 +668,11 @@ impl FileSystemRequestQueueClient {
 
     async fn get_request_files(path: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        if !path.exists() {
-            return Ok(files);
-        }
-        let mut entries = fs::read_dir(path).await?;
+        let mut entries = match fs::read_dir(path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+            Err(e) => return Err(e.into()),
+        };
         while let Some(entry) = entries.next_entry().await? {
             let p = entry.path();
             if p.is_file() {

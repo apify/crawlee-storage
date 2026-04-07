@@ -110,16 +110,23 @@ impl FileSystemKeyValueStoreClient {
     pub async fn purge(&self) -> Result<()> {
         let mut meta = self.metadata.lock().await;
 
-        let mut entries = fs::read_dir(&self.path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name != METADATA_FILENAME {
-                        fs::remove_file(&path).await?;
+        match fs::read_dir(&self.path).await {
+            Ok(mut entries) => {
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name != METADATA_FILENAME {
+                                let _ = fs::remove_file(&path).await;
+                            }
+                        }
                     }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Directory doesn't exist yet — nothing to purge.
+            }
+            Err(e) => return Err(e.into()),
         }
 
         let now = Utc::now();
@@ -259,8 +266,13 @@ impl FileSystemKeyValueStoreClient {
         let mut results = Vec::new();
         let metadata_suffix = format!(".{METADATA_FILENAME}");
 
-        let mut entries = fs::read_dir(&self.path).await?;
         let mut sidecar_paths: Vec<PathBuf> = Vec::new();
+
+        let mut entries = match fs::read_dir(&self.path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(results),
+            Err(e) => return Err(e.into()),
+        };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
