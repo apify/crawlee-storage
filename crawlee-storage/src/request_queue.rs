@@ -38,7 +38,12 @@ impl StatePersistence {
 
     async fn load(&self) -> Option<RequestQueueState> {
         match self.kvs.get_value(&self.key).await {
-            Ok(Some(record)) => serde_json::from_value::<RequestQueueState>(record.value).ok(),
+            Ok(Some(record)) => match record.value {
+                crate::models::KvsValue::Json(v) => {
+                    serde_json::from_value::<RequestQueueState>(v).ok()
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -47,7 +52,11 @@ impl StatePersistence {
         if let Ok(val) = serde_json::to_value(state) {
             let _ = self
                 .kvs
-                .set_value(&self.key, val, Some("application/json".to_string()))
+                .set_value(
+                    &self.key,
+                    crate::models::KvsValue::Json(val),
+                    Some("application/json".to_string()),
+                )
                 .await;
         }
     }
