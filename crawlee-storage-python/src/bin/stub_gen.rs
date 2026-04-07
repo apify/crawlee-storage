@@ -2,7 +2,7 @@ use pyo3_stub_gen::Result;
 use std::path::PathBuf;
 
 /// Method names that should remain synchronous (not marked async).
-const SYNC_METHODS: &[&str] = &["get_public_url"];
+const SYNC_METHODS: &[&str] = &[];
 
 /// Post-process a generated `.pyi` stub file to mark methods as `async def`
 /// where appropriate. pyo3_stub_gen cannot detect async methods that use
