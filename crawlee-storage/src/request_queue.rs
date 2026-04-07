@@ -494,21 +494,6 @@ impl FileSystemRequestQueueClient {
                 Value::String(handled_at_str.clone()),
             );
             map.insert("handled_at".to_string(), Value::String(handled_at_str));
-
-            // Advance crawlee request state from ERROR_HANDLER (5) to ERROR (6).
-            // When all retries are exhausted, the framework sets state=5 and runs the
-            // error handler. Once that completes and the request is marked as handled,
-            // the final state should be ERROR (6).
-            if let Some(user_data) = map.get_mut("userData").and_then(|v| v.as_object_mut()) {
-                if let Some(crawlee) = user_data
-                    .get_mut("__crawlee")
-                    .and_then(|v| v.as_object_mut())
-                {
-                    if crawlee.get("state").and_then(|v| v.as_u64()) == Some(5) {
-                        crawlee.insert("state".to_string(), Value::Number(6.into()));
-                    }
-                }
-            }
         }
 
         // Write updated request file
@@ -1222,87 +1207,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_mark_handled_advances_error_handler_to_error_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        // Add a request with state=5 (ERROR_HANDLER) to simulate exhausted retries
-        client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "failing-req",
-                    "url": "https://example.com/fail",
-                    "method": "GET",
-                    "userData": {
-                        "__crawlee": {
-                            "state": 5
-                        }
-                    }
-                })],
-                false,
-            )
-            .await
-            .unwrap();
-
-        let request = client.fetch_next_request().await.unwrap().unwrap();
-
-        // Simulate: the error handler ran, now mark as handled
-        let result = client
-            .mark_request_as_handled(request.clone())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(result.was_already_handled);
-
-        // Read the request file back from disk and verify state was advanced to 6
-        let on_disk = client.get_request("failing-req").await.unwrap().unwrap();
-        let state = on_disk["userData"]["__crawlee"]["state"].as_u64().unwrap();
-        assert_eq!(
-            state, 6,
-            "mark_request_as_handled should advance state from ERROR_HANDLER(5) to ERROR(6)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mark_handled_does_not_change_normal_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        // Add a request with state=1 (BEFORE_NAV) — normal successful processing
-        client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "normal-req",
-                    "url": "https://example.com/ok",
-                    "method": "GET",
-                    "userData": {
-                        "__crawlee": {
-                            "state": 1
-                        }
-                    }
-                })],
-                false,
-            )
-            .await
-            .unwrap();
-
-        let request = client.fetch_next_request().await.unwrap().unwrap();
-        client.mark_request_as_handled(request).await.unwrap();
-
-        let on_disk = client.get_request("normal-req").await.unwrap().unwrap();
-        let state = on_disk["userData"]["__crawlee"]["state"].as_u64().unwrap();
-        assert_eq!(
-            state, 1,
-            "mark_request_as_handled should NOT change state when it's not ERROR_HANDLER(5)"
-        );
-    }
 }
