@@ -58,17 +58,6 @@ fn py_to_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Value> {
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Value::String(s));
     }
-    // Check for bytes/bytearray BEFORE list, but use isinstance to avoid matching lists
-    // of small ints (PyO3's extract::<Vec<u8>> happily converts [1, 2, 3] to bytes).
-    if obj.is_instance_of::<pyo3::types::PyBytes>()
-        || obj.is_instance_of::<pyo3::types::PyByteArray>()
-    {
-        if let Ok(bytes) = obj.extract::<Vec<u8>>() {
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            return Ok(Value::String(encoded));
-        }
-    }
     if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         let mut arr = Vec::new();
         for item in list.iter() {
@@ -127,11 +116,12 @@ fn metadata_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<
     value_to_py(py, &val)
 }
 
-/// Convert a KVS record to a Python dict, decoding binary values to Python `bytes`.
+/// Convert a KVS record to a Python dict, mapping [`KvsValue`] variants to native Python types.
 fn record_to_py(
     py: Python<'_>,
     record: &crawlee_storage::models::KeyValueStoreRecord,
 ) -> PyResult<Py<PyAny>> {
+    use crawlee_storage::models::KvsValue;
     use pyo3::IntoPyObject;
 
     let dict = PyDict::new(py);
@@ -139,29 +129,11 @@ fn record_to_py(
     dict.set_item("content_type", &record.content_type)?;
     dict.set_item("size", record.size)?;
 
-    // For binary (non-text, non-json, non-null) content types, decode the base64 value
-    // back to Python bytes.
-    let ct = &record.content_type;
-    let is_binary =
-        ct != "application/x-none" && ct != "application/json" && !ct.starts_with("text/");
-
-    if is_binary {
-        if let Value::String(ref b64) = record.value {
-            use base64::Engine;
-            match base64::engine::general_purpose::STANDARD.decode(b64) {
-                Ok(bytes) => {
-                    dict.set_item("value", pyo3::types::PyBytes::new(py, &bytes))?;
-                }
-                Err(_) => {
-                    // Fallback: return as string
-                    dict.set_item("value", value_to_py(py, &record.value)?)?;
-                }
-            }
-        } else {
-            dict.set_item("value", value_to_py(py, &record.value)?)?;
-        }
-    } else {
-        dict.set_item("value", value_to_py(py, &record.value)?)?;
+    match &record.value {
+        KvsValue::None => dict.set_item("value", py.None())?,
+        KvsValue::Json(v) => dict.set_item("value", value_to_py(py, v)?)?,
+        KvsValue::Text(s) => dict.set_item("value", s)?,
+        KvsValue::Binary(bytes) => dict.set_item("value", pyo3::types::PyBytes::new(py, bytes))?,
     }
 
     Ok(dict.into_pyobject(py)?.into_any().unbind())
@@ -401,20 +373,44 @@ impl FileSystemKeyValueStoreClient {
         value: &Bound<'py, pyo3::PyAny>,
         content_type: Option<String>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        // If the Python value is bytes/bytearray and no content_type was given,
-        // default to application/octet-stream (not text/plain).
+        use crawlee_storage::models::KvsValue;
+
+        // Convert Python value → KvsValue directly, no base64 intermediary.
         let is_bytes = value.is_instance_of::<pyo3::types::PyBytes>()
             || value.is_instance_of::<pyo3::types::PyByteArray>();
-        let content_type = if is_bytes && content_type.is_none() {
-            Some("application/octet-stream".to_string())
+
+        let (kvs_value, content_type) = if value.is_none() {
+            (KvsValue::None, content_type)
+        } else if is_bytes {
+            let bytes = value.extract::<Vec<u8>>()?;
+            let ct = content_type.or_else(|| Some("application/octet-stream".to_string()));
+            (KvsValue::Binary(bytes), ct)
+        } else if let Some(ref ct) = content_type {
+            if ct.starts_with("text/") {
+                // Caller explicitly requested text content type — extract as string.
+                let s: String = value
+                    .extract()
+                    .or_else(|_| value.str().and_then(|s| s.extract()))?;
+                (KvsValue::Text(s), content_type)
+            } else {
+                // Explicit content type that isn't text — treat value as JSON.
+                let val = py_to_value(value)?;
+                (KvsValue::Json(val), content_type)
+            }
         } else {
-            content_type
+            // No content type given, not bytes, not None — infer from Python type.
+            if let Ok(s) = value.extract::<String>() {
+                (KvsValue::Text(s), None)
+            } else {
+                let val = py_to_value(value)?;
+                (KvsValue::Json(val), None)
+            }
         };
-        let val = py_to_value(value)?;
+
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client
-                .set_value(&key, val, content_type)
+                .set_value(&key, kvs_value, content_type)
                 .await
                 .map_err(storage_err)?;
             Ok(())
