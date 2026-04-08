@@ -78,7 +78,7 @@ There is no `StorageClient` facade or trait in Rust. The three client structs ar
 
 **Request model**: Requests are `serde_json::Value` objects. The Rust code only accesses `uniqueKey` (for dedup and file naming) and `handledAt` (for marking as handled). Everything else passes through opaquely.
 
-**Request queue state persistence**: The `FileSystemRequestQueueClient` internally persists queue state to the default key-value store under the key `__RQ_STATE_{queue_id}`. This is handled automatically — no callback wiring needed from the binding layer.
+**Request queue state persistence**: The `FileSystemRequestQueueClient` uses a private `StatePersistence` struct that directly opens the default `FileSystemKeyValueStoreClient` to persist queue state (sequence counters, in-progress/handled sets) under the key `__RQ_STATE_{queue_id}`. The binding layer is responsible for calling `persist_state()` periodically (e.g. via the framework's event system). See [#12](https://github.com/apify/crawlee-storage/issues/12) for discussion about making this injectable.
 
 **KVS value model**: KVS record values use the `KvsValue` enum (`None`, `Json(Value)`, `Text(String)`, `Binary(Vec<u8>)`) instead of `serde_json::Value`. This avoids base64-encoding binary data at the core level — each binding layer converts `KvsValue` variants directly to native types (e.g. `Binary` → Python `bytes`, Node.js `Buffer`).
 
