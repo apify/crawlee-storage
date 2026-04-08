@@ -78,7 +78,9 @@ There is no `StorageClient` facade or trait in Rust. The three client structs ar
 
 **Request model**: Requests are `serde_json::Value` objects. The Rust code only accesses `uniqueKey` (for dedup and file naming) and `handledAt` (for marking as handled). Everything else passes through opaquely.
 
-**Request queue state persistence**: The `FileSystemRequestQueueClient` accepts an optional `RqStatePersistence` struct with three async callbacks (`load`, `save`, `clear`). The Python/JS binding layer wires these to a KeyValueStore + event system on their respective sides. This avoids a circular dependency (RQ -> KVS -> StorageClient -> RQ).
+**Request queue state persistence**: The `FileSystemRequestQueueClient` uses a private `StatePersistence` struct that directly opens the default `FileSystemKeyValueStoreClient` to persist queue state (sequence counters, in-progress/handled sets) under the key `__RQ_STATE_{queue_id}`. The binding layer is responsible for calling `persist_state()` periodically (e.g. via the framework's event system). See [#12](https://github.com/apify/crawlee-storage/issues/12) for discussion about making this injectable.
+
+**KVS value model**: KVS record values use the `KvsValue` enum (`None`, `Json(Value)`, `Text(String)`, `Binary(Vec<u8>)`) instead of `serde_json::Value`. This avoids base64-encoding binary data at the core level — each binding layer converts `KvsValue` variants directly to native types (e.g. `Binary` → Python `bytes`, Node.js `Buffer`).
 
 ### Filesystem Layout (must match Python exactly)
 
@@ -114,9 +116,10 @@ These must be preserved for drop-in compatibility with the Python `FileSystemSto
 
 ### Python Bindings
 
-- Uses **PyO3 0.24** with **pyo3-async-runtimes** (tokio feature) for native Python coroutines.
+- Uses **PyO3 0.28** with **pyo3-async-runtimes** (tokio feature) for native Python coroutines.
 - Each Rust client is wrapped in `Arc` so it can be cloned into async blocks (standard pattern for pyo3 async methods).
-- Data crosses the FFI boundary as Python dicts/lists, converted to/from `serde_json::Value` via `value_to_py` / `py_to_value` helper functions.
+- JSON data crosses the FFI boundary as Python dicts/lists, converted to/from `serde_json::Value` via `value_to_py` / `py_to_value` helper functions.
+- KVS binary values cross the FFI boundary as Python `bytes` ↔ `KvsValue::Binary(Vec<u8>)` directly — no base64 intermediary.
 - The compiled native module is `crawlee_storage._native`, re-exported by `crawlee_storage/__init__.py`.
 
 ### Node.js Bindings
@@ -144,7 +147,6 @@ Core library (`crawlee-storage`):
 - `thiserror` — error types
 - `tracing` — logging
 - `rand` — random ID generation
-- `base64` — binary value encoding in KVS
 
 Python bindings (`crawlee-storage-python`):
 - `pyo3` — Python FFI

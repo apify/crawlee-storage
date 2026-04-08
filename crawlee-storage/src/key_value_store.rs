@@ -6,10 +6,12 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::models::{KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata};
+use crate::models::{
+    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata, KvsValue,
+};
 use crate::utils::{
-    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, infer_mime_type,
-    json_dumps, json_dumps_value, validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
+    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps,
+    json_dumps_value, validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -108,16 +110,23 @@ impl FileSystemKeyValueStoreClient {
     pub async fn purge(&self) -> Result<()> {
         let mut meta = self.metadata.lock().await;
 
-        let mut entries = fs::read_dir(&self.path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name != METADATA_FILENAME {
-                        fs::remove_file(&path).await?;
+        match fs::read_dir(&self.path).await {
+            Ok(mut entries) => {
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name != METADATA_FILENAME {
+                                let _ = fs::remove_file(&path).await;
+                            }
+                        }
                     }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Directory doesn't exist yet — nothing to purge.
+            }
+            Err(e) => return Err(e.into()),
         }
 
         let now = Utc::now();
@@ -167,26 +176,35 @@ impl FileSystemKeyValueStoreClient {
 
     /// Set a value for a key.
     ///
-    /// The `value` is a JSON value:
-    /// - JSON null -> stored with content_type "application/x-none"
-    /// - JSON string -> stored as text
-    /// - Anything else -> stored as JSON
+    /// The `value` is a [`KvsValue`]:
+    /// - `KvsValue::None` → stored with content_type `"application/x-none"`
+    /// - `KvsValue::Json(v)` → stored as pretty-printed JSON
+    /// - `KvsValue::Text(s)` → stored as UTF-8 text
+    /// - `KvsValue::Binary(bytes)` → stored as raw bytes
     ///
-    /// If `content_type` is None, it's inferred from the value type.
+    /// If `content_type` is None, it's inferred from the value variant.
     pub async fn set_value(
         &self,
         key: &str,
-        value: Value,
+        value: KvsValue,
         content_type: Option<String>,
     ) -> Result<()> {
-        let content_type = content_type.unwrap_or_else(|| infer_mime_type(&value).to_string());
+        let content_type = content_type.unwrap_or_else(|| {
+            match &value {
+                KvsValue::None => "application/x-none",
+                KvsValue::Json(_) => "application/json",
+                KvsValue::Text(_) => "text/plain",
+                KvsValue::Binary(_) => "application/octet-stream",
+            }
+            .to_string()
+        });
 
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
         let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
 
-        // Serialize value to bytes based on content type
-        let data = self.serialize_value(&value, &content_type)?;
+        // Serialize value to bytes
+        let data = self.serialize_value(&value)?;
 
         // Write value file
         atomic_write(&value_path, &data).await?;
@@ -248,8 +266,13 @@ impl FileSystemKeyValueStoreClient {
         let mut results = Vec::new();
         let metadata_suffix = format!(".{METADATA_FILENAME}");
 
-        let mut entries = fs::read_dir(&self.path).await?;
         let mut sidecar_paths: Vec<PathBuf> = Vec::new();
+
+        let mut entries = match fs::read_dir(&self.path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(results),
+            Err(e) => return Err(e.into()),
+        };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -315,9 +338,9 @@ impl FileSystemKeyValueStoreClient {
 
     // ─── Private ────────────────────────────────────────────────────────────
 
-    fn parse_value(&self, raw_bytes: &[u8], content_type: &str) -> Result<Value> {
+    fn parse_value(&self, raw_bytes: &[u8], content_type: &str) -> Result<KvsValue> {
         if content_type == "application/x-none" {
-            return Ok(Value::Null);
+            return Ok(KvsValue::None);
         }
 
         if content_type == "application/json" {
@@ -325,58 +348,30 @@ impl FileSystemKeyValueStoreClient {
                 StorageError::InvalidArgs(format!("Invalid UTF-8 in JSON value: {e}"))
             })?;
             let parsed = serde_json::from_str::<Value>(text)?;
-            return Ok(parsed);
+            return Ok(KvsValue::Json(parsed));
         }
 
         if content_type.starts_with("text/") {
             let text = String::from_utf8(raw_bytes.to_vec()).map_err(|e| {
                 StorageError::InvalidArgs(format!("Invalid UTF-8 in text value: {e}"))
             })?;
-            return Ok(Value::String(text));
+            return Ok(KvsValue::Text(text));
         }
 
-        // Binary data — return as base64-encoded string.
-        // The binding layer decodes this back to native bytes (e.g. Python `bytes`).
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_bytes);
-        Ok(Value::String(encoded))
+        // Binary data — return raw bytes directly.
+        // Each binding layer converts to its native bytes type (Python bytes, Node Buffer, etc.).
+        Ok(KvsValue::Binary(raw_bytes.to_vec()))
     }
 
-    fn serialize_value(&self, value: &Value, content_type: &str) -> Result<Vec<u8>> {
-        if content_type == "application/x-none" {
-            return Ok(Vec::new());
-        }
-
-        if content_type == "application/json" {
-            let json = json_dumps(value)?;
-            return Ok(json.into_bytes());
-        }
-
-        if content_type.starts_with("text/") {
-            return match value {
-                Value::String(s) => Ok(s.as_bytes().to_vec()),
-                other => {
-                    let json = json_dumps(other)?;
-                    Ok(json.into_bytes())
-                }
-            };
-        }
-
-        // For binary content types, expect the value to be a base64-encoded string
-        // or just serialize it as JSON
+    fn serialize_value(&self, value: &KvsValue) -> Result<Vec<u8>> {
         match value {
-            Value::String(s) => {
-                // Try to decode as base64
-                use base64::Engine;
-                match base64::engine::general_purpose::STANDARD.decode(s) {
-                    Ok(bytes) => Ok(bytes),
-                    Err(_) => Ok(s.as_bytes().to_vec()),
-                }
-            }
-            other => {
-                let json = json_dumps(other)?;
+            KvsValue::None => Ok(Vec::new()),
+            KvsValue::Json(v) => {
+                let json = json_dumps(v)?;
                 Ok(json.into_bytes())
             }
+            KvsValue::Text(s) => Ok(s.as_bytes().to_vec()),
+            KvsValue::Binary(bytes) => Ok(bytes.clone()),
         }
     }
 }
@@ -397,7 +392,11 @@ mod tests {
 
         // Set a JSON value
         client
-            .set_value("my-key", serde_json::json!({"hello": "world"}), None)
+            .set_value(
+                "my-key",
+                KvsValue::Json(serde_json::json!({"hello": "world"})),
+                None,
+            )
             .await
             .unwrap();
 
@@ -405,7 +404,10 @@ mod tests {
         let record = client.get_value("my-key").await.unwrap().unwrap();
         assert_eq!(record.key, "my-key");
         assert_eq!(record.content_type, "application/json");
-        assert_eq!(record.value, serde_json::json!({"hello": "world"}));
+        match &record.value {
+            KvsValue::Json(v) => assert_eq!(v, &serde_json::json!({"hello": "world"})),
+            other => panic!("Expected KvsValue::Json, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -420,7 +422,7 @@ mod tests {
         client
             .set_value(
                 "greeting",
-                Value::String("hello".to_string()),
+                KvsValue::Text("hello".to_string()),
                 Some("text/plain".to_string()),
             )
             .await
@@ -428,7 +430,10 @@ mod tests {
 
         let record = client.get_value("greeting").await.unwrap().unwrap();
         assert_eq!(record.content_type, "text/plain");
-        assert_eq!(record.value, Value::String("hello".to_string()));
+        match &record.value {
+            KvsValue::Text(s) => assert_eq!(s, "hello"),
+            other => panic!("Expected KvsValue::Text, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -440,11 +445,14 @@ mod tests {
             .await
             .unwrap();
 
-        client.set_value("empty", Value::Null, None).await.unwrap();
+        client
+            .set_value("empty", KvsValue::None, None)
+            .await
+            .unwrap();
 
         let record = client.get_value("empty").await.unwrap().unwrap();
         assert_eq!(record.content_type, "application/x-none");
-        assert_eq!(record.value, Value::Null);
+        assert!(matches!(record.value, KvsValue::None));
     }
 
     #[tokio::test]
@@ -457,7 +465,7 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("key1", serde_json::json!(1), None)
+            .set_value("key1", KvsValue::Json(serde_json::json!(1)), None)
             .await
             .unwrap();
 
@@ -476,15 +484,15 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("alpha", serde_json::json!(1), None)
+            .set_value("alpha", KvsValue::Json(serde_json::json!(1)), None)
             .await
             .unwrap();
         client
-            .set_value("beta", serde_json::json!(2), None)
+            .set_value("beta", KvsValue::Json(serde_json::json!(2)), None)
             .await
             .unwrap();
         client
-            .set_value("gamma", serde_json::json!(3), None)
+            .set_value("gamma", KvsValue::Json(serde_json::json!(3)), None)
             .await
             .unwrap();
 
@@ -505,15 +513,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Store binary data as base64 (this is how the binding layer sends bytes)
+        // Store binary data directly — no base64 encoding needed
         let raw_bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x89, 0xFF];
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
 
         client
             .set_value(
                 "binary-key",
-                Value::String(b64),
+                KvsValue::Binary(raw_bytes.clone()),
                 Some("application/octet-stream".to_string()),
             )
             .await
@@ -524,14 +530,10 @@ mod tests {
         assert_eq!(record.content_type, "application/octet-stream");
         assert_eq!(record.size, Some(raw_bytes.len()));
 
-        // The value should be a base64-encoded string that decodes to the original bytes
-        if let Value::String(ref b64_out) = record.value {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(b64_out)
-                .unwrap();
-            assert_eq!(decoded, raw_bytes);
-        } else {
-            panic!("Expected base64 string value for binary content type");
+        // The value should be raw bytes, no base64 intermediary
+        match &record.value {
+            KvsValue::Binary(bytes) => assert_eq!(bytes, &raw_bytes),
+            other => panic!("Expected KvsValue::Binary, got {other:?}"),
         }
     }
 
@@ -545,7 +547,11 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("path/to/key with spaces", serde_json::json!("value"), None)
+            .set_value(
+                "path/to/key with spaces",
+                KvsValue::Text("value".to_string()),
+                None,
+            )
             .await
             .unwrap();
 
@@ -554,6 +560,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(record.value, serde_json::json!("value"));
+        match &record.value {
+            KvsValue::Text(s) => assert_eq!(s, "value"),
+            other => panic!("Expected KvsValue::Text, got {other:?}"),
+        }
     }
 }

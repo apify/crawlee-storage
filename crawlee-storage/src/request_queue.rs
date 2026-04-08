@@ -38,7 +38,12 @@ impl StatePersistence {
 
     async fn load(&self) -> Option<RequestQueueState> {
         match self.kvs.get_value(&self.key).await {
-            Ok(Some(record)) => serde_json::from_value::<RequestQueueState>(record.value).ok(),
+            Ok(Some(record)) => match record.value {
+                crate::models::KvsValue::Json(v) => {
+                    serde_json::from_value::<RequestQueueState>(v).ok()
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -47,7 +52,11 @@ impl StatePersistence {
         if let Ok(val) = serde_json::to_value(state) {
             let _ = self
                 .kvs
-                .set_value(&self.key, val, Some("application/json".to_string()))
+                .set_value(
+                    &self.key,
+                    crate::models::KvsValue::Json(val),
+                    Some("application/json".to_string()),
+                )
                 .await;
         }
     }
@@ -659,10 +668,11 @@ impl FileSystemRequestQueueClient {
 
     async fn get_request_files(path: &Path) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        if !path.exists() {
-            return Ok(files);
-        }
-        let mut entries = fs::read_dir(path).await?;
+        let mut entries = match fs::read_dir(path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+            Err(e) => return Err(e.into()),
+        };
         while let Some(entry) = entries.next_entry().await? {
             let p = entry.path();
             if p.is_file() {

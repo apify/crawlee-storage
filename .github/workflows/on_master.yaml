@@ -19,7 +19,7 @@ jobs:
     name: Code checks
     uses: ./.github/workflows/_check_code.yaml
 
-  changelog_update:
+  release_prepare:
     # Run this only for commits that would trigger a version bump.
     if: >-
       startsWith(github.event.head_commit.message, 'feat') ||
@@ -27,11 +27,13 @@ jobs:
       startsWith(github.event.head_commit.message, 'perf') ||
       startsWith(github.event.head_commit.message, 'refactor') ||
       startsWith(github.event.head_commit.message, 'style')
-    name: Changelog update
+    name: Release prepare
     needs: [code_checks]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      version_number: ${{ steps.release_metadata.outputs.version_number }}
+      tag_name: ${{ steps.release_metadata.outputs.tag_name }}
+      changelog: ${{ steps.release_metadata.outputs.changelog }}
     steps:
       - uses: apify/workflows/git-cliff-release@main
         id: release_metadata
@@ -40,19 +42,28 @@ jobs:
           release_type: prerelease
           existing_changelog_path: CHANGELOG.md
 
+  changelog_update:
+    name: Changelog update
+    needs: [release_prepare]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
       - name: Write changelog
         uses: DamianReeves/write-file-action@master
         with:
           path: CHANGELOG.md
-          contents: ${{ steps.release_metadata.outputs.changelog }}
+          contents: ${{ needs.release_prepare.outputs.changelog }}
           write-mode: overwrite
 
       - name: Commit changelog
-        uses: EndBug/add-and-commit@v10
+        uses: EndBug/add-and-commit@v9
         with:
-          add: CHANGELOG.md
+          author_name: github-actions[bot]
+          author_email: 41898282+github-actions[bot]@users.noreply.github.com
           message: "chore(release): Update changelog [skip ci]"
-          default_author: github_actions
