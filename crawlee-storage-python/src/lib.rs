@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::define_stub_info_gatherer;
@@ -112,7 +112,13 @@ fn py_to_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Value> {
 }
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+    use crawlee_storage::utils::StorageError;
+    match e {
+        StorageError::Io(e) => PyOSError::new_err(e.to_string()),
+        StorageError::Json(e) => PyValueError::new_err(e.to_string()),
+        StorageError::InvalidArgs(msg) => PyValueError::new_err(msg),
+        StorageError::NotFound(msg) => PyFileNotFoundError::new_err(msg),
+    }
 }
 
 /// Convert a serde_json metadata struct to a Python dict.
