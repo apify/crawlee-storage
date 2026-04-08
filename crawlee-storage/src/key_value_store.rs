@@ -322,7 +322,7 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Get a file:// URL for a key.
-    pub fn get_public_url(&self, key: &str) -> String {
+    pub async fn get_public_url(&self, key: &str) -> String {
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
         format!("file://{}", value_path.display())
