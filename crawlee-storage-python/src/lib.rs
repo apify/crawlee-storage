@@ -450,16 +450,8 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "builtins.str"))]
-    fn get_public_url<'py>(
-        &self,
-        py: Python<'py>,
-        key: String,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(client.get_public_url(&key).await)
-        })
+    fn get_public_url(&self, key: String) -> String {
+        self.inner.get_public_url(&key)
     }
 
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
