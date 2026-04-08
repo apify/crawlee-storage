@@ -246,7 +246,11 @@ impl FileSystemDatasetClient {
 
     async fn get_sorted_data_files(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        let mut entries = fs::read_dir(&self.path).await?;
+        let mut entries = match fs::read_dir(&self.path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+            Err(e) => return Err(e.into()),
+        };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
