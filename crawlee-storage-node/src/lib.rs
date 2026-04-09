@@ -10,20 +10,53 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     napi::Error::from_reason(e.to_string())
 }
 
-/// Convert a serde_json metadata struct to a JS-friendly serde_json::Value
-/// (napi's serde-json feature handles Value <-> JsObject automatically).
-fn metadata_to_value<T: serde::Serialize>(meta: &T) -> napi::Result<Value> {
-    serde_json::to_value(meta).map_err(|e| napi::Error::from_reason(e.to_string()))
+/// Convert a snake_case key to camelCase.
+fn snake_to_camel(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = false;
+    for ch in s.chars() {
+        if ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
-/// Convert a KVS record to a plain JS object.
+/// Recursively rename all object keys from snake_case to camelCase.
+fn to_camel_case_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let new_map: serde_json::Map<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| (snake_to_camel(&k), to_camel_case_keys(v)))
+                .collect();
+            Value::Object(new_map)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(to_camel_case_keys).collect()),
+        other => other,
+    }
+}
+
+/// Convert a serde_json metadata struct to a JS-friendly serde_json::Value
+/// with camelCase keys (napi's serde-json feature handles Value <-> JsObject automatically).
+fn metadata_to_value<T: serde::Serialize>(meta: &T) -> napi::Result<Value> {
+    let val = serde_json::to_value(meta).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(to_camel_case_keys(val))
+}
+
+/// Convert a KVS record to a plain JS object with camelCase keys.
 fn record_to_value(record: &crawlee_storage::models::KeyValueStoreRecord) -> napi::Result<Value> {
     use crawlee_storage::models::KvsValue;
 
     let mut map = serde_json::Map::new();
     map.insert("key".to_string(), Value::String(record.key.clone()));
     map.insert(
-        "content_type".to_string(),
+        "contentType".to_string(),
         Value::String(record.content_type.clone()),
     );
     map.insert(
@@ -45,9 +78,6 @@ fn record_to_value(record: &crawlee_storage::models::KeyValueStoreRecord) -> nap
             map.insert("value".to_string(), Value::String(s.clone()));
         }
         KvsValue::Binary(bytes) => {
-            // Binary data is encoded as a JSON array of numbers.
-            // The JS wrapper will convert this to a Buffer for the caller.
-            // We use a special marker so we can detect it on the JS side.
             let arr: Vec<Value> = bytes.iter().map(|b| Value::Number((*b).into())).collect();
             map.insert("value".to_string(), Value::Array(arr));
             map.insert("__binary__".to_string(), Value::Bool(true));

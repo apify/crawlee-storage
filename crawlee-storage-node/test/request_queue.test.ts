@@ -31,8 +31,8 @@ describe('FileSystemRequestQueueClient', () => {
             false,
         );
 
-        expect(response.processed_requests.length).toBe(1);
-        expect(response.processed_requests[0].was_already_present).toBe(false);
+        expect(response.processedRequests.length).toBe(1);
+        expect(response.processedRequests[0].wasAlreadyPresent).toBe(false);
 
         // Fetch the request
         const fetched = await client.fetchNextRequest();
@@ -56,7 +56,7 @@ describe('FileSystemRequestQueueClient', () => {
         await client.addBatchOfRequests([req], false);
         const response = await client.addBatchOfRequests([req], false);
 
-        expect(response.processed_requests[0].was_already_present).toBe(true);
+        expect(response.processedRequests[0].wasAlreadyPresent).toBe(true);
     });
 
     it('should mark request as handled', async () => {
@@ -211,12 +211,12 @@ describe('FileSystemRequestQueueClient', () => {
         );
 
         const meta = await client.getMetadata();
-        expect(meta.total_request_count).toBe(2);
+        expect(meta.totalRequestCount).toBe(2);
 
         await client.purge();
 
         const metaAfter = await client.getMetadata();
-        expect(metaAfter.total_request_count).toBe(0);
+        expect(metaAfter.totalRequestCount).toBe(0);
         expect(await client.isEmpty()).toBe(true);
     });
 
@@ -258,13 +258,13 @@ describe('FileSystemRequestQueueClient', () => {
         );
 
         const meta = await client.getMetadata();
-        expect(meta.total_request_count).toBe(2);
+        expect(meta.totalRequestCount).toBe(2);
 
         // Reopen
         const client2 = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
         const meta2 = await client2.getMetadata();
-        expect(meta2.total_request_count).toBe(2);
-        expect(meta2.pending_request_count).toBe(2);
+        expect(meta2.totalRequestCount).toBe(2);
+        expect(meta2.pendingRequestCount).toBe(2);
     });
 
     it('should return metadata with correct fields', async () => {
@@ -272,13 +272,13 @@ describe('FileSystemRequestQueueClient', () => {
 
         const meta = await client.getMetadata();
         expect(meta.id).toBeTruthy();
-        expect(meta.created_at).toBeTruthy();
-        expect(meta.modified_at).toBeTruthy();
-        expect(meta.accessed_at).toBeTruthy();
-        expect(meta.had_multiple_clients).toBe(false);
-        expect(meta.handled_request_count).toBe(0);
-        expect(meta.pending_request_count).toBe(0);
-        expect(meta.total_request_count).toBe(0);
+        expect(meta.createdAt).toBeTruthy();
+        expect(meta.modifiedAt).toBeTruthy();
+        expect(meta.accessedAt).toBeTruthy();
+        expect(meta.hadMultipleClients).toBe(false);
+        expect(meta.handledRequestCount).toBe(0);
+        expect(meta.pendingRequestCount).toBe(0);
+        expect(meta.totalRequestCount).toBe(0);
     });
 
     it('should handle alias vs name correctly', async () => {

@@ -24,7 +24,7 @@ describe('FileSystemDatasetClient', () => {
         await client.pushData({ name: 'Alice', age: 30 });
 
         const meta = await client.getMetadata();
-        expect(meta.item_count).toBe(1);
+        expect(meta.itemCount).toBe(1);
 
         // Push multiple items
         await client.pushData([
@@ -33,7 +33,7 @@ describe('FileSystemDatasetClient', () => {
         ]);
 
         const meta2 = await client.getMetadata();
-        expect(meta2.item_count).toBe(3);
+        expect(meta2.itemCount).toBe(3);
     });
 
     it('should paginate get_data', async () => {
@@ -65,10 +65,10 @@ describe('FileSystemDatasetClient', () => {
         const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         await client.pushData({ x: 1 });
-        expect((await client.getMetadata()).item_count).toBe(1);
+        expect((await client.getMetadata()).itemCount).toBe(1);
 
         await client.purge();
-        expect((await client.getMetadata()).item_count).toBe(0);
+        expect((await client.getMetadata()).itemCount).toBe(0);
 
         // Metadata file should still exist
         expect(existsSync(client.pathToMetadata)).toBe(true);
@@ -92,11 +92,11 @@ describe('FileSystemDatasetClient', () => {
 
         // Reopen by name
         const client2 = await FileSystemDatasetClient.open(null, 'my-ds', null, storageDir);
-        expect((await client2.getMetadata()).item_count).toBe(1);
+        expect((await client2.getMetadata()).itemCount).toBe(1);
 
         // Reopen by id
         const client3 = await FileSystemDatasetClient.open(id, null, null, storageDir);
-        expect((await client3.getMetadata()).item_count).toBe(1);
+        expect((await client3.getMetadata()).itemCount).toBe(1);
     });
 
     it('should handle alias vs name correctly', async () => {

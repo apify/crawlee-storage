@@ -1,10 +1,10 @@
 export interface DatasetMetadata {
     id: string;
     name: string | null;
-    accessed_at: string;
-    created_at: string;
-    modified_at: string;
-    item_count: number;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
+    itemCount: number;
 }
 
 export interface DatasetItemsListPage {
@@ -19,14 +19,14 @@ export interface DatasetItemsListPage {
 export interface KeyValueStoreMetadata {
     id: string;
     name: string | null;
-    accessed_at: string;
-    created_at: string;
-    modified_at: string;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
 }
 
 export interface KeyValueStoreRecord {
     key: string;
-    content_type: string;
+    contentType: string;
     size: number | null;
     value: unknown;
     /** Present and true when value is binary (an array of byte values) */
@@ -35,30 +35,30 @@ export interface KeyValueStoreRecord {
 
 export interface KeyValueStoreRecordMetadata {
     key: string;
-    content_type: string;
+    contentType: string;
     size: number | null;
 }
 
 export interface RequestQueueMetadata {
     id: string;
     name: string | null;
-    accessed_at: string;
-    created_at: string;
-    modified_at: string;
-    had_multiple_clients: boolean;
-    handled_request_count: number;
-    pending_request_count: number;
-    total_request_count: number;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
+    hadMultipleClients: boolean;
+    handledRequestCount: number;
+    pendingRequestCount: number;
+    totalRequestCount: number;
 }
 
 export interface ProcessedRequest {
     id: string | null;
-    unique_key: string;
-    was_already_present: boolean;
-    was_already_handled: boolean;
+    uniqueKey: string;
+    wasAlreadyPresent: boolean;
+    wasAlreadyHandled: boolean;
 }
 
 export interface AddRequestsResponse {
-    processed_requests: ProcessedRequest[];
-    unprocessed_requests: unknown[];
+    processedRequests: ProcessedRequest[];
+    unprocessedRequests: unknown[];
 }

@@ -25,7 +25,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         const record = await client.getValue('my-key');
         expect(record).not.toBeNull();
         expect(record!.key).toBe('my-key');
-        expect(record!.content_type).toBe('application/json');
+        expect(record!.contentType).toBe('application/json');
         expect(record!.value).toEqual({ hello: 'world' });
     });
 
@@ -36,7 +36,7 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         const record = await client.getValue('greeting');
         expect(record).not.toBeNull();
-        expect(record!.content_type).toBe('text/plain');
+        expect(record!.contentType).toBe('text/plain');
         expect(record!.value).toBe('hello');
     });
 
@@ -47,7 +47,7 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         const record = await client.getValue('empty');
         expect(record).not.toBeNull();
-        expect(record!.content_type).toBe('application/x-none');
+        expect(record!.contentType).toBe('application/x-none');
         expect(record!.value).toBeNull();
     });
 
@@ -76,7 +76,7 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         const record = await client.getValue('binary-key');
         expect(record).not.toBeNull();
-        expect(record!.content_type).toBe('application/octet-stream');
+        expect(record!.contentType).toBe('application/octet-stream');
 
         // Binary values come back with __binary__ marker
         expect(record!.__binary__).toBe(true);
