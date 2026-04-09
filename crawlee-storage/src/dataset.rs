@@ -6,7 +6,7 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::models::{DatasetItemsListPage, DatasetMetadata};
+use crate::models::{DatasetItemsListPage, DatasetItemsPage, DatasetMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
     validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
@@ -218,20 +218,39 @@ impl FileSystemDatasetClient {
         })
     }
 
-    /// Iterate over dataset items one by one.
-    /// Returns a Vec of items (the binding layer converts this to an async iterator).
-    pub async fn iterate_items(
+    /// Fetch the next page of dataset items for lazy iteration.
+    ///
+    /// Returns a [`DatasetItemsPage`] containing items and a flag indicating
+    /// whether more items are available. The binding layer should call this
+    /// repeatedly, advancing `offset` by the number of items received, until
+    /// `has_more` is `false`.
+    ///
+    /// `page_size` controls how many items are read per call (default 1000).
+    pub async fn iterate_items_page(
         &self,
         offset: usize,
         limit: Option<usize>,
+        page_size: usize,
         desc: bool,
         skip_empty: bool,
-    ) -> Result<Vec<Value>> {
-        let effective_limit = limit.unwrap_or(usize::MAX);
-        let page = self
-            .get_data(offset, effective_limit, desc, skip_empty)
-            .await?;
-        Ok(page.items)
+    ) -> Result<DatasetItemsPage> {
+        // The effective per-call limit is the smaller of page_size and the
+        // remaining items the caller still wants.
+        let fetch_limit = match limit {
+            Some(remaining) => page_size.min(remaining),
+            None => page_size,
+        };
+
+        let page = self.get_data(offset, fetch_limit, desc, skip_empty).await?;
+
+        let returned = page.items.len();
+        let has_more =
+            (offset + returned) < page.total && limit.is_none_or(|remaining| returned < remaining);
+
+        Ok(DatasetItemsPage {
+            items: page.items,
+            has_more,
+        })
     }
 
     // ─── Private ────────────────────────────────────────────────────────────
@@ -494,6 +513,83 @@ mod tests {
                 .await
                 .unwrap();
         assert!(aliased.get_metadata().await.base.name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iterate_items_page() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        for i in 1..=5 {
+            client
+                .push_data(serde_json::json!({"index": i}))
+                .await
+                .unwrap();
+        }
+
+        // Fetch all at once (large page_size)
+        let page = client
+            .iterate_items_page(0, None, 1000, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 5);
+        assert!(!page.has_more);
+
+        // Paginate with page_size=2
+        let page1 = client
+            .iterate_items_page(0, None, 2, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+        assert_eq!(page1.items[0]["index"], 1);
+        assert_eq!(page1.items[1]["index"], 2);
+
+        // Second page
+        let page2 = client
+            .iterate_items_page(2, None, 2, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page2.items.len(), 2);
+        assert!(page2.has_more);
+        assert_eq!(page2.items[0]["index"], 3);
+
+        // Third page (last)
+        let page3 = client
+            .iterate_items_page(4, None, 2, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page3.items.len(), 1);
+        assert!(!page3.has_more);
+        assert_eq!(page3.items[0]["index"], 5);
+
+        // With overall limit=3, page_size=2
+        let page1 = client
+            .iterate_items_page(0, Some(3), 2, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+
+        let page2 = client
+            .iterate_items_page(2, Some(1), 2, false, false)
+            .await
+            .unwrap();
+        assert_eq!(page2.items.len(), 1);
+        assert!(!page2.has_more);
+
+        // Descending
+        let page = client
+            .iterate_items_page(0, None, 3, true, false)
+            .await
+            .unwrap();
+        assert_eq!(page.items[0]["index"], 5);
+        assert_eq!(page.items[2]["index"], 3);
+        assert!(page.has_more);
     }
 
     #[tokio::test]
