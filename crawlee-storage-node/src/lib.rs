@@ -280,12 +280,14 @@ impl FileSystemKeyValueStoreClient {
         storage_dir: Option<String>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
-        let client =
-            crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open(
-                id, name, alias, &storage_dir,
-            )
-            .await
-            .map_err(storage_err)?;
+        let client = crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open(
+            id,
+            name,
+            alias,
+            &storage_dir,
+        )
+        .await
+        .map_err(storage_err)?;
         Ok(Self {
             inner: Arc::new(client),
         })
@@ -501,12 +503,14 @@ impl FileSystemRequestQueueClient {
         storage_dir: Option<String>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
-        let client =
-            crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
-                id, name, alias, &storage_dir,
-            )
-            .await
-            .map_err(storage_err)?;
+        let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
+            id,
+            name,
+            alias,
+            &storage_dir,
+        )
+        .await
+        .map_err(storage_err)?;
         Ok(Self {
             inner: Arc::new(client),
         })
