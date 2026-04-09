@@ -13,3 +13,20 @@ license = "Apache-2.0"
 features = ["extension-module"]
 python-source = "python"
 module-name = "crawlee_storage._native"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "W",   # pycodestyle warnings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*.pyi" = ["E501", "F401", "F403", "F405"]

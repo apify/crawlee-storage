@@ -29,6 +29,22 @@ jobs:
       - name: Check spelling with typos
         uses: crate-ci/typos@v1
 
+  python_ruff_check:
+    name: Python lint & format check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crawlee-storage-python
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install ruff
+        run: pipx install ruff
+      - name: Check formatting
+        run: ruff format --check .
+      - name: Check linting
+        run: ruff check .
+
   rust_fmt_check:
     name: Format check
     runs-on: ubuntu-latest
