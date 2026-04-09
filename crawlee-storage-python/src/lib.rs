@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
@@ -139,6 +142,168 @@ fn record_to_py(
     Ok(dict.into_pyobject(py)?.into_any().unbind())
 }
 
+// ─── Dataset Item Iterator ──────────────────────────────────────────────────
+
+const DEFAULT_PAGE_SIZE: usize = 1000;
+
+struct DatasetItemIteratorState {
+    client: Arc<crawlee_storage::dataset::FileSystemDatasetClient>,
+    offset: usize,
+    remaining_limit: Option<usize>,
+    desc: bool,
+    skip_empty: bool,
+    page_size: usize,
+    buffer: Vec<Value>,
+    buf_index: usize,
+    done: bool,
+}
+
+#[gen_stub_pyclass]
+#[pyclass]
+struct DatasetItemIterator {
+    state: Arc<Mutex<DatasetItemIteratorState>>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl DatasetItemIterator {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut st = state.lock().await;
+
+            // If we still have buffered items, return the next one.
+            if st.buf_index < st.buffer.len() {
+                let item = st.buffer[st.buf_index].clone();
+                st.buf_index += 1;
+                return Python::attach(|py| value_to_py(py, &item));
+            }
+
+            // If we've exhausted everything, signal StopAsyncIteration.
+            if st.done {
+                return Err(PyStopAsyncIteration::new_err(()));
+            }
+
+            // Fetch the next page.
+            let page = st
+                .client
+                .iterate_items_page(
+                    st.offset,
+                    st.remaining_limit,
+                    st.page_size,
+                    st.desc,
+                    st.skip_empty,
+                )
+                .await
+                .map_err(storage_err)?;
+
+            let page_len = page.items.len();
+            if page_len == 0 {
+                st.done = true;
+                return Err(PyStopAsyncIteration::new_err(()));
+            }
+
+            // Update state for the next page fetch.
+            st.offset += page_len;
+            if let Some(ref mut rem) = st.remaining_limit {
+                *rem = rem.saturating_sub(page_len);
+            }
+            if !page.has_more {
+                st.done = true;
+            }
+
+            // Buffer the page and return the first item.
+            st.buffer = page.items;
+            st.buf_index = 1; // We're returning index 0 now.
+            let item = st.buffer[0].clone();
+            Python::attach(|py| value_to_py(py, &item))
+        })
+    }
+}
+
+// ─── KVS Key Iterator ──────────────────────────────────────────────────────
+
+struct KvsKeyIteratorState {
+    client: Arc<crawlee_storage::key_value_store::FileSystemKeyValueStoreClient>,
+    exclusive_start_key: Option<String>,
+    remaining_limit: Option<usize>,
+    page_size: usize,
+    buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
+    buf_index: usize,
+    done: bool,
+}
+
+#[gen_stub_pyclass]
+#[pyclass]
+struct KvsKeyIterator {
+    state: Arc<Mutex<KvsKeyIteratorState>>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl KvsKeyIterator {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut st = state.lock().await;
+
+            // If we still have buffered items, return the next one.
+            if st.buf_index < st.buffer.len() {
+                let meta = st.buffer[st.buf_index].clone();
+                st.buf_index += 1;
+                return Python::attach(|py| metadata_to_py(py, &meta));
+            }
+
+            // If we've exhausted everything, signal StopAsyncIteration.
+            if st.done {
+                return Err(PyStopAsyncIteration::new_err(()));
+            }
+
+            // Fetch the next page.
+            let page = st
+                .client
+                .iterate_keys_page(
+                    st.exclusive_start_key.as_deref(),
+                    st.remaining_limit,
+                    st.page_size,
+                )
+                .await
+                .map_err(storage_err)?;
+
+            let page_len = page.items.len();
+            if page_len == 0 {
+                st.done = true;
+                return Err(PyStopAsyncIteration::new_err(()));
+            }
+
+            // Update cursor to the last key in this page.
+            st.exclusive_start_key = Some(page.items.last().unwrap().key.clone());
+            if let Some(ref mut rem) = st.remaining_limit {
+                *rem = rem.saturating_sub(page_len);
+            }
+            if !page.has_more {
+                st.done = true;
+            }
+
+            // Buffer the page and return the first item.
+            st.buffer = page.items;
+            st.buf_index = 1;
+            let meta = st.buffer[0].clone();
+            Python::attach(|py| metadata_to_py(py, &meta))
+        })
+    }
+}
+
 // ─── Dataset Client ─────────────────────────────────────────────────────────
 
 #[gen_stub_pyclass]
@@ -249,30 +414,28 @@ impl FileSystemDatasetClient {
         })
     }
 
-    #[pyo3(signature = (offset=0, limit=None, desc=false, skip_empty=false))]
-    #[gen_stub(override_return_type(type_repr = "list[typing.Any]", imports = ("typing")))]
-    fn iterate_items<'py>(
+    #[pyo3(signature = (offset=0, limit=None, desc=false, skip_empty=false, page_size=None))]
+    fn iterate_items(
         &self,
-        py: Python<'py>,
         offset: usize,
         limit: Option<usize>,
         desc: bool,
         skip_empty: bool,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let items = client
-                .iterate_items(offset, limit, desc, skip_empty)
-                .await
-                .map_err(storage_err)?;
-            Python::attach(|py| {
-                let list = pyo3::types::PyList::empty(py);
-                for item in &items {
-                    list.append(value_to_py(py, item)?)?;
-                }
-                Ok(list.into_any().unbind())
-            })
-        })
+        page_size: Option<usize>,
+    ) -> DatasetItemIterator {
+        DatasetItemIterator {
+            state: Arc::new(Mutex::new(DatasetItemIteratorState {
+                client: self.inner.clone(),
+                offset,
+                remaining_limit: limit,
+                desc,
+                skip_empty,
+                page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+                buffer: Vec::new(),
+                buf_index: 0,
+                done: false,
+            })),
+        }
     }
 }
 
@@ -426,30 +589,27 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[pyo3(signature = (exclusive_start_key=None, limit=None))]
-    #[gen_stub(override_return_type(type_repr = "list[dict[str, typing.Any]]", imports = ("typing")))]
-    fn iterate_keys<'py>(
+    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None))]
+    fn iterate_keys(
         &self,
-        py: Python<'py>,
         exclusive_start_key: Option<String>,
         limit: Option<usize>,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let keys = client
-                .iterate_keys(exclusive_start_key.as_deref(), limit)
-                .await
-                .map_err(storage_err)?;
-            Python::attach(|py| {
-                let list = pyo3::types::PyList::empty(py);
-                for key_meta in &keys {
-                    list.append(metadata_to_py(py, key_meta)?)?;
-                }
-                Ok(list.into_any().unbind())
-            })
-        })
+        page_size: Option<usize>,
+    ) -> KvsKeyIterator {
+        KvsKeyIterator {
+            state: Arc::new(Mutex::new(KvsKeyIteratorState {
+                client: self.inner.clone(),
+                exclusive_start_key,
+                remaining_limit: limit,
+                page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+                buffer: Vec::new(),
+                buf_index: 0,
+                done: false,
+            })),
+        }
     }
 
+    #[gen_stub(override_return_type(type_repr = "builtins.str"))]
     fn get_public_url<'py>(
         &self,
         py: Python<'py>,
@@ -665,6 +825,8 @@ fn _crawlee_storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FileSystemDatasetClient>()?;
     m.add_class::<FileSystemKeyValueStoreClient>()?;
     m.add_class::<FileSystemRequestQueueClient>()?;
+    m.add_class::<DatasetItemIterator>()?;
+    m.add_class::<KvsKeyIterator>()?;
     Ok(())
 }
 

@@ -193,6 +193,34 @@ pub struct DatasetItemsListPage {
     pub items: Vec<Value>,
 }
 
+// ─── Dataset Items Page (for lazy iteration) ───────────────────────────────
+
+/// A single page of dataset items returned by `iterate_items_page`.
+///
+/// The binding layer fetches pages in a loop until `has_more` is `false`,
+/// yielding individual items to the caller as they arrive.
+#[derive(Debug, Clone)]
+pub struct DatasetItemsPage {
+    /// The items in this page.
+    pub items: Vec<Value>,
+    /// Whether there are more items available after this page.
+    pub has_more: bool,
+}
+
+// ─── KVS Keys Page (for lazy iteration) ─────────────────────────────────────
+
+/// A single page of key-value store keys returned by `iterate_keys_page`.
+///
+/// The binding layer fetches pages in a loop until `has_more` is `false`,
+/// yielding individual keys to the caller as they arrive.
+#[derive(Debug, Clone)]
+pub struct KvsKeysPage {
+    /// The key metadata entries in this page.
+    pub items: Vec<KeyValueStoreRecordMetadata>,
+    /// Whether there are more keys available after this page.
+    pub has_more: bool,
+}
+
 // ─── Request Queue Operation Results ────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

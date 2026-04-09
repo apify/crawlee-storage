@@ -2,7 +2,10 @@ use pyo3_stub_gen::Result;
 use std::path::PathBuf;
 
 /// Method names that should remain synchronous (not marked async).
-const SYNC_METHODS: &[&str] = &[];
+const SYNC_METHODS: &[&str] = &["iterate_items", "iterate_keys"];
+
+/// Dunder methods that ARE async (all other dunders stay sync).
+const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];
 
 /// Post-process a generated `.pyi` stub file to mark methods as `async def`
 /// where appropriate. pyo3_stub_gen cannot detect async methods that use
@@ -26,8 +29,10 @@ fn fixup_async_stubs(path: &std::path::Path) -> std::io::Result<()> {
                 .find(|&j| !lines[j].trim().is_empty())
                 .is_some_and(|j| lines[j].trim() == "@property");
 
-            let is_sync =
-                SYNC_METHODS.contains(&method_name) || method_name.starts_with("__") || is_property;
+            let is_dunder = method_name.starts_with("__");
+            let is_sync = SYNC_METHODS.contains(&method_name)
+                || (is_dunder && !ASYNC_DUNDERS.contains(&method_name))
+                || is_property;
 
             if !is_sync {
                 // Replace "def " with "async def " preserving indentation

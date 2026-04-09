@@ -4,8 +4,10 @@
 from crawlee_storage._native import *
 from . import _native
 __all__ = [
+    "DatasetItemIterator",
     "FileSystemDatasetClient",
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
+    "KvsKeyIterator",
 ]
 

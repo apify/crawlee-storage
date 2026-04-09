@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::models::{
-    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata, KvsValue,
+    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata, KvsKeysPage, KvsValue,
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps,
@@ -257,8 +257,40 @@ impl FileSystemKeyValueStoreClient {
         Ok(())
     }
 
-    /// List keys in the store, with optional cursor-based pagination.
-    pub async fn iterate_keys(
+    /// Fetch the next page of keys for lazy iteration.
+    ///
+    /// Returns a [`KvsKeysPage`] containing key metadata entries and a flag
+    /// indicating whether more keys are available. The binding layer should
+    /// call this repeatedly, using the last key returned as
+    /// `exclusive_start_key` for the next call, until `has_more` is `false`.
+    ///
+    /// `page_size` controls how many keys are read per call (default 1000).
+    pub async fn iterate_keys_page(
+        &self,
+        exclusive_start_key: Option<&str>,
+        limit: Option<usize>,
+        page_size: usize,
+    ) -> Result<KvsKeysPage> {
+        // Fetch one extra beyond the page to detect whether more keys exist.
+        let fetch_limit = match limit {
+            Some(remaining) => page_size.min(remaining),
+            None => page_size,
+        };
+
+        let results = self
+            .list_keys_raw(exclusive_start_key, Some(fetch_limit + 1))
+            .await?;
+
+        let has_more =
+            results.len() > fetch_limit && limit.is_none_or(|remaining| fetch_limit < remaining);
+        let items: Vec<KeyValueStoreRecordMetadata> =
+            results.into_iter().take(fetch_limit).collect();
+
+        Ok(KvsKeysPage { items, has_more })
+    }
+
+    /// Internal helper: list keys with cursor and limit, returning a flat Vec.
+    async fn list_keys_raw(
         &self,
         exclusive_start_key: Option<&str>,
         limit: Option<usize>,
@@ -475,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_iterate_keys() {
+    async fn test_iterate_keys_page() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
@@ -496,12 +528,38 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = client.iterate_keys(None, None).await.unwrap();
-        assert_eq!(keys.len(), 3);
+        // Fetch all at once (large page_size)
+        let page = client.iterate_keys_page(None, None, 1000).await.unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(!page.has_more);
 
         // With limit
-        let keys = client.iterate_keys(None, Some(2)).await.unwrap();
-        assert_eq!(keys.len(), 2);
+        let page = client.iterate_keys_page(None, Some(2), 1000).await.unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(!page.has_more);
+
+        // Paginate with page_size=2
+        let page1 = client.iterate_keys_page(None, None, 2).await.unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+
+        // Second page using cursor from last key
+        let last_key = &page1.items.last().unwrap().key;
+        let page2 = client
+            .iterate_keys_page(Some(last_key), None, 2)
+            .await
+            .unwrap();
+        assert_eq!(page2.items.len(), 1);
+        assert!(!page2.has_more);
+
+        // Cursor-based: exclusive_start_key
+        let page = client
+            .iterate_keys_page(Some("alpha"), None, 1000)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].key, "beta");
+        assert_eq!(page.items[1].key, "gamma");
     }
 
     #[tokio::test]
