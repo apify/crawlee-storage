@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 
 - Add filesystem paths ([f6b34cb](https://github.com/apify/crawlee-storage/commit/f6b34cb6f52168b77d756e8813cf5d105effd5a1)) by [@janbuchar](https://github.com/janbuchar)
 - Utilize more precise exception types in the python wrapper ([#9](https://github.com/apify/crawlee-storage/pull/9)) ([d2838ec](https://github.com/apify/crawlee-storage/commit/d2838ecd01cfeb29de5ce23e0275f8267166fabb)) by [@janbuchar](https://github.com/janbuchar)
+- Improved async iteration support ([#20](https://github.com/apify/crawlee-storage/pull/20)) ([9004c7e](https://github.com/apify/crawlee-storage/commit/9004c7e57a1e9266b4866e622ad876157db15d3c)) by [@janbuchar](https://github.com/janbuchar), closes [#10](https://github.com/apify/crawlee-storage/issues/10)
 
 ### 🐛 Bug Fixes
 
