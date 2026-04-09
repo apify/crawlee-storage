@@ -45,6 +45,26 @@ jobs:
       - name: Check linting
         run: ruff check .
 
+  node_lint_fmt_check:
+    name: Node.js lint & format check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crawlee-storage-node
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm ci
+      - name: Check formatting
+        run: npm run fmt:check
+      - name: Check linting
+        run: npm run lint
+
   rust_fmt_check:
     name: Format check
     runs-on: ubuntu-latest

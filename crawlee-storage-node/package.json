@@ -2,9 +2,28 @@
     "name": "@crawlee/storage",
     "version": "0.1.0",
     "description": "Filesystem storage client for Crawlee crawlers (Rust-powered)",
+    "license": "Apache-2.0",
     "main": "index.js",
     "types": "index.d.ts",
-    "license": "Apache-2.0",
+    "scripts": {
+        "artifacts": "napi artifacts",
+        "build": "napi build --platform --release --no-const-enum",
+        "build:debug": "napi build --platform --no-const-enum",
+        "test": "vitest run",
+        "lint": "oxlint",
+        "lint:fix": "oxlint --fix",
+        "fmt": "oxfmt",
+        "fmt:check": "oxfmt --check"
+    },
+    "devDependencies": {
+        "@napi-rs/cli": "^3",
+        "@types/node": "^22",
+        "oxfmt": "^0.44.0",
+        "oxlint": "^1.59.0",
+        "oxlint-tsgolint": "^0.20.0",
+        "typescript": "^5",
+        "vitest": "^3"
+    },
     "napi": {
         "binaryName": "crawlee-storage",
         "dtsHeaderFile": "dts-header.d.ts",
@@ -14,17 +33,5 @@
             "aarch64-apple-darwin",
             "x86_64-pc-windows-msvc"
         ]
-    },
-    "devDependencies": {
-        "@napi-rs/cli": "^3",
-        "@types/node": "^22",
-        "typescript": "^5",
-        "vitest": "^3"
-    },
-    "scripts": {
-        "artifacts": "napi artifacts",
-        "build": "napi build --platform --release --no-const-enum",
-        "build:debug": "napi build --platform --no-const-enum",
-        "test": "vitest run"
     }
 }

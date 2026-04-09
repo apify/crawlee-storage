@@ -18,12 +18,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should add and fetch a request', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         const response = await client.addBatchOfRequests(
             [
@@ -50,12 +45,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should deduplicate requests', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         const req = {
             uniqueKey: 'https://example.com',
@@ -70,12 +60,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should mark request as handled', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -98,12 +83,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should reclaim a request', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -129,12 +109,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should handle forefront requests', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         // Add regular request first
         await client.addBatchOfRequests(
@@ -166,12 +141,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should get request by unique_key', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -194,12 +164,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should report is_empty correctly', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         expect(await client.isEmpty()).toBe(true);
 
@@ -227,12 +192,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should purge all requests', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -261,12 +221,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should drop storage entirely', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -284,12 +239,7 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should persist and restore state across reopen', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         await client.addBatchOfRequests(
             [
@@ -311,24 +261,14 @@ describe('FileSystemRequestQueueClient', () => {
         expect(meta.total_request_count).toBe(2);
 
         // Reopen
-        const client2 = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client2 = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
         const meta2 = await client2.getMetadata();
         expect(meta2.total_request_count).toBe(2);
         expect(meta2.pending_request_count).toBe(2);
     });
 
     it('should return metadata with correct fields', async () => {
-        const client = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         const meta = await client.getMetadata();
         expect(meta.id).toBeTruthy();
@@ -342,20 +282,10 @@ describe('FileSystemRequestQueueClient', () => {
     });
 
     it('should handle alias vs name correctly', async () => {
-        const named = await FileSystemRequestQueueClient.open(
-            null,
-            'my-queue',
-            null,
-            storageDir,
-        );
+        const named = await FileSystemRequestQueueClient.open(null, 'my-queue', null, storageDir);
         expect((await named.getMetadata()).name).toBe('my-queue');
 
-        const aliased = await FileSystemRequestQueueClient.open(
-            null,
-            null,
-            'my-alias',
-            storageDir,
-        );
+        const aliased = await FileSystemRequestQueueClient.open(null, null, 'my-alias', storageDir);
         expect((await aliased.getMetadata()).name).toBeNull();
     });
 });

@@ -18,12 +18,7 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should create and push data', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         // Push a single item
         await client.pushData({ name: 'Alice', age: 30 });
@@ -42,12 +37,7 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should paginate get_data', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });
@@ -72,12 +62,7 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should purge data but keep metadata', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         await client.pushData({ x: 1 });
         expect((await client.getMetadata()).item_count).toBe(1);
@@ -90,12 +75,7 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should drop storage entirely', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         await client.pushData({ x: 1 });
         await client.dropStorage();
@@ -104,78 +84,46 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should reopen existing dataset', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            'my-ds',
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, 'my-ds', null, storageDir);
         await client.pushData({ x: 1 });
 
         const meta = await client.getMetadata();
         const id = meta.id;
 
         // Reopen by name
-        const client2 = await FileSystemDatasetClient.open(
-            null,
-            'my-ds',
-            null,
-            storageDir,
-        );
+        const client2 = await FileSystemDatasetClient.open(null, 'my-ds', null, storageDir);
         expect((await client2.getMetadata()).item_count).toBe(1);
 
         // Reopen by id
-        const client3 = await FileSystemDatasetClient.open(
-            id,
-            null,
-            null,
-            storageDir,
-        );
+        const client3 = await FileSystemDatasetClient.open(id, null, null, storageDir);
         expect((await client3.getMetadata()).item_count).toBe(1);
     });
 
     it('should handle alias vs name correctly', async () => {
         // Open via name — metadata.name should be set
-        const named = await FileSystemDatasetClient.open(
-            null,
-            'my-name',
-            null,
-            storageDir,
-        );
+        const named = await FileSystemDatasetClient.open(null, 'my-name', null, storageDir);
         expect((await named.getMetadata()).name).toBe('my-name');
 
         // Open via alias — metadata.name should be null
-        const aliased = await FileSystemDatasetClient.open(
-            null,
-            null,
-            'my-alias',
-            storageDir,
-        );
+        const aliased = await FileSystemDatasetClient.open(null, null, 'my-alias', storageDir);
         expect((await aliased.getMetadata()).name).toBeNull();
 
         // But the directory should exist
-        expect(
-            existsSync(join(storageDir, 'datasets', 'my-alias')),
-        ).toBe(true);
+        expect(existsSync(join(storageDir, 'datasets', 'my-alias'))).toBe(true);
     });
 
     it('should reject multiple exclusive args', async () => {
         await expect(
             FileSystemDatasetClient.open(null, 'name', 'alias', storageDir),
-        ).rejects.toThrow();
+        ).rejects.toThrow('At most one of');
 
-        await expect(
-            FileSystemDatasetClient.open('id', null, 'alias', storageDir),
-        ).rejects.toThrow();
+        await expect(FileSystemDatasetClient.open('id', null, 'alias', storageDir)).rejects.toThrow(
+            'At most one of',
+        );
     });
 
     it('should iterate items with iterator', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });
@@ -194,12 +142,7 @@ describe('FileSystemDatasetClient', () => {
     });
 
     it('should iterate items with limit', async () => {
-        const client = await FileSystemDatasetClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });

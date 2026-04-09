@@ -18,12 +18,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should create and set a JSON value', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('my-key', { hello: 'world' });
 
@@ -35,12 +30,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should set a text value', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('greeting', 'hello', 'text/plain');
 
@@ -51,12 +41,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should handle null values', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('empty', null);
 
@@ -67,12 +52,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should delete a value', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('key1', 42);
         expect(await client.recordExists('key1')).toBe(true);
@@ -82,24 +62,14 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should return null for missing keys', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const record = await client.getValue('nonexistent');
         expect(record).toBeNull();
     });
 
     it('should handle binary values via setValueBuffer', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const data = Buffer.from([0x00, 0x01, 0x02, 0x03, 0x89, 0xff]);
         await client.setValueBuffer('binary-key', data, 'application/octet-stream');
@@ -116,12 +86,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should iterate keys', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('alpha', 1);
         await client.setValue('beta', 2);
@@ -140,12 +105,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should iterate keys with limit', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('alpha', 1);
         await client.setValue('beta', 2);
@@ -162,12 +122,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should get public URL', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const url = await client.getPublicUrl('my-key');
         expect(url).toMatch(/^file:\/\//);
@@ -175,12 +130,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should purge all values but keep metadata', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('key1', 1);
         await client.setValue('key2', 2);
@@ -193,12 +143,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should drop storage entirely', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('key1', 1);
         await client.dropStorage();
@@ -207,12 +152,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should handle special characters in keys', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(
-            null,
-            null,
-            null,
-            storageDir,
-        );
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('path/to/key with spaces', 'value', 'text/plain');
 
@@ -222,12 +162,7 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('should handle alias vs name correctly', async () => {
-        const named = await FileSystemKeyValueStoreClient.open(
-            null,
-            'my-store',
-            null,
-            storageDir,
-        );
+        const named = await FileSystemKeyValueStoreClient.open(null, 'my-store', null, storageDir);
         expect((await named.getMetadata()).name).toBe('my-store');
 
         const aliased = await FileSystemKeyValueStoreClient.open(
