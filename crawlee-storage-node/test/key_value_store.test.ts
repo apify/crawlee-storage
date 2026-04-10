@@ -4,7 +4,7 @@ import { rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { FileSystemKeyValueStoreClient } from '../index.js';
+import { FileSystemKeyValueStoreClient } from '../lib.js';
 
 describe('FileSystemKeyValueStoreClient', () => {
     let storageDir: string;
@@ -101,6 +101,23 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         expect(keys.length).toBe(3);
         // Keys should be sorted
+        expect(keys).toEqual([...keys].sort());
+    });
+
+    it('should support for-await-of on key iterator', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('alpha', 1);
+        await client.setValue('beta', 2);
+        await client.setValue('gamma', 3);
+
+        const iterator = await client.iterateKeys(null, null, 2);
+        const keys: string[] = [];
+        for await (const entry of iterator) {
+            keys.push(entry.key);
+        }
+
+        expect(keys.length).toBe(3);
         expect(keys).toEqual([...keys].sort());
     });
 

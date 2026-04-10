@@ -3,8 +3,8 @@
     "version": "0.1.0",
     "description": "Filesystem storage client for Crawlee crawlers (Rust-powered)",
     "license": "Apache-2.0",
-    "main": "index.js",
-    "types": "index.d.ts",
+    "main": "lib.js",
+    "types": "lib.d.ts",
     "scripts": {
         "artifacts": "napi artifacts",
         "build": "napi build --platform --release --no-const-enum",

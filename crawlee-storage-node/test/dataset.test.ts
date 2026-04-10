@@ -4,7 +4,7 @@ import { rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { FileSystemDatasetClient } from '../index.js';
+import { FileSystemDatasetClient } from '../lib.js';
 
 describe('FileSystemDatasetClient', () => {
     let storageDir: string;
@@ -133,6 +133,24 @@ describe('FileSystemDatasetClient', () => {
         const items: Record<string, unknown>[] = [];
         let item;
         while ((item = await iterator.next()) !== null) {
+            items.push(item);
+        }
+
+        expect(items.length).toBe(5);
+        expect(items[0].index).toBe(1);
+        expect(items[4].index).toBe(5);
+    });
+
+    it('should support for-await-of on item iterator', async () => {
+        const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
+
+        for (let i = 1; i <= 5; i++) {
+            await client.pushData({ index: i });
+        }
+
+        const iterator = await client.iterateItems(0, null, false, false, 2);
+        const items: Record<string, unknown>[] = [];
+        for await (const item of iterator) {
             items.push(item);
         }
 

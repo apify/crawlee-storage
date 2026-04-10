@@ -4,7 +4,7 @@ import { rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { FileSystemRequestQueueClient } from '../index.js';
+import { FileSystemRequestQueueClient } from '../lib.js';
 
 describe('FileSystemRequestQueueClient', () => {
     let storageDir: string;
