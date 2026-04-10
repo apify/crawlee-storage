@@ -527,17 +527,15 @@ impl FileSystemKeyValueStoreClient {
             KvsValue::Json(value)
         };
 
-        let content_type = content_type.or_else(|| {
-            Some(
-                match &kvs_value {
-                    KvsValue::None => "application/x-none",
-                    KvsValue::Json(_) => "application/json",
-                    KvsValue::Text(_) => "text/plain",
-                    KvsValue::Binary(_) => "application/octet-stream",
-                }
-                .to_string(),
-            )
-        });
+        let content_type = Some(content_type.unwrap_or_else(|| {
+            match &kvs_value {
+                KvsValue::None => "application/x-none",
+                KvsValue::Json(_) => "application/json",
+                KvsValue::Text(_) => "text/plain",
+                KvsValue::Binary(_) => "application/octet-stream",
+            }
+            .to_string()
+        }));
 
         self.inner
             .set_value(&key, kvs_value, content_type)
@@ -554,7 +552,7 @@ impl FileSystemKeyValueStoreClient {
         content_type: Option<String>,
     ) -> napi::Result<()> {
         use crawlee_storage::models::KvsValue;
-        let ct = content_type.or_else(|| Some("application/octet-stream".to_string()));
+        let ct = Some(content_type.unwrap_or_else(|| "application/octet-stream".to_string()));
         self.inner
             .set_value(&key, KvsValue::Binary(value.to_vec()), ct)
             .await
