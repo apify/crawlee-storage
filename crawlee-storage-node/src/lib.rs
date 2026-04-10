@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -10,44 +11,223 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     napi::Error::from_reason(e.to_string())
 }
 
-/// Convert a snake_case key to camelCase.
-fn snake_to_camel(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = false;
-    for ch in s.chars() {
-        if ch == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
+// ─── camelCase serialization wrappers ───────────────────────────────────────
+//
+// The core library serializes field names in snake_case (for Python filesystem
+// compatibility).  The Node.js convention is camelCase.  Rather than doing a
+// recursive key-rename pass over serde_json::Value (which would mangle user
+// data), we define thin wrapper structs that re-serialize with camelCase field
+// names.  User-supplied payloads (dataset items, request objects) are
+// `serde_json::Value` and pass through untouched.
+
+/// Serialize a core-library struct via its camelCase wrapper.
+fn to_js_value<'a, T, W>(src: &'a T) -> napi::Result<Value>
+where
+    W: Serialize + From<&'a T>,
+{
+    let wrapper = W::from(src);
+    serde_json::to_value(wrapper).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
-/// Recursively rename all object keys from snake_case to camelCase.
-fn to_camel_case_keys(value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let new_map: serde_json::Map<String, Value> = map
-                .into_iter()
-                .map(|(k, v)| (snake_to_camel(&k), to_camel_case_keys(v)))
-                .collect();
-            Value::Object(new_map)
+// -- Storage metadata (base fields, flattened into each concrete type) --------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsStorageMetadata<'a> {
+    id: &'a str,
+    name: &'a Option<String>,
+    accessed_at: String,
+    created_at: String,
+    modified_at: String,
+}
+
+fn fmt_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    format!("{}+00:00", dt.format("%Y-%m-%dT%H:%M:%S%.6f"))
+}
+
+impl<'a> From<&'a crawlee_storage::models::StorageMetadata> for JsStorageMetadata<'a> {
+    fn from(m: &'a crawlee_storage::models::StorageMetadata) -> Self {
+        Self {
+            id: &m.id,
+            name: &m.name,
+            accessed_at: fmt_datetime(&m.accessed_at),
+            created_at: fmt_datetime(&m.created_at),
+            modified_at: fmt_datetime(&m.modified_at),
         }
-        Value::Array(arr) => Value::Array(arr.into_iter().map(to_camel_case_keys).collect()),
-        other => other,
     }
 }
 
-/// Convert a serde_json metadata struct to a JS-friendly serde_json::Value
-/// with camelCase keys (napi's serde-json feature handles Value <-> JsObject automatically).
-fn metadata_to_value<T: serde::Serialize>(meta: &T) -> napi::Result<Value> {
-    let val = serde_json::to_value(meta).map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    Ok(to_camel_case_keys(val))
+// -- Dataset metadata ---------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsDatasetMetadata<'a> {
+    #[serde(flatten)]
+    base: JsStorageMetadata<'a>,
+    item_count: usize,
 }
+
+impl<'a> From<&'a crawlee_storage::models::DatasetMetadata> for JsDatasetMetadata<'a> {
+    fn from(m: &'a crawlee_storage::models::DatasetMetadata) -> Self {
+        Self {
+            base: JsStorageMetadata::from(&m.base),
+            item_count: m.item_count,
+        }
+    }
+}
+
+// -- Dataset items list page --------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsDatasetItemsListPage<'a> {
+    count: usize,
+    offset: usize,
+    limit: usize,
+    total: usize,
+    desc: bool,
+    /// User data — passed through as-is, no key renaming.
+    items: &'a Vec<Value>,
+}
+
+impl<'a> From<&'a crawlee_storage::models::DatasetItemsListPage> for JsDatasetItemsListPage<'a> {
+    fn from(p: &'a crawlee_storage::models::DatasetItemsListPage) -> Self {
+        Self {
+            count: p.count,
+            offset: p.offset,
+            limit: p.limit,
+            total: p.total,
+            desc: p.desc,
+            items: &p.items,
+        }
+    }
+}
+
+// -- Key-value store metadata -------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsKeyValueStoreMetadata<'a> {
+    #[serde(flatten)]
+    base: JsStorageMetadata<'a>,
+}
+
+impl<'a> From<&'a crawlee_storage::models::KeyValueStoreMetadata> for JsKeyValueStoreMetadata<'a> {
+    fn from(m: &'a crawlee_storage::models::KeyValueStoreMetadata) -> Self {
+        Self {
+            base: JsStorageMetadata::from(&m.base),
+        }
+    }
+}
+
+// -- Key-value store record metadata ------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsKeyValueStoreRecordMetadata<'a> {
+    key: &'a str,
+    content_type: &'a str,
+    size: Option<usize>,
+}
+
+impl<'a> From<&'a crawlee_storage::models::KeyValueStoreRecordMetadata>
+    for JsKeyValueStoreRecordMetadata<'a>
+{
+    fn from(m: &'a crawlee_storage::models::KeyValueStoreRecordMetadata) -> Self {
+        Self {
+            key: &m.key,
+            content_type: &m.content_type,
+            size: m.size,
+        }
+    }
+}
+
+// -- Request queue metadata ---------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsRequestQueueMetadata<'a> {
+    #[serde(flatten)]
+    base: JsStorageMetadata<'a>,
+    had_multiple_clients: bool,
+    handled_request_count: usize,
+    pending_request_count: usize,
+    total_request_count: usize,
+}
+
+impl<'a> From<&'a crawlee_storage::models::RequestQueueMetadata> for JsRequestQueueMetadata<'a> {
+    fn from(m: &'a crawlee_storage::models::RequestQueueMetadata) -> Self {
+        Self {
+            base: JsStorageMetadata::from(&m.base),
+            had_multiple_clients: m.had_multiple_clients,
+            handled_request_count: m.handled_request_count,
+            pending_request_count: m.pending_request_count,
+            total_request_count: m.total_request_count,
+        }
+    }
+}
+
+// -- Processed request --------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsProcessedRequest<'a> {
+    id: &'a Option<String>,
+    unique_key: &'a str,
+    was_already_present: bool,
+    was_already_handled: bool,
+}
+
+impl<'a> From<&'a crawlee_storage::models::ProcessedRequest> for JsProcessedRequest<'a> {
+    fn from(r: &'a crawlee_storage::models::ProcessedRequest) -> Self {
+        Self {
+            id: &r.id,
+            unique_key: &r.unique_key,
+            was_already_present: r.was_already_present,
+            was_already_handled: r.was_already_handled,
+        }
+    }
+}
+
+// -- Unprocessed request ------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsUnprocessedRequest<'a> {
+    unique_key: &'a str,
+    url: &'a str,
+    method: &'a Option<String>,
+}
+
+impl<'a> From<&'a crawlee_storage::models::UnprocessedRequest> for JsUnprocessedRequest<'a> {
+    fn from(r: &'a crawlee_storage::models::UnprocessedRequest) -> Self {
+        Self {
+            unique_key: &r.unique_key,
+            url: &r.url,
+            method: &r.method,
+        }
+    }
+}
+
+// -- Add requests response ----------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsAddRequestsResponse<'a> {
+    processed_requests: Vec<JsProcessedRequest<'a>>,
+    unprocessed_requests: Vec<JsUnprocessedRequest<'a>>,
+}
+
+impl<'a> From<&'a crawlee_storage::models::AddRequestsResponse> for JsAddRequestsResponse<'a> {
+    fn from(r: &'a crawlee_storage::models::AddRequestsResponse) -> Self {
+        Self {
+            processed_requests: r.processed_requests.iter().map(Into::into).collect(),
+            unprocessed_requests: r.unprocessed_requests.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+// ─── KVS record helper (unchanged — hand-built, no user-data issue) ─────────
 
 /// Convert a KVS record to a plain JS object with camelCase keys.
 fn record_to_value(record: &crawlee_storage::models::KeyValueStoreRecord) -> napi::Result<Value> {
@@ -126,7 +306,7 @@ impl FileSystemDatasetClient {
     #[napi(ts_return_type = "Promise<DatasetMetadata>")]
     pub async fn get_metadata(&self) -> napi::Result<Value> {
         let meta = self.inner.get_metadata().await;
-        metadata_to_value(&meta)
+        to_js_value::<_, JsDatasetMetadata>(&meta)
     }
 
     #[napi]
@@ -162,7 +342,7 @@ impl FileSystemDatasetClient {
             )
             .await
             .map_err(storage_err)?;
-        metadata_to_value(&page)
+        to_js_value::<_, JsDatasetItemsListPage>(&page)
     }
 
     #[napi]
@@ -306,7 +486,7 @@ impl FileSystemKeyValueStoreClient {
     #[napi(ts_return_type = "Promise<KeyValueStoreMetadata>")]
     pub async fn get_metadata(&self) -> napi::Result<Value> {
         let meta = self.inner.get_metadata().await;
-        metadata_to_value(&meta)
+        to_js_value::<_, JsKeyValueStoreMetadata>(&meta)
     }
 
     #[napi]
@@ -443,9 +623,9 @@ impl KvsKeyIterator {
 
         // If we still have buffered items, return the next one.
         if st.buf_index < st.buffer.len() {
-            let meta = st.buffer[st.buf_index].clone();
+            let val = to_js_value::<_, JsKeyValueStoreRecordMetadata>(&st.buffer[st.buf_index])?;
             st.buf_index += 1;
-            return Ok(Some(metadata_to_value(&meta)?));
+            return Ok(Some(val));
         }
 
         // If we've exhausted everything, signal done.
@@ -482,7 +662,9 @@ impl KvsKeyIterator {
         // Buffer the page and return the first item.
         st.buffer = page.items;
         st.buf_index = 1;
-        Ok(Some(metadata_to_value(&st.buffer[0])?))
+        Ok(Some(to_js_value::<_, JsKeyValueStoreRecordMetadata>(
+            &st.buffer[0],
+        )?))
     }
 }
 
@@ -529,7 +711,7 @@ impl FileSystemRequestQueueClient {
     #[napi(ts_return_type = "Promise<RequestQueueMetadata>")]
     pub async fn get_metadata(&self) -> napi::Result<Value> {
         let meta = self.inner.get_metadata().await;
-        metadata_to_value(&meta)
+        to_js_value::<_, JsRequestQueueMetadata>(&meta)
     }
 
     #[napi]
@@ -556,7 +738,7 @@ impl FileSystemRequestQueueClient {
             .add_batch_of_requests(requests, forefront.unwrap_or(false))
             .await
             .map_err(storage_err)?;
-        metadata_to_value(&response)
+        to_js_value::<_, JsAddRequestsResponse>(&response)
     }
 
     #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
@@ -583,7 +765,7 @@ impl FileSystemRequestQueueClient {
             .await
             .map_err(storage_err)?;
         match result {
-            Some(r) => Ok(Some(metadata_to_value(&r)?)),
+            Some(r) => Ok(Some(to_js_value::<_, JsProcessedRequest>(&r)?)),
             None => Ok(None),
         }
     }
@@ -603,7 +785,7 @@ impl FileSystemRequestQueueClient {
             .await
             .map_err(storage_err)?;
         match result {
-            Some(r) => Ok(Some(metadata_to_value(&r)?)),
+            Some(r) => Ok(Some(to_js_value::<_, JsProcessedRequest>(&r)?)),
             None => Ok(None),
         }
     }

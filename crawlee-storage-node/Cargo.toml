@@ -9,6 +9,7 @@ license = "Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
+chrono = "0.4"
 crawlee-storage = { path = "../crawlee-storage" }
 napi = { version = "3", default-features = false, features = ["async", "serde-json", "napi4"] }
 napi-derive = "3"

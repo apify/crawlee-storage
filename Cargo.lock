@@ -124,6 +124,7 @@ dependencies = [
 name = "crawlee-storage-node"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "crawlee-storage",
  "napi",
  "napi-build",
