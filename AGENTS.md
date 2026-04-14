@@ -36,14 +36,28 @@ cd crawlee-storage-python && maturin develop --release
 cd crawlee-storage-python && maturin develop
 
 # Build Node.js bindings (requires @napi-rs/cli)
-cd crawlee-storage-node && npm run build
+cd crawlee-storage-node && npm install && npm run build
+
+# Run Node.js tests
+cd crawlee-storage-node && npm test
+
+# Lint Node.js code (type-aware, via oxlint + tsgolint)
+cd crawlee-storage-node && npm run lint
+
+# Format Node.js code (via oxfmt)
+cd crawlee-storage-node && npm run fmt
+
+# Check Node.js formatting without writing
+cd crawlee-storage-node && npm run fmt:check
 ```
 
 ## Code Style
 
 - **Rust edition**: 2021
-- **Formatting**: `cargo fmt` (default rustfmt settings)
-- **Linting**: `cargo clippy`
+- **Rust formatting**: `cargo fmt` (default rustfmt settings)
+- **Rust linting**: `cargo clippy`
+- **Node.js linting**: `oxlint` with type-aware linting via `tsgolint` (config in `.oxlintrc.json`)
+- **Node.js formatting**: `oxfmt` (config in `.oxfmtrc.json`; 4-space indent, single quotes, trailing commas)
 - **Commit format**: Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, etc.)
 
 ## Architecture
@@ -65,8 +79,16 @@ crawlee-storage-python/       PyO3/maturin Python bindings
 ├── python/crawlee_storage/   Pure Python package (re-exports from native module)
 └── pyproject.toml            maturin build config
 
-crawlee-storage-node/         napi-rs Node.js bindings (placeholder)
-├── src/lib.rs                napi-rs module
+crawlee-storage-node/         napi-rs Node.js bindings
+├── src/lib.rs                napi-rs module (napi v3)
+├── build.rs                  napi-build setup
+├── dts-header.d.ts           Custom TypeScript interfaces (prepended to auto-generated index.d.ts)
+├── index.js                  Auto-generated native module loader (by napi-rs CLI)
+├── index.d.ts                Auto-generated TypeScript declarations (by napi-rs CLI)
+├── .oxlintrc.json            Oxlint config (type-aware linting)
+├── .oxfmtrc.json             Oxfmt config (formatting)
+├── tsconfig.json             TypeScript config (for test compilation)
+├── test/                     Vitest tests (TypeScript)
 └── package.json              npm package config
 ```
 
@@ -126,9 +148,17 @@ These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on
 
 ### Node.js Bindings
 
-- Uses **napi-rs** with `async` and `serde-json` features.
-- TypeScript declarations (`.d.ts`) are auto-generated from `#[napi]` annotations.
-- Currently a placeholder — implementation is Phase 2.
+- Uses **napi-rs v3** (`napi = "3"`, `napi-derive = "3"`) with `async`, `serde-json`, and `napi4` features.
+- `build.rs` calls `napi_build::setup()` — standard napi-rs build script.
+- `index.js` and `index.d.ts` are **auto-generated** by `napi build` (via `@napi-rs/cli`). Do not edit them manually.
+- `dts-header.d.ts` contains hand-written TypeScript interfaces (`DatasetMetadata`, `KeyValueStoreRecord`, etc.) that are prepended to the auto-generated `index.d.ts`. This is configured via `"dtsHeaderFile"` in `package.json`'s `napi` section.
+- `#[napi(ts_return_type = "...")]` and `#[napi(ts_args_type = "...")]` annotations on Rust methods override auto-generated types to reference the header interfaces instead of `any`.
+- **camelCase convention**: The core Rust library serializes with snake_case (for Python compatibility). The Node binding layer converts all object keys from snake_case to camelCase via `to_camel_case_keys()` before returning to JS. The `dts-header.d.ts` interfaces use camelCase field names accordingly.
+- Each Rust client is wrapped in `Arc` so it can be cloned into async blocks.
+- JSON data crosses the FFI boundary as `serde_json::Value` ↔ JS objects (via napi's `serde-json` feature).
+- KVS binary values are received as `napi::bindgen_prelude::Buffer` and converted to `KvsValue::Binary(Vec<u8>)`. On read, binary data is returned as a JSON array of byte values with a `__binary__: true` marker.
+- Tests are TypeScript (`.test.ts`) using Vitest, importing directly from `../index.js`.
+- Linting uses `oxlint` with type-aware rules (via `tsgolint`). Formatting uses `oxfmt`.
 
 ### Key Directories
 
@@ -156,3 +186,8 @@ Python bindings (`crawlee-storage-python`):
 
 Node.js bindings (`crawlee-storage-node`):
 - `napi` / `napi-derive` — Node.js FFI
+- `napi-build` — build script for napi-rs
+- `oxlint` / `oxlint-tsgolint` — linting (with type-aware rules)
+- `oxfmt` — formatting
+- `vitest` — test framework
+- `typescript` / `@types/node` — TypeScript support for tests

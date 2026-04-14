@@ -1,0 +1,21 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    "options": {
+        "typeAware": true
+    },
+    "plugins": ["typescript", "vitest"],
+    "categories": {
+        "correctness": "error",
+        "suspicious": "warn"
+    },
+    "rules": {
+        "typescript/no-floating-promises": "error",
+        "typescript/no-misused-promises": "error",
+        "typescript/no-unsafe-assignment": "warn",
+        "typescript/no-unsafe-call": "warn",
+        "typescript/no-unsafe-member-access": "warn",
+        "typescript/no-unsafe-return": "warn",
+        "no-unused-vars": "warn"
+    },
+    "ignorePatterns": ["index.js", "index.d.ts"]
+}

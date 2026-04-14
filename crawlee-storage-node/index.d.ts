@@ -1,0 +1,158 @@
+export interface DatasetMetadata {
+    id: string;
+    name: string | null;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
+    itemCount: number;
+}
+
+export interface DatasetItemsListPage {
+    count: number;
+    offset: number;
+    limit: number;
+    total: number;
+    desc: boolean;
+    items: Record<string, unknown>[];
+}
+
+export interface KeyValueStoreMetadata {
+    id: string;
+    name: string | null;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
+}
+
+export interface KeyValueStoreRecord {
+    key: string;
+    contentType: string;
+    size: number | null;
+    value: unknown;
+    /** Present and true when value is binary (an array of byte values) */
+    __binary__?: boolean;
+}
+
+export interface KeyValueStoreRecordMetadata {
+    key: string;
+    contentType: string;
+    size: number | null;
+}
+
+export interface RequestQueueMetadata {
+    id: string;
+    name: string | null;
+    accessedAt: string;
+    createdAt: string;
+    modifiedAt: string;
+    hadMultipleClients: boolean;
+    handledRequestCount: number;
+    pendingRequestCount: number;
+    totalRequestCount: number;
+}
+
+export interface ProcessedRequest {
+    id: string | null;
+    uniqueKey: string;
+    wasAlreadyPresent: boolean;
+    wasAlreadyHandled: boolean;
+}
+
+export interface AddRequestsResponse {
+    processedRequests: ProcessedRequest[];
+    unprocessedRequests: unknown[];
+}
+export declare class DatasetItemIterator {
+    /** Fetch the next item. Returns null when iteration is exhausted. */
+    next(): Promise<Record<string, unknown> | null>;
+}
+
+export declare class FileSystemDatasetClient {
+    static open(
+        id?: string | undefined | null,
+        name?: string | undefined | null,
+        alias?: string | undefined | null,
+        storageDir?: string | undefined | null,
+    ): Promise<FileSystemDatasetClient>;
+    get pathToDataset(): string;
+    get pathToMetadata(): string;
+    getMetadata(): Promise<DatasetMetadata>;
+    dropStorage(): Promise<void>;
+    purge(): Promise<void>;
+    pushData(data: Record<string, unknown> | Record<string, unknown>[]): Promise<void>;
+    getData(
+        offset?: number | undefined | null,
+        limit?: number | undefined | null,
+        desc?: boolean | undefined | null,
+        skipEmpty?: boolean | undefined | null,
+    ): Promise<DatasetItemsListPage>;
+    iterateItems(
+        offset?: number | undefined | null,
+        limit?: number | undefined | null,
+        desc?: boolean | undefined | null,
+        skipEmpty?: boolean | undefined | null,
+        pageSize?: number | undefined | null,
+    ): Promise<DatasetItemIterator>;
+}
+
+export declare class FileSystemKeyValueStoreClient {
+    static open(
+        id?: string | undefined | null,
+        name?: string | undefined | null,
+        alias?: string | undefined | null,
+        storageDir?: string | undefined | null,
+    ): Promise<FileSystemKeyValueStoreClient>;
+    get pathToKvs(): string;
+    get pathToMetadata(): string;
+    getMetadata(): Promise<KeyValueStoreMetadata>;
+    dropStorage(): Promise<void>;
+    purge(): Promise<void>;
+    getValue(key: string): Promise<KeyValueStoreRecord | null>;
+    setValue(key: string, value: unknown, contentType?: string | undefined | null): Promise<void>;
+    /** Set a binary value (Buffer) for a key. */
+    setValueBuffer(
+        key: string,
+        value: Buffer,
+        contentType?: string | undefined | null,
+    ): Promise<void>;
+    deleteValue(key: string): Promise<void>;
+    iterateKeys(
+        exclusiveStartKey?: string | undefined | null,
+        limit?: number | undefined | null,
+        pageSize?: number | undefined | null,
+    ): Promise<KvsKeyIterator>;
+    getPublicUrl(key: string): Promise<string>;
+    recordExists(key: string): Promise<boolean>;
+}
+
+export declare class FileSystemRequestQueueClient {
+    static open(
+        id?: string | undefined | null,
+        name?: string | undefined | null,
+        alias?: string | undefined | null,
+        storageDir?: string | undefined | null,
+    ): Promise<FileSystemRequestQueueClient>;
+    get pathToRq(): string;
+    get pathToMetadata(): string;
+    getMetadata(): Promise<RequestQueueMetadata>;
+    dropStorage(): Promise<void>;
+    purge(): Promise<void>;
+    addBatchOfRequests(
+        requests: Record<string, unknown>[],
+        forefront?: boolean | undefined | null,
+    ): Promise<AddRequestsResponse>;
+    getRequest(uniqueKey: string): Promise<Record<string, unknown> | null>;
+    fetchNextRequest(): Promise<Record<string, unknown> | null>;
+    markRequestAsHandled(request: Record<string, unknown>): Promise<ProcessedRequest | null>;
+    reclaimRequest(
+        request: Record<string, unknown>,
+        forefront?: boolean | undefined | null,
+    ): Promise<ProcessedRequest | null>;
+    isEmpty(): Promise<boolean>;
+    persistState(): Promise<void>;
+}
+
+export declare class KvsKeyIterator {
+    /** Fetch the next key metadata entry. Returns null when iteration is exhausted. */
+    next(): Promise<KeyValueStoreRecordMetadata | null>;
+}

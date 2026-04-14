@@ -9,8 +9,13 @@ license = "Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
+chrono = "0.4"
 crawlee-storage = { path = "../crawlee-storage" }
-napi = { version = "2", features = ["async", "serde-json"] }
-napi-derive = "2"
+napi = { version = "3", default-features = false, features = ["async", "serde-json", "napi4"] }
+napi-derive = "3"
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[build-dependencies]
+napi-build = "2"
