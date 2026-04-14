@@ -316,10 +316,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        client
-            .push_data(serde_json::json!({"x": 1}))
-            .await
-            .unwrap();
+        client.push_data(serde_json::json!({"x": 1})).await.unwrap();
 
         // Read the raw metadata JSON from disk and verify camelCase keys
         let raw = tokio::fs::read_to_string(client.metadata_path())
@@ -329,16 +326,40 @@ mod tests {
         let obj = parsed.as_object().unwrap();
 
         // Should have camelCase keys
-        assert!(obj.contains_key("itemCount"), "expected 'itemCount' key, got: {raw}");
-        assert!(obj.contains_key("accessedAt"), "expected 'accessedAt' key, got: {raw}");
-        assert!(obj.contains_key("createdAt"), "expected 'createdAt' key, got: {raw}");
-        assert!(obj.contains_key("modifiedAt"), "expected 'modifiedAt' key, got: {raw}");
+        assert!(
+            obj.contains_key("itemCount"),
+            "expected 'itemCount' key, got: {raw}"
+        );
+        assert!(
+            obj.contains_key("accessedAt"),
+            "expected 'accessedAt' key, got: {raw}"
+        );
+        assert!(
+            obj.contains_key("createdAt"),
+            "expected 'createdAt' key, got: {raw}"
+        );
+        assert!(
+            obj.contains_key("modifiedAt"),
+            "expected 'modifiedAt' key, got: {raw}"
+        );
 
         // Should NOT have snake_case keys
-        assert!(!obj.contains_key("item_count"), "unexpected 'item_count' key");
-        assert!(!obj.contains_key("accessed_at"), "unexpected 'accessed_at' key");
-        assert!(!obj.contains_key("created_at"), "unexpected 'created_at' key");
-        assert!(!obj.contains_key("modified_at"), "unexpected 'modified_at' key");
+        assert!(
+            !obj.contains_key("item_count"),
+            "unexpected 'item_count' key"
+        );
+        assert!(
+            !obj.contains_key("accessed_at"),
+            "unexpected 'accessed_at' key"
+        );
+        assert!(
+            !obj.contains_key("created_at"),
+            "unexpected 'created_at' key"
+        );
+        assert!(
+            !obj.contains_key("modified_at"),
+            "unexpected 'modified_at' key"
+        );
     }
 
     #[tokio::test]
@@ -372,10 +393,7 @@ mod tests {
         assert_eq!(meta.item_count, 5);
 
         // After any write, it should re-serialize as camelCase
-        client
-            .push_data(serde_json::json!({"x": 1}))
-            .await
-            .unwrap();
+        client.push_data(serde_json::json!({"x": 1})).await.unwrap();
         let raw = tokio::fs::read_to_string(client.metadata_path())
             .await
             .unwrap();

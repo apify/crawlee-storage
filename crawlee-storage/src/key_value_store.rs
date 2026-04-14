@@ -438,14 +438,25 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let obj = parsed.as_object().unwrap();
 
-        assert!(obj.contains_key("contentType"), "expected 'contentType', got: {raw}");
-        assert!(!obj.contains_key("content_type"), "unexpected 'content_type'");
+        assert!(
+            obj.contains_key("contentType"),
+            "expected 'contentType', got: {raw}"
+        );
+        assert!(
+            !obj.contains_key("content_type"),
+            "unexpected 'content_type'"
+        );
 
         // Store metadata should also be camelCase
-        let store_raw = tokio::fs::read_to_string(client.metadata_path()).await.unwrap();
+        let store_raw = tokio::fs::read_to_string(client.metadata_path())
+            .await
+            .unwrap();
         let store_parsed: serde_json::Value = serde_json::from_str(&store_raw).unwrap();
         let store_obj = store_parsed.as_object().unwrap();
-        assert!(store_obj.contains_key("accessedAt"), "expected 'accessedAt' in store metadata, got: {store_raw}");
+        assert!(
+            store_obj.contains_key("accessedAt"),
+            "expected 'accessedAt' in store metadata, got: {store_raw}"
+        );
     }
 
     #[tokio::test]
