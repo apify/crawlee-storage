@@ -114,6 +114,9 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
 }
 
 /// Convert a serde_json metadata struct to a Python dict.
+/// Keys are camelCase (matching the on-disk format). The Python Pydantic models
+/// accept both camelCase aliases and snake_case field names via
+/// `validate_by_name=True, validate_by_alias=True`.
 fn metadata_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyAny>> {
     let val = serde_json::to_value(meta).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     value_to_py(py, &val)

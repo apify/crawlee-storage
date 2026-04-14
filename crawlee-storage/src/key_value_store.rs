@@ -414,6 +414,41 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn test_on_disk_sidecar_uses_camel_case() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        client
+            .set_value(
+                "test-key",
+                KvsValue::Json(serde_json::json!({"x": 1})),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Read the sidecar metadata
+        let encoded = encode_key("test-key");
+        let sidecar_path = client.path().join(format!("{encoded}.{METADATA_FILENAME}"));
+        let raw = tokio::fs::read_to_string(&sidecar_path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        assert!(obj.contains_key("contentType"), "expected 'contentType', got: {raw}");
+        assert!(!obj.contains_key("content_type"), "unexpected 'content_type'");
+
+        // Store metadata should also be camelCase
+        let store_raw = tokio::fs::read_to_string(client.metadata_path()).await.unwrap();
+        let store_parsed: serde_json::Value = serde_json::from_str(&store_raw).unwrap();
+        let store_obj = store_parsed.as_object().unwrap();
+        assert!(store_obj.contains_key("accessedAt"), "expected 'accessedAt' in store metadata, got: {store_raw}");
+    }
+
+    #[tokio::test]
     async fn test_create_and_set_value() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();

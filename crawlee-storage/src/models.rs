@@ -2,30 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Format string for datetime serialization compatible with Python's `datetime.isoformat()`.
-/// Python produces: `2024-01-15T10:30:00.123456` (6 fractional digits, no trailing zeros trimmed).
-/// We use chrono's default which also produces 6-digit microsecond precision for UTC datetimes.
+/// Format string for datetime serialization.
+/// Produces 6 fractional digits (microsecond precision) with `+00:00` UTC suffix.
+/// Example: `2024-01-15T10:30:00.123456+00:00`
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.6f";
 
 pub(crate) fn serialize_datetime<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    // Python's `str(datetime)` / `datetime.isoformat()` for UTC-aware datetimes produces
-    // something like "2024-01-15 10:30:00.123456+00:00" when using default=str in json.dumps,
-    // but the actual crawlee code uses `datetime.now(timezone.utc)` and `default=str` which
-    // produces "2024-01-15 10:30:00.123456+00:00".
-    // However, looking at the actual metadata files, they use ISO format.
-    // We'll format to match Python: "2024-01-15T10:30:00.123456"
-    // The Python code uses `default=str` which calls `str()` on datetime, producing the space-separated form.
-    // But Pydantic's model_dump with mode='python' keeps datetime objects, and json.dumps with default=str
-    // converts them. Let's check what Python actually writes...
-    // Python: json.dumps(..., default=str) -> str(datetime_obj) -> "2024-01-15 10:30:00.123456+00:00"
-    // Wait, that has a space not T. Let me re-check.
-    // Actually Python's `str(datetime)` uses isoformat with sep='T' since Python 3.
-    // `datetime.now(timezone.utc)` -> `str()` -> "2024-01-15T10:30:00.123456+00:00"
     let formatted = dt.format(DATETIME_FORMAT).to_string();
-    // Append "+00:00" to match Python's UTC timezone representation
     serializer.serialize_str(&format!("{formatted}+00:00"))
 }
 
@@ -34,12 +20,18 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    // Try parsing various formats Python might produce
-    // Format: "2024-01-15T10:30:00.123456+00:00"
+    // Try parsing various formats:
+    // 1. With timezone offset: "2024-01-15T10:30:00.123456+00:00"
+    // 2. With Z suffix (JS format): "2024-01-15T10:30:00.123Z"
+    // 3. Without timezone: "2024-01-15T10:30:00.123456"
     DateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S%.f%:z")
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|_| {
-            // Fallback: "2024-01-15T10:30:00.123456"
+            // "2024-01-15T10:30:00.123Z" — chrono's parse_from_rfc3339 handles this
+            DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc))
+        })
+        .or_else(|_| {
+            // Fallback: no timezone info, assume UTC
             chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S%.f")
                 .map(|ndt| ndt.and_utc())
         })
@@ -53,23 +45,32 @@ fn datetime_now() -> DateTime<Utc> {
 // ─── Storage Metadata (base) ────────────────────────────────────────────────
 
 /// Base metadata shared by all storage types.
-/// Field names use snake_case to match Python's `model_dump()` output (which does NOT use by_alias).
+///
+/// On-disk JSON uses camelCase field names (e.g. `accessedAt`, `createdAt`, `modifiedAt`).
+/// Snake_case aliases are accepted on deserialization for backward compatibility
+/// with files written by the old Python `FileSystemStorageClient`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageMetadata {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(
+        rename = "accessedAt",
+        alias = "accessed_at",
         serialize_with = "serialize_datetime",
         deserialize_with = "deserialize_datetime"
     )]
     pub accessed_at: DateTime<Utc>,
     #[serde(
+        rename = "createdAt",
+        alias = "created_at",
         serialize_with = "serialize_datetime",
         deserialize_with = "deserialize_datetime"
     )]
     pub created_at: DateTime<Utc>,
     #[serde(
+        rename = "modifiedAt",
+        alias = "modified_at",
         serialize_with = "serialize_datetime",
         deserialize_with = "deserialize_datetime"
     )]
@@ -95,6 +96,7 @@ impl StorageMetadata {
 pub struct DatasetMetadata {
     #[serde(flatten)]
     pub base: StorageMetadata,
+    #[serde(rename = "itemCount", alias = "item_count")]
     pub item_count: usize,
 }
 
@@ -128,6 +130,7 @@ impl KeyValueStoreMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyValueStoreRecordMetadata {
     pub key: String,
+    #[serde(rename = "contentType", alias = "content_type")]
     pub content_type: String,
     #[serde(default)]
     pub size: Option<usize>,
@@ -163,9 +166,13 @@ pub struct KeyValueStoreRecord {
 pub struct RequestQueueMetadata {
     #[serde(flatten)]
     pub base: StorageMetadata,
+    #[serde(rename = "hadMultipleClients", alias = "had_multiple_clients")]
     pub had_multiple_clients: bool,
+    #[serde(rename = "handledRequestCount", alias = "handled_request_count")]
     pub handled_request_count: usize,
+    #[serde(rename = "pendingRequestCount", alias = "pending_request_count")]
     pub pending_request_count: usize,
+    #[serde(rename = "totalRequestCount", alias = "total_request_count")]
     pub total_request_count: usize,
 }
 
@@ -183,6 +190,8 @@ impl RequestQueueMetadata {
 
 // ─── Dataset Items List Page ────────────────────────────────────────────────
 
+/// This struct is never deserialized from disk — it's only constructed in Rust
+/// and serialized to pass to the binding layer. No aliases needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetItemsListPage {
     pub count: usize,
@@ -223,16 +232,22 @@ pub struct KvsKeysPage {
 
 // ─── Request Queue Operation Results ────────────────────────────────────────
 
+/// These structs are never deserialized from disk — they're constructed in Rust
+/// and serialized to pass to the binding layer. No aliases needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessedRequest {
     pub id: Option<String>,
+    #[serde(rename = "uniqueKey")]
     pub unique_key: String,
+    #[serde(rename = "wasAlreadyPresent")]
     pub was_already_present: bool,
+    #[serde(rename = "wasAlreadyHandled")]
     pub was_already_handled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnprocessedRequest {
+    #[serde(rename = "uniqueKey")]
     pub unique_key: String,
     pub url: String,
     #[serde(default)]
@@ -241,30 +256,36 @@ pub struct UnprocessedRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddRequestsResponse {
+    #[serde(rename = "processedRequests")]
     pub processed_requests: Vec<ProcessedRequest>,
+    #[serde(rename = "unprocessedRequests")]
     pub unprocessed_requests: Vec<UnprocessedRequest>,
 }
 
 // ─── Request Queue Internal State ───────────────────────────────────────────
 
-/// Internal state for the request queue, persisted via callbacks.
+/// Internal state for the request queue, persisted to KVS as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestQueueState {
-    #[serde(default)]
+    #[serde(default, rename = "sequenceCounter", alias = "sequence_counter")]
     pub sequence_counter: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "forefrontSequenceCounter",
+        alias = "forefront_sequence_counter"
+    )]
     pub forefront_sequence_counter: i64,
     /// unique_key -> sequence_number
-    #[serde(default)]
+    #[serde(default, rename = "forefrontRequests", alias = "forefront_requests")]
     pub forefront_requests: serde_json::Map<String, Value>,
     /// unique_key -> sequence_number
-    #[serde(default)]
+    #[serde(default, rename = "regularRequests", alias = "regular_requests")]
     pub regular_requests: serde_json::Map<String, Value>,
     /// Set of unique_keys currently in progress
-    #[serde(default)]
+    #[serde(default, rename = "inProgressRequests", alias = "in_progress_requests")]
     pub in_progress_requests: Vec<String>,
     /// Set of unique_keys that have been handled
-    #[serde(default)]
+    #[serde(default, rename = "handledRequests", alias = "handled_requests")]
     pub handled_requests: Vec<String>,
 }
 

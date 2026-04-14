@@ -307,6 +307,91 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn test_on_disk_metadata_uses_camel_case() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemDatasetClient::open(None, Some("test-ds".to_string()), None, storage_dir)
+                .await
+                .unwrap();
+
+        client
+            .push_data(serde_json::json!({"x": 1}))
+            .await
+            .unwrap();
+
+        // Read the raw metadata JSON from disk and verify camelCase keys
+        let raw = tokio::fs::read_to_string(client.metadata_path())
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        // Should have camelCase keys
+        assert!(obj.contains_key("itemCount"), "expected 'itemCount' key, got: {raw}");
+        assert!(obj.contains_key("accessedAt"), "expected 'accessedAt' key, got: {raw}");
+        assert!(obj.contains_key("createdAt"), "expected 'createdAt' key, got: {raw}");
+        assert!(obj.contains_key("modifiedAt"), "expected 'modifiedAt' key, got: {raw}");
+
+        // Should NOT have snake_case keys
+        assert!(!obj.contains_key("item_count"), "unexpected 'item_count' key");
+        assert!(!obj.contains_key("accessed_at"), "unexpected 'accessed_at' key");
+        assert!(!obj.contains_key("created_at"), "unexpected 'created_at' key");
+        assert!(!obj.contains_key("modified_at"), "unexpected 'modified_at' key");
+    }
+
+    #[tokio::test]
+    async fn test_loads_legacy_snake_case_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Write a legacy snake_case metadata file (as the old Python client would)
+        let ds_dir = storage_dir.join("datasets").join("legacy-ds");
+        fs::create_dir_all(&ds_dir).await.unwrap();
+        let legacy_meta = r#"{
+  "id": "abc123",
+  "name": "legacy-ds",
+  "accessed_at": "2024-01-15T10:30:00.123456+00:00",
+  "created_at": "2024-01-15T10:30:00.123456+00:00",
+  "modified_at": "2024-01-15T10:30:00.123456+00:00",
+  "item_count": 5
+}"#;
+        fs::write(ds_dir.join(METADATA_FILENAME), legacy_meta)
+            .await
+            .unwrap();
+
+        // Should load successfully despite snake_case keys
+        let client =
+            FileSystemDatasetClient::open(None, Some("legacy-ds".to_string()), None, storage_dir)
+                .await
+                .unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.base.id, "abc123");
+        assert_eq!(meta.item_count, 5);
+
+        // After any write, it should re-serialize as camelCase
+        client
+            .push_data(serde_json::json!({"x": 1}))
+            .await
+            .unwrap();
+        let raw = tokio::fs::read_to_string(client.metadata_path())
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert!(
+            obj.contains_key("itemCount"),
+            "after rewrite, should use camelCase: {raw}"
+        );
+        assert!(
+            !obj.contains_key("item_count"),
+            "after rewrite, should not have snake_case: {raw}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_create_and_push_data() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
