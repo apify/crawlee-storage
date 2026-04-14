@@ -494,15 +494,11 @@ impl FileSystemRequestQueueClient {
             return Ok(None);
         }
 
-        // Set handled_at timestamp
+        // Set handledAt timestamp
         let now = Utc::now();
         let handled_at_str = now.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
         if let Value::Object(ref mut map) = request {
-            map.insert(
-                "handledAt".to_string(),
-                Value::String(handled_at_str.clone()),
-            );
-            map.insert("handled_at".to_string(), Value::String(handled_at_str));
+            map.insert("handledAt".to_string(), Value::String(handled_at_str));
         }
 
         // Write updated request file
