@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Remove redundant state change ([#7](https://github.com/apify/crawlee-storage/pull/7)) ([da0eee6](https://github.com/apify/crawlee-storage/commit/da0eee6369ec84accae3c8a4571ff521708db0ff)) by [@janbuchar](https://github.com/janbuchar)
 - Correctly check operation results in purge methods ([#18](https://github.com/apify/crawlee-storage/pull/18)) ([52dea7d](https://github.com/apify/crawlee-storage/commit/52dea7d59b31a43ab54c24d38c133f37e6a2e655)) by [@janbuchar](https://github.com/janbuchar)
 - Make get_public_url async ([#15](https://github.com/apify/crawlee-storage/pull/15)) ([ce9e76e](https://github.com/apify/crawlee-storage/commit/ce9e76e201f8273c0fe72b3997d4215a46936b44)) by [@janbuchar](https://github.com/janbuchar)
+- Use camelCase for on-disk storage ([#24](https://github.com/apify/crawlee-storage/pull/24)) ([9cf0d18](https://github.com/apify/crawlee-storage/commit/9cf0d18f62ba81c091fc8828eb078123eb3910af)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
