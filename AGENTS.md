@@ -6,7 +6,7 @@ This file provides guidance to programming agents when working with code in this
 
 Rust implementation of filesystem storage clients for Crawlee crawlers, with Python and Node.js bindings. The project follows the same structure as [apify/impit](https://github.com/apify/impit) — a Cargo workspace with a core library crate and per-language binding crates.
 
-The Rust library implements three storage clients (`FileSystemDatasetClient`, `FileSystemKeyValueStoreClient`, `FileSystemRequestQueueClient`) that are byte-for-byte filesystem-compatible with the Python implementations in [crawlee-py](https://github.com/apify/crawlee-py). Requests are treated as opaque JSON blobs (requiring at minimum a `uniqueKey` field).
+The Rust library implements three storage clients (`FileSystemDatasetClient`, `FileSystemKeyValueStoreClient`, `FileSystemRequestQueueClient`) with a filesystem layout matching [crawlee (JS)](https://github.com/apify/crawlee). Requests are treated as opaque JSON blobs (requiring at minimum a `uniqueKey` field).
 
 ## Development Commands
 
@@ -82,7 +82,7 @@ There is no `StorageClient` facade or trait in Rust. The three client structs ar
 
 **KVS value model**: KVS record values use the `KvsValue` enum (`None`, `Json(Value)`, `Text(String)`, `Binary(Vec<u8>)`) instead of `serde_json::Value`. This avoids base64-encoding binary data at the core level — each binding layer converts `KvsValue` variants directly to native types (e.g. `Binary` → Python `bytes`, Node.js `Buffer`).
 
-### Filesystem Layout (must match Python exactly)
+### Filesystem Layout
 
 ```
 {storage_dir}/
@@ -103,16 +103,18 @@ There is no `StorageClient` facade or trait in Rust. The three client structs ar
 
 ### Key Compatibility Constraints
 
-These must be preserved for drop-in compatibility with the Python `FileSystemStorageClient`:
+These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on-disk format:
 
 - **JSON formatting**: Pretty-printed, 2-space indent, non-ASCII preserved (`ensure_ascii=False` equivalent). Use `serde_json::ser::PrettyFormatter::with_indent(b"  ")`.
-- **Metadata field names**: snake_case in JSON (e.g., `item_count`, `created_at`), matching Python's `model_dump()` output.
-- **Datetime format**: `2024-01-15T10:30:00.123456+00:00` — 6 fractional digits, `+00:00` suffix for UTC.
+- **Metadata field names**: camelCase in JSON (e.g., `itemCount`, `accessedAt`, `contentType`), matching JS conventions. Rust struct fields stay snake_case with `#[serde(rename_all = "camelCase")]`. All multi-word fields also have `#[serde(alias = "snake_case")]` so legacy files written by the old Python `FileSystemStorageClient` can still be loaded.
+- **Datetime format**: Written as `2024-01-15T10:30:00.123456+00:00` — 6 fractional digits (microsecond precision), `+00:00` suffix for UTC. Deserialization also accepts JS-style `Z` suffix (e.g., `2024-01-15T10:30:00.123Z`).
+- **Directory names**: snake_case (`datasets`, `key_value_stores`, `request_queues`) — unchanged, matching both JS and Python.
 - **KVS key encoding**: `percent_encoding::utf8_percent_encode(key, NON_ALPHANUMERIC)` — equivalent to Python's `urllib.parse.quote(key, safe='')`.
 - **RQ filenames**: `sha256(unique_key_bytes).hexdigest()[:15] + ".json"`.
 - **Atomic writes**: Write to temp file in same directory, then `rename()`.
 - **`application/x-none` sentinel**: KVS uses this custom MIME type for `None`/null values (empty file on disk).
 - **`serde_json` `preserve_order` feature**: Enabled to maintain JSON key insertion order (matching Python dict ordering).
+- **Python bindings return camelCase**: The Python bindings pass camelCase dicts directly to Python. The Pydantic models in crawlee-python accept both camelCase (via alias) and snake_case (via field name) thanks to `validate_by_name=True, validate_by_alias=True`.
 
 ### Python Bindings
 
