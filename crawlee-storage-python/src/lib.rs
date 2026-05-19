@@ -254,7 +254,7 @@ impl KvsKeyIterator {
         slf
     }
 
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecordMetadata"))]
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -356,7 +356,7 @@ impl FileSystemDatasetClient {
         self.inner.metadata_path()
     }
 
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "DatasetMetadata"))]
     fn get_metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -398,7 +398,7 @@ impl FileSystemDatasetClient {
     }
 
     #[pyo3(signature = (offset=0, limit=999999999999, desc=false, skip_empty=false))]
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "DatasetItemsListPage"))]
     fn get_data<'py>(
         &self,
         py: Python<'py>,
@@ -491,7 +491,7 @@ impl FileSystemKeyValueStoreClient {
         self.inner.metadata_path()
     }
 
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "KeyValueStoreMetadata"))]
     fn get_metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -518,7 +518,7 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "typing.Optional[KeyValueStoreRecord]", imports = ("typing")))]
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -686,7 +686,7 @@ impl FileSystemRequestQueueClient {
         self.inner.metadata_path()
     }
 
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "RequestQueueMetadata"))]
     fn get_metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -714,7 +714,7 @@ impl FileSystemRequestQueueClient {
     }
 
     #[pyo3(signature = (requests, forefront=false))]
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "AddRequestsResponse"))]
     fn add_batch_of_requests<'py>(
         &self,
         py: Python<'py>,
@@ -763,7 +763,7 @@ impl FileSystemRequestQueueClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "typing.Optional[ProcessedRequest]", imports = ("typing")))]
     fn mark_request_as_handled<'py>(
         &self,
         py: Python<'py>,
@@ -784,7 +784,7 @@ impl FileSystemRequestQueueClient {
     }
 
     #[pyo3(signature = (request, forefront=false))]
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "typing.Optional[ProcessedRequest]", imports = ("typing")))]
     fn reclaim_request<'py>(
         &self,
         py: Python<'py>,
