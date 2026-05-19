@@ -2,13 +2,21 @@
 # ruff: noqa: E501, F401, F403, F405
 
 from crawlee_storage._native import *
-
 from . import _native
-
 __all__ = [
     "DatasetItemIterator",
     "FileSystemDatasetClient",
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
     "KvsKeyIterator",
+    "AddRequestsResponse",
+    "DatasetItemsListPage",
+    "DatasetMetadata",
+    "KeyValueStoreMetadata",
+    "KeyValueStoreRecord",
+    "KeyValueStoreRecordMetadata",
+    "ProcessedRequest",
+    "RequestQueueMetadata",
+    "UnprocessedRequest",
 ]
+
