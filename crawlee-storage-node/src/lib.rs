@@ -18,46 +18,6 @@ fn to_js<T: serde::Serialize>(src: &T) -> napi::Result<Value> {
     serde_json::to_value(src).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
-// ─── KVS record helper (hand-built because KeyValueStoreRecord isn't Serialize) ─
-
-/// Convert a KVS record to a plain JS object with camelCase keys.
-fn record_to_value(record: &crawlee_storage::models::KeyValueStoreRecord) -> napi::Result<Value> {
-    use crawlee_storage::models::KvsValue;
-
-    let mut map = serde_json::Map::new();
-    map.insert("key".to_string(), Value::String(record.key.clone()));
-    map.insert(
-        "contentType".to_string(),
-        Value::String(record.content_type.clone()),
-    );
-    map.insert(
-        "size".to_string(),
-        record
-            .size
-            .map(|s| Value::Number(s.into()))
-            .unwrap_or(Value::Null),
-    );
-
-    match &record.value {
-        KvsValue::None => {
-            map.insert("value".to_string(), Value::Null);
-        }
-        KvsValue::Json(v) => {
-            map.insert("value".to_string(), v.clone());
-        }
-        KvsValue::Text(s) => {
-            map.insert("value".to_string(), Value::String(s.clone()));
-        }
-        KvsValue::Binary(bytes) => {
-            let arr: Vec<Value> = bytes.iter().map(|b| Value::Number((*b).into())).collect();
-            map.insert("value".to_string(), Value::Array(arr));
-            map.insert("__binary__".to_string(), Value::Bool(true));
-        }
-    }
-
-    Ok(Value::Object(map))
-}
-
 // ─── Dataset Client ─────────────────────────────────────────────────────────
 
 #[napi]
@@ -290,62 +250,107 @@ impl FileSystemKeyValueStoreClient {
         self.inner.purge().await.map_err(storage_err)
     }
 
+    /// Get a record by key. Returns the raw value bytes as a Buffer.
     #[napi(ts_return_type = "Promise<KeyValueStoreRecord | null>")]
     pub async fn get_value(&self, key: String) -> napi::Result<Option<Value>> {
-        let record = self.inner.get_value(&key).await.map_err(storage_err)?;
-        match record {
-            Some(r) => Ok(Some(record_to_value(&r)?)),
+        let inner = self.inner.clone();
+        let result = inner.get_value_file(&key).await.map_err(storage_err)?;
+
+        match result {
+            Some((path, meta)) => {
+                let raw_bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+                let byte_arr: Vec<Value> = raw_bytes
+                    .iter()
+                    .map(|b| Value::Number((*b).into()))
+                    .collect();
+
+                let mut map = serde_json::Map::new();
+                map.insert("key".to_string(), Value::String(key));
+                map.insert("contentType".to_string(), Value::String(meta.content_type));
+                map.insert(
+                    "size".to_string(),
+                    meta.size
+                        .map(|s| Value::Number(s.into()))
+                        .unwrap_or(Value::Null),
+                );
+                map.insert("value".to_string(), Value::Array(byte_arr));
+
+                Ok(Some(Value::Object(map)))
+            }
             None => Ok(None),
         }
     }
 
-    #[napi(ts_args_type = "key: string, value: unknown, contentType?: string | undefined | null")]
-    pub async fn set_value(
-        &self,
-        key: String,
-        value: Value,
-        content_type: Option<String>,
-    ) -> napi::Result<()> {
-        use crawlee_storage::models::KvsValue;
-
-        let kvs_value = if value.is_null() {
-            KvsValue::None
-        } else if let Some(s) = value.as_str() {
-            // String values → Text
-            KvsValue::Text(s.to_string())
-        } else {
-            // Everything else → JSON
-            KvsValue::Json(value)
-        };
-
-        let content_type = Some(content_type.unwrap_or_else(|| {
-            match &kvs_value {
-                KvsValue::None => "application/x-none",
-                KvsValue::Json(_) => "application/json",
-                KvsValue::Text(_) => "text/plain",
-                KvsValue::Binary(_) => "application/octet-stream",
-            }
-            .to_string()
-        }));
-
-        self.inner
-            .set_value(&key, kvs_value, content_type)
-            .await
-            .map_err(storage_err)
-    }
-
-    /// Set a binary value (Buffer) for a key.
+    /// Set a value from a Buffer.
     #[napi]
-    pub async fn set_value_buffer(
+    pub async fn set_value(
         &self,
         key: String,
         value: Buffer,
         content_type: Option<String>,
     ) -> napi::Result<()> {
-        use crawlee_storage::models::KvsValue;
-        let ct = Some(content_type.unwrap_or_else(|| "application/octet-stream".to_string()));
-        self.inner
-            .set_value(&key, KvsValue::Binary(value.to_vec()), ct)
+        let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let inner = self.inner.clone();
+        inner
+            .set_value_raw(&key, &value, ct)
+            .await
+            .map_err(storage_err)
+    }
+
+    /// Internal: get file info for a record (path + metadata), used by the JS
+    /// wrapper to create a ReadableStream without buffering the entire file.
+    #[napi(js_name = "_getValueFileInfo", skip_typescript)]
+    pub async fn get_value_file_info(&self, key: String) -> napi::Result<Option<Value>> {
+        let inner = self.inner.clone();
+        let result = inner.get_value_file(&key).await.map_err(storage_err)?;
+
+        match result {
+            Some((path, meta)) => {
+                let mut map = serde_json::Map::new();
+                map.insert("key".to_string(), Value::String(key));
+                map.insert("contentType".to_string(), Value::String(meta.content_type));
+                map.insert(
+                    "size".to_string(),
+                    meta.size
+                        .map(|s| Value::Number(s.into()))
+                        .unwrap_or(Value::Null),
+                );
+                map.insert(
+                    "filePath".to_string(),
+                    Value::String(path.to_string_lossy().to_string()),
+                );
+                Ok(Some(Value::Object(map)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Internal: get a temp file path in the store directory for streaming writes.
+    #[napi(js_name = "_getTempFilePath", skip_typescript)]
+    pub fn get_temp_file_path(&self) -> String {
+        self.inner.temp_file_path().to_string_lossy().to_string()
+    }
+
+    /// Internal: finalize a streamed write by renaming temp file → value file
+    /// and writing sidecar + store metadata.
+    #[napi(js_name = "_finalizeStreamedValue", skip_typescript)]
+    pub async fn finalize_streamed_value(
+        &self,
+        key: String,
+        temp_path: String,
+        size: u32,
+        content_type: String,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        inner
+            .finalize_streamed_value(
+                &key,
+                std::path::Path::new(&temp_path),
+                size as usize,
+                content_type,
+            )
             .await
             .map_err(storage_err)
     }

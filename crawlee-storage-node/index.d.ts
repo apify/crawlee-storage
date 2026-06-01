@@ -28,9 +28,14 @@ export interface KeyValueStoreRecord {
     key: string;
     contentType: string;
     size: number | null;
-    value: unknown;
-    /** Present and true when value is binary (an array of byte values) */
-    __binary__?: boolean;
+    value: Buffer;
+}
+
+export interface KeyValueStoreStreamRecord {
+    key: string;
+    contentType: string;
+    size: number | null;
+    stream: ReadableStream<Uint8Array>;
 }
 
 export interface KeyValueStoreRecordMetadata {
@@ -107,14 +112,10 @@ export declare class FileSystemKeyValueStoreClient {
     getMetadata(): Promise<KeyValueStoreMetadata>;
     dropStorage(): Promise<void>;
     purge(): Promise<void>;
+    /** Get a record by key. Returns the raw value bytes as a Buffer. */
     getValue(key: string): Promise<KeyValueStoreRecord | null>;
-    setValue(key: string, value: unknown, contentType?: string | undefined | null): Promise<void>;
-    /** Set a binary value (Buffer) for a key. */
-    setValueBuffer(
-        key: string,
-        value: Buffer,
-        contentType?: string | undefined | null,
-    ): Promise<void>;
+    /** Set a value from a Buffer. */
+    setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
     iterateKeys(
         exclusiveStartKey?: string | undefined | null,

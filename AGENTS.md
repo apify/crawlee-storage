@@ -148,7 +148,7 @@ These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on
 
 ### Node.js Bindings
 
-- Uses **napi-rs v3** (`napi = "3"`, `napi-derive = "3"`) with `async`, `serde-json`, and `napi4` features.
+- Uses **napi-rs v3** (`napi = "3"`, `napi-derive = "3"`) with `async`, `serde-json`, `napi4`, `napi5`, `web_stream`, and `tokio_rt` features.
 - `build.rs` calls `napi_build::setup()` — standard napi-rs build script.
 - `index.js` and `index.d.ts` are **auto-generated** by `napi build` (via `@napi-rs/cli`). Do not edit them manually.
 - `dts-header.d.ts` contains hand-written TypeScript interfaces (`DatasetMetadata`, `KeyValueStoreRecord`, etc.) that are prepended to the auto-generated `index.d.ts`. This is configured via `"dtsHeaderFile"` in `package.json`'s `napi` section.
@@ -156,7 +156,8 @@ These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on
 - **camelCase convention**: The core Rust library serializes with snake_case (for Python compatibility). The Node binding layer converts all object keys from snake_case to camelCase via `to_camel_case_keys()` before returning to JS. The `dts-header.d.ts` interfaces use camelCase field names accordingly.
 - Each Rust client is wrapped in `Arc` so it can be cloned into async blocks.
 - JSON data crosses the FFI boundary as `serde_json::Value` ↔ JS objects (via napi's `serde-json` feature).
-- KVS binary values are received as `napi::bindgen_prelude::Buffer` and converted to `KvsValue::Binary(Vec<u8>)`. On read, binary data is returned as a JSON array of byte values with a `__binary__: true` marker.
+- KVS values are `Buffer`-only in the Node bindings. `setValue` accepts `napi::bindgen_prelude::Buffer` directly, and `getValue` returns raw file bytes as a JSON array that the JS wrapper in `lib.js` converts to a `Buffer` before returning to the caller.
+- KVS streaming is supported: `getValueStream` returns a Web `ReadableStream<Uint8Array>` (created via `fs.createReadStream` + `Readable.toWeb` in the JS wrapper), and `setValueStream` pipes a `ReadableStream` directly to a temp file on disk (via `Writable.toWeb`), then calls a Rust method to atomically finalize it. No in-memory buffering.
 - Tests are TypeScript (`.test.ts`) using Vitest, importing directly from `../index.js`.
 - Linting uses `oxlint` with type-aware rules (via `tsgolint`). Formatting uses `oxfmt`.
 
