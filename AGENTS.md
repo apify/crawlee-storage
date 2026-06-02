@@ -143,7 +143,7 @@ These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on
 - Uses **PyO3 0.28** with **pyo3-async-runtimes** (tokio feature) for native Python coroutines.
 - Each Rust client is wrapped in `Arc` so it can be cloned into async blocks (standard pattern for pyo3 async methods).
 - JSON data crosses the FFI boundary as Python dicts/lists, converted to/from `serde_json::Value` via `value_to_py` / `py_to_value` helper functions.
-- KVS binary values cross the FFI boundary as Python `bytes` ↔ `KvsValue::Binary(Vec<u8>)` directly — no base64 intermediary.
+- KVS values are `bytes`-only in the Python bindings. `setValue` accepts `bytes` (PyO3 `Vec<u8>`) directly, and `getValue` returns raw file bytes as Python `bytes`. The caller is responsible for serialization/deserialization.
 - The compiled native module is `crawlee_storage._native`, re-exported by `crawlee_storage/__init__.py`.
 
 ### Node.js Bindings

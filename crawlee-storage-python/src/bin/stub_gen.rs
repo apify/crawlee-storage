@@ -234,7 +234,7 @@ fn generate_typed_dicts() -> String {
                     py_type: "builtins.str".into(),
                 },
                 TypedDictField {
-                    name: "content_type".into(),
+                    name: "contentType".into(),
                     py_type: "builtins.str".into(),
                 },
                 TypedDictField {
@@ -243,7 +243,7 @@ fn generate_typed_dicts() -> String {
                 },
                 TypedDictField {
                     name: "value".into(),
-                    py_type: "typing.Any".into(),
+                    py_type: "builtins.bytes".into(),
                 },
             ],
         },

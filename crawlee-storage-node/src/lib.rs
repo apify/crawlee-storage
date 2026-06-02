@@ -87,7 +87,7 @@ impl FileSystemDatasetClient {
             .inner
             .get_data(
                 offset.unwrap_or(0) as usize,
-                limit.unwrap_or(999_999_999) as usize,
+                limit.map_or(999_999_999_999_usize, |l| l as usize),
                 desc.unwrap_or(false),
                 skip_empty.unwrap_or(false),
             )

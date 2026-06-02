@@ -63,9 +63,15 @@ export interface ProcessedRequest {
     wasAlreadyHandled: boolean;
 }
 
+export interface UnprocessedRequest {
+    uniqueKey: string;
+    url: string;
+    method?: string | null;
+}
+
 export interface AddRequestsResponse {
     processedRequests: ProcessedRequest[];
-    unprocessedRequests: unknown[];
+    unprocessedRequests: UnprocessedRequest[];
 }
 export declare class DatasetItemIterator {
     /** Fetch the next item. Returns null when iteration is exhausted. */
