@@ -824,9 +824,9 @@ impl FileSystemRequestQueueClient {
         }
 
         // Sort forefront: newest first (highest sequence number first = LIFO)
-        forefront.sort_by(|a, b| b.1.cmp(&a.1));
+        forefront.sort_by_key(|b| std::cmp::Reverse(b.1));
         // Sort regular: oldest first (lowest sequence number first = FIFO)
-        regular.sort_by(|a, b| a.1.cmp(&b.1));
+        regular.sort_by_key(|a| a.1);
 
         // Fill cache: forefront first, then regular
         for (_, _, req) in forefront {
