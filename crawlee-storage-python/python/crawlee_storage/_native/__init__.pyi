@@ -11,7 +11,76 @@ __all__ = [
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
     "KvsKeyIterator",
+    "AddRequestsResponse",
+    "DatasetItemsListPage",
+    "DatasetMetadata",
+    "KeyValueStoreMetadata",
+    "KeyValueStoreRecord",
+    "KeyValueStoreRecordMetadata",
+    "ProcessedRequest",
+    "RequestQueueMetadata",
+    "UnprocessedRequest",
 ]
+
+class DatasetMetadata(typing.TypedDict):
+    id: builtins.str
+    name: typing.Optional[builtins.str]
+    accessedAt: builtins.str
+    createdAt: builtins.str
+    modifiedAt: builtins.str
+    itemCount: builtins.int
+
+class KeyValueStoreMetadata(typing.TypedDict):
+    id: builtins.str
+    name: typing.Optional[builtins.str]
+    accessedAt: builtins.str
+    createdAt: builtins.str
+    modifiedAt: builtins.str
+
+class KeyValueStoreRecordMetadata(typing.TypedDict):
+    key: builtins.str
+    contentType: builtins.str
+    size: typing.Optional[builtins.int]
+
+class KeyValueStoreRecord(typing.TypedDict):
+    key: builtins.str
+    content_type: builtins.str
+    size: typing.Optional[builtins.int]
+    value: typing.Any
+
+class RequestQueueMetadata(typing.TypedDict):
+    id: builtins.str
+    name: typing.Optional[builtins.str]
+    accessedAt: builtins.str
+    createdAt: builtins.str
+    modifiedAt: builtins.str
+    hadMultipleClients: builtins.bool
+    handledRequestCount: builtins.int
+    pendingRequestCount: builtins.int
+    totalRequestCount: builtins.int
+
+class DatasetItemsListPage(typing.TypedDict):
+    count: builtins.int
+    offset: builtins.int
+    limit: builtins.int
+    total: builtins.int
+    desc: builtins.bool
+    items: builtins.list[dict[builtins.str, typing.Any]]
+
+class ProcessedRequest(typing.TypedDict):
+    id: typing.Optional[builtins.str]
+    uniqueKey: builtins.str
+    wasAlreadyPresent: builtins.bool
+    wasAlreadyHandled: builtins.bool
+
+class UnprocessedRequest(typing.TypedDict):
+    uniqueKey: builtins.str
+    url: builtins.str
+    method: typing.Optional[builtins.str]
+
+class AddRequestsResponse(typing.TypedDict):
+    processedRequests: builtins.list[ProcessedRequest]
+    unprocessedRequests: builtins.list[UnprocessedRequest]
 
 @typing.final
 class DatasetItemIterator:
@@ -37,7 +106,7 @@ class FileSystemDatasetClient:
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
     ) -> FileSystemDatasetClient: ...
-    async def get_metadata(self) -> dict[str, typing.Any]: ...
+    async def get_metadata(self) -> DatasetMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
     async def push_data(self, data: typing.Any) -> None: ...
@@ -47,7 +116,7 @@ class FileSystemDatasetClient:
         limit: builtins.int = 999999999999,
         desc: builtins.bool = False,
         skip_empty: builtins.bool = False,
-    ) -> dict[str, typing.Any]: ...
+    ) -> DatasetItemsListPage: ...
     def iterate_items(
         self,
         offset: builtins.int = 0,
@@ -76,10 +145,10 @@ class FileSystemKeyValueStoreClient:
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
     ) -> FileSystemKeyValueStoreClient: ...
-    async def get_metadata(self) -> dict[str, typing.Any]: ...
+    async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
-    async def get_value(self, key: builtins.str) -> typing.Optional[dict[str, typing.Any]]: ...
+    async def get_value(self, key: builtins.str) -> typing.Optional[KeyValueStoreRecord]: ...
     async def set_value(
         self, key: builtins.str, value: typing.Any, content_type: typing.Optional[builtins.str] = None
     ) -> None: ...
@@ -112,22 +181,20 @@ class FileSystemRequestQueueClient:
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
     ) -> FileSystemRequestQueueClient: ...
-    async def get_metadata(self) -> dict[str, typing.Any]: ...
+    async def get_metadata(self) -> RequestQueueMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
-    async def add_batch_of_requests(
-        self, requests: list, forefront: builtins.bool = False
-    ) -> dict[str, typing.Any]: ...
+    async def add_batch_of_requests(self, requests: list, forefront: builtins.bool = False) -> AddRequestsResponse: ...
     async def get_request(self, unique_key: builtins.str) -> typing.Optional[dict[str, typing.Any]]: ...
     async def fetch_next_request(self) -> typing.Optional[dict[str, typing.Any]]: ...
-    async def mark_request_as_handled(self, request: typing.Any) -> typing.Optional[dict[str, typing.Any]]: ...
+    async def mark_request_as_handled(self, request: typing.Any) -> typing.Optional[ProcessedRequest]: ...
     async def reclaim_request(
         self, request: typing.Any, forefront: builtins.bool = False
-    ) -> typing.Optional[dict[str, typing.Any]]: ...
+    ) -> typing.Optional[ProcessedRequest]: ...
     async def is_empty(self) -> builtins.bool: ...
     async def persist_state(self) -> None: ...
 
 @typing.final
 class KvsKeyIterator:
     def __aiter__(self) -> KvsKeyIterator: ...
-    async def __anext__(self) -> dict[str, typing.Any]: ...
+    async def __anext__(self) -> KeyValueStoreRecordMetadata: ...

@@ -11,4 +11,13 @@ __all__ = [
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
     "KvsKeyIterator",
+    "AddRequestsResponse",
+    "DatasetItemsListPage",
+    "DatasetMetadata",
+    "KeyValueStoreMetadata",
+    "KeyValueStoreRecord",
+    "KeyValueStoreRecordMetadata",
+    "ProcessedRequest",
+    "RequestQueueMetadata",
+    "UnprocessedRequest",
 ]
