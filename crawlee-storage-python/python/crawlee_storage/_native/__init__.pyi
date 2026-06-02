@@ -44,9 +44,9 @@ class KeyValueStoreRecordMetadata(typing.TypedDict):
 
 class KeyValueStoreRecord(typing.TypedDict):
     key: builtins.str
-    content_type: builtins.str
+    contentType: builtins.str
     size: typing.Optional[builtins.int]
-    value: typing.Any
+    value: builtins.bytes
 
 class RequestQueueMetadata(typing.TypedDict):
     id: builtins.str
@@ -150,7 +150,10 @@ class FileSystemKeyValueStoreClient:
     async def purge(self) -> None: ...
     async def get_value(self, key: builtins.str) -> typing.Optional[KeyValueStoreRecord]: ...
     async def set_value(
-        self, key: builtins.str, value: typing.Any, content_type: typing.Optional[builtins.str] = None
+        self,
+        key: builtins.str,
+        value: typing.Sequence[builtins.int],
+        content_type: typing.Optional[builtins.str] = None,
     ) -> None: ...
     async def delete_value(self, key: builtins.str) -> None: ...
     def iterate_keys(
