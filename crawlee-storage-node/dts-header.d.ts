@@ -28,9 +28,14 @@ export interface KeyValueStoreRecord {
     key: string;
     contentType: string;
     size: number | null;
-    value: unknown;
-    /** Present and true when value is binary (an array of byte values) */
-    __binary__?: boolean;
+    value: Buffer;
+}
+
+export interface KeyValueStoreStreamRecord {
+    key: string;
+    contentType: string;
+    size: number | null;
+    stream: ReadableStream<Uint8Array>;
 }
 
 export interface KeyValueStoreRecordMetadata {

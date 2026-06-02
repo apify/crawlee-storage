@@ -360,6 +360,118 @@ impl FileSystemKeyValueStoreClient {
         format!("file://{}", value_path.display())
     }
 
+    /// Get the file path and metadata for a record, without reading its contents.
+    ///
+    /// Returns `(value_path, record_metadata)` if the key exists, or `None` if it doesn't.
+    /// This is useful for streaming reads — the binding layer can open the file
+    /// and stream it directly instead of buffering the entire contents.
+    pub async fn get_value_file(
+        &self,
+        key: &str,
+    ) -> Result<Option<(PathBuf, KeyValueStoreRecordMetadata)>> {
+        let encoded = encode_key(key);
+        let value_path = self.path.join(&encoded);
+        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+
+        // Always update accessed_at on read, even for missing keys
+        {
+            let mut meta = self.metadata.lock().await;
+            meta.base.accessed_at = Utc::now();
+            let json = json_dumps_value(&*meta)?;
+            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
+        }
+
+        if !value_path.exists() || !sidecar_path.exists() {
+            return Ok(None);
+        }
+
+        let sidecar_content = fs::read_to_string(&sidecar_path).await?;
+        let record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
+
+        Ok(Some((value_path, record_meta)))
+    }
+
+    /// Write raw bytes for a key, with sidecar metadata and atomic write.
+    ///
+    /// This is the low-level write method used when the value is already
+    /// fully materialized in memory (e.g. from a `Buffer`).
+    pub async fn set_value_raw(&self, key: &str, data: &[u8], content_type: String) -> Result<()> {
+        let encoded = encode_key(key);
+        let value_path = self.path.join(&encoded);
+        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+
+        atomic_write(&value_path, data).await?;
+
+        let record_meta = KeyValueStoreRecordMetadata {
+            key: key.to_string(),
+            content_type,
+            size: Some(data.len()),
+        };
+        let sidecar_json = json_dumps_value(&record_meta)?;
+        atomic_write(&sidecar_path, sidecar_json.as_bytes()).await?;
+
+        {
+            let mut meta = self.metadata.lock().await;
+            let now = Utc::now();
+            meta.base.accessed_at = now;
+            meta.base.modified_at = now;
+            let json = json_dumps_value(&*meta)?;
+            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a path for a new temp file in the store directory.
+    ///
+    /// The binding layer uses this to stream data to a temp file, then calls
+    /// [`finalize_streamed_value`] to atomically move it into place.
+    pub fn temp_file_path(&self) -> PathBuf {
+        self.path
+            .join(format!(".tmp.{}", crypto_random_object_id(12)))
+    }
+
+    /// Finalize a streamed write: atomically rename `temp_path` to the value
+    /// file for `key`, write the sidecar metadata, and update store metadata.
+    ///
+    /// The caller is responsible for having already written the full value data
+    /// to `temp_path` (e.g. by piping a stream to it).
+    pub async fn finalize_streamed_value(
+        &self,
+        key: &str,
+        temp_path: &Path,
+        size: usize,
+        content_type: String,
+    ) -> Result<()> {
+        let encoded = encode_key(key);
+        let value_path = self.path.join(&encoded);
+        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+
+        // Atomic rename from temp → final value path
+        fs::rename(temp_path, &value_path).await?;
+
+        // Write sidecar metadata
+        let record_meta = KeyValueStoreRecordMetadata {
+            key: key.to_string(),
+            content_type,
+            size: Some(size),
+        };
+        let sidecar_json = json_dumps_value(&record_meta)?;
+        atomic_write(&sidecar_path, sidecar_json.as_bytes()).await?;
+
+        // Update store metadata
+        {
+            let mut meta = self.metadata.lock().await;
+            let now = Utc::now();
+            meta.base.accessed_at = now;
+            meta.base.modified_at = now;
+            let json = json_dumps_value(&*meta)?;
+            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
+        }
+
+        Ok(())
+    }
+
     /// Check if a record exists for a key.
     pub async fn record_exists(&self, key: &str) -> bool {
         let encoded = encode_key(key);

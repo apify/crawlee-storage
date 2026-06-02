@@ -17,5 +17,5 @@
         "typescript/no-unsafe-return": "warn",
         "no-unused-vars": "warn"
     },
-    "ignorePatterns": ["index.js", "index.d.ts"]
+    "ignorePatterns": ["index.js", "index.d.ts", "lib.js"]
 }
