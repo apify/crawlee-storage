@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Utilize more precise exception types in the python wrapper ([#9](https://github.com/apify/crawlee-storage/pull/9)) ([d2838ec](https://github.com/apify/crawlee-storage/commit/d2838ecd01cfeb29de5ce23e0275f8267166fabb)) by [@janbuchar](https://github.com/janbuchar)
 - Improved async iteration support ([#20](https://github.com/apify/crawlee-storage/pull/20)) ([9004c7e](https://github.com/apify/crawlee-storage/commit/9004c7e57a1e9266b4866e622ad876157db15d3c)) by [@janbuchar](https://github.com/janbuchar), closes [#10](https://github.com/apify/crawlee-storage/issues/10)
 - Add node.js bindings ([#23](https://github.com/apify/crawlee-storage/pull/23)) ([85470b3](https://github.com/apify/crawlee-storage/commit/85470b31c138203ca3184a0631f1f5507afc0dcc)) by [@janbuchar](https://github.com/janbuchar), closes [#22](https://github.com/apify/crawlee-storage/issues/22)
+- Node KeyValueStore adapter accepts Buffers and Streams only ([#28](https://github.com/apify/crawlee-storage/pull/28)) ([2aac3d8](https://github.com/apify/crawlee-storage/commit/2aac3d8024a6fea5b408b0066f4aace32bdd7203)) by [@janbuchar](https://github.com/janbuchar)
 
 ### 🐛 Bug Fixes
 
