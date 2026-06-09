@@ -539,6 +539,7 @@ impl FileSystemKeyValueStoreClient {
         &self,
         py: Python<'py>,
         key: String,
+        #[gen_stub(override_type(type_repr = "builtins.bytes", imports = ("builtins")))]
         value: Vec<u8>,
         content_type: Option<String>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
