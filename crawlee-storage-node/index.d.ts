@@ -57,7 +57,7 @@ export interface RequestQueueMetadata {
 }
 
 export interface ProcessedRequest {
-    id: string | null;
+    requestId: string;
     uniqueKey: string;
     wasAlreadyPresent: boolean;
     wasAlreadyHandled: boolean;
@@ -156,6 +156,8 @@ export declare class FileSystemRequestQueueClient {
         forefront?: boolean | undefined | null,
     ): Promise<ProcessedRequest | null>;
     isEmpty(): Promise<boolean>;
+    isFinished(): Promise<boolean>;
+    setExpectedRequestProcessingTime(secs: number): Promise<void>;
     persistState(): Promise<void>;
 }
 

@@ -163,10 +163,11 @@ describe('FileSystemRequestQueueClient', () => {
         expect(missing).toBeNull();
     });
 
-    it('should report is_empty correctly', async () => {
+    it('should report isEmpty / isFinished correctly', async () => {
         const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
         expect(await client.isEmpty()).toBe(true);
+        expect(await client.isFinished()).toBe(true);
 
         await client.addBatchOfRequests(
             [
@@ -179,16 +180,49 @@ describe('FileSystemRequestQueueClient', () => {
             false,
         );
 
+        // Pending request => not empty, not finished.
         expect(await client.isEmpty()).toBe(false);
+        expect(await client.isFinished()).toBe(false);
 
-        // Fetch and handle
+        // Fetch (locks it).
         const request = await client.fetchNextRequest();
 
-        // In-progress — not empty
-        expect(await client.isEmpty()).toBe(false);
+        // Only a locked/in-progress request remains:
+        // - isEmpty() is TRUE (nothing fetchable right now).
+        // - isFinished() is FALSE (work is still outstanding).
+        expect(await client.isEmpty()).toBe(true);
+        expect(await client.isFinished()).toBe(false);
 
         await client.markRequestAsHandled(request!);
         expect(await client.isEmpty()).toBe(true);
+        expect(await client.isFinished()).toBe(true);
+    });
+
+    it('should expose a non-null requestId on processed requests', async () => {
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
+
+        const response = await client.addBatchOfRequests(
+            [{ uniqueKey: 'abc', url: 'https://example.com/abc', method: 'GET' }],
+            false,
+        );
+
+        const processed = response.processedRequests[0];
+        expect(typeof processed.requestId).toBe('string');
+        expect(processed.requestId.length).toBeGreaterThan(0);
+    });
+
+    it('should persist orderNo and id inside the request file', async () => {
+        const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
+
+        await client.addBatchOfRequests(
+            [{ uniqueKey: 'req1', url: 'https://example.com/1', method: 'GET' }],
+            false,
+        );
+
+        const stored = await client.getRequest('req1');
+        expect(stored).not.toBeNull();
+        expect(typeof stored!.id).toBe('string');
+        expect(typeof stored!.orderNo).toBe('number');
     });
 
     it('should purge all requests', async () => {

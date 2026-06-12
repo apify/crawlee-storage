@@ -115,7 +115,6 @@ const OPTIONAL_OVERRIDES: &[(&str, &str, &str)] = &[
         "size",
         "typing.Optional[builtins.int]",
     ),
-    ("ProcessedRequest", "id", "typing.Optional[builtins.str]"),
     (
         "UnprocessedRequest",
         "method",
@@ -185,7 +184,7 @@ fn generate_typed_dicts() -> String {
         items: vec![serde_json::json!({})],
     };
     let processed_req = models::ProcessedRequest {
-        id: None,
+        request_id: String::new(),
         unique_key: String::new(),
         was_already_present: false,
         was_already_handled: false,
@@ -197,7 +196,7 @@ fn generate_typed_dicts() -> String {
     };
     let add_requests_resp = models::AddRequestsResponse {
         processed_requests: vec![models::ProcessedRequest {
-            id: None,
+            request_id: String::new(),
             unique_key: String::new(),
             was_already_present: false,
             was_already_handled: false,

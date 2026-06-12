@@ -783,6 +783,28 @@ impl FileSystemRequestQueueClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(client.is_empty().await) })
     }
 
+    #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
+    fn is_finished<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { Ok(client.is_finished().await) },
+        )
+    }
+
+    #[gen_stub(override_return_type(type_repr = "None"))]
+    fn set_expected_request_processing_time<'py>(
+        &self,
+        py: Python<'py>,
+        secs: f64,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.set_expected_request_processing_time(secs).await;
+            Ok(())
+        })
+    }
+
     #[gen_stub(override_return_type(type_repr = "None"))]
     fn persist_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();

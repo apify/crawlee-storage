@@ -119,6 +119,32 @@ pub fn sha256_prefix(input: &str, len: usize) -> String {
     hex[..len.min(hex.len())].to_string()
 }
 
+/// Length of a request ID, matching the JS `REQUEST_ID_LENGTH` constant.
+pub const REQUEST_ID_LENGTH: usize = 15;
+
+/// Compute a request ID from a unique key, matching the JS
+/// `uniqueKeyToRequestId` (and the Apify platform):
+/// `sha256(uniqueKey)` → standard base64 → strip `+`/`/`/`=` → first 15 chars.
+pub fn unique_key_to_request_id(unique_key: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let mut hasher = Sha256::new();
+    hasher.update(unique_key.as_bytes());
+    let digest = hasher.finalize();
+
+    let encoded = STANDARD.encode(digest);
+    let cleaned: String = encoded
+        .chars()
+        .filter(|c| *c != '+' && *c != '/' && *c != '=')
+        .collect();
+
+    if cleaned.len() > REQUEST_ID_LENGTH {
+        cleaned[..REQUEST_ID_LENGTH].to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// The metadata filename constant, matching Python's `METADATA_FILENAME`.
 pub const METADATA_FILENAME: &str = "__metadata__.json";
 
