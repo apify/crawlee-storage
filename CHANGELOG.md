@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - Improve Python set_value type ([#30](https://github.com/apify/crawlee-storage/pull/30)) ([b9c56a9](https://github.com/apify/crawlee-storage/commit/b9c56a9392a47d23f21fc1709f07e9a857d6c071)) by [@janbuchar](https://github.com/janbuchar)
 - Finalize the RequestQueueClient ([#33](https://github.com/apify/crawlee-storage/pull/33)) ([37ef18d](https://github.com/apify/crawlee-storage/commit/37ef18ddb6b8904bed370a915618f0903e0e476d)) by [@janbuchar](https://github.com/janbuchar), closes [#32](https://github.com/apify/crawlee-storage/issues/32)
 - Fix RequestQueue locking and crash recovery ([#34](https://github.com/apify/crawlee-storage/pull/34)) ([1b4a9f1](https://github.com/apify/crawlee-storage/commit/1b4a9f19920c7a4eb078e792162196fda145b4f9)) by [@janbuchar](https://github.com/janbuchar)
+- Fix RequestQueue order handling ([#35](https://github.com/apify/crawlee-storage/pull/35)) ([2d0bbea](https://github.com/apify/crawlee-storage/commit/2d0bbeaad7cde67716cf4bcd9e4951876ffb4f1a)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
