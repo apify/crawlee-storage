@@ -174,6 +174,15 @@ pub struct RequestQueueMetadata {
     pub pending_request_count: usize,
     #[serde(rename = "totalRequestCount", alias = "total_request_count")]
     pub total_request_count: usize,
+    /// Ordered list of forefront request ids (by unique_key), mirroring the JS
+    /// `forefrontRequestIds`. Persisted so forefront ordering survives a reopen.
+    #[serde(
+        rename = "forefrontRequestIds",
+        alias = "forefront_request_ids",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub forefront_request_ids: Vec<String>,
 }
 
 impl RequestQueueMetadata {
@@ -184,6 +193,7 @@ impl RequestQueueMetadata {
             handled_request_count: 0,
             pending_request_count: 0,
             total_request_count: 0,
+            forefront_request_ids: Vec::new(),
         }
     }
 }
