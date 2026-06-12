@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - Make get_public_url async ([#15](https://github.com/apify/crawlee-storage/pull/15)) ([ce9e76e](https://github.com/apify/crawlee-storage/commit/ce9e76e201f8273c0fe72b3997d4215a46936b44)) by [@janbuchar](https://github.com/janbuchar)
 - Use camelCase for on-disk storage ([#24](https://github.com/apify/crawlee-storage/pull/24)) ([9cf0d18](https://github.com/apify/crawlee-storage/commit/9cf0d18f62ba81c091fc8828eb078123eb3910af)) by [@janbuchar](https://github.com/janbuchar)
 - Improve Python set_value type ([#30](https://github.com/apify/crawlee-storage/pull/30)) ([b9c56a9](https://github.com/apify/crawlee-storage/commit/b9c56a9392a47d23f21fc1709f07e9a857d6c071)) by [@janbuchar](https://github.com/janbuchar)
+- Finalize the RequestQueueClient ([#33](https://github.com/apify/crawlee-storage/pull/33)) ([37ef18d](https://github.com/apify/crawlee-storage/commit/37ef18ddb6b8904bed370a915618f0903e0e476d)) by [@janbuchar](https://github.com/janbuchar), closes [#32](https://github.com/apify/crawlee-storage/issues/32)
 
 
 <!-- git-cliff-unreleased-end -->
