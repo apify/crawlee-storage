@@ -24,16 +24,24 @@ const DEFAULT_LOCK_MILLIS: i64 = 3 * 60 * 1000;
 /// Lightweight in-memory index entry for a single request, mirroring the
 /// `orderNo` persisted in the request file on disk.
 ///
-/// `order_no` semantics (matching crawlee-js v3):
-/// - `None`           → request has been handled.
-/// - `Some(n)` where `n > 0` → regular request, ordered by ascending `n`.
-/// - `Some(n)` where `n < 0` → forefront request, ordered by ascending `n`
-///   (i.e. most-negative = highest priority).
-/// - The absolute value of `n` is a unix-millis timestamp. When `|n|` lies in
-///   the future the request is *locked* (in progress) until that moment.
+/// `order_no` semantics (crawlee-js v3 `_calculateOrderNo`):
+/// - `None`             → request has been handled.
+/// - `Some(n)`, `n > 0` → regular request.
+/// - `Some(n)`, `n < 0` → forefront request.
+/// - `|n|` is a unix-millis timestamp. When `|n|` lies in the future the
+///   request is *locked* (in progress) until that moment. Collisions in the
+///   same millisecond are fine — ordering is resolved by `forefront_request_ids`
+///   (for forefront) and `insertion_seq` (a stable in-memory tie-break for
+///   regulars), exactly mirroring how JS uses its `forefrontRequestIds` list
+///   plus `Map` insertion order.
 #[derive(Clone)]
 struct RequestEntry {
     order_no: Option<i64>,
+    /// Stable in-memory insertion sequence, used purely as a tie-break when two
+    /// regular requests share the same `orderNo` (same-millisecond adds). This
+    /// is the Rust stand-in for JS's reliance on `Map` iteration order. It is
+    /// never persisted and never interpreted as a clock.
+    insertion_seq: u64,
 }
 
 /// Internal state protected by a mutex.
@@ -43,16 +51,15 @@ struct InnerState {
     /// file on disk; this map is a fast index that is kept in sync and
     /// re-read from disk when lock state matters.
     requests: HashMap<String, RequestEntry>,
+    /// Monotonic counter feeding `RequestEntry::insertion_seq`. In-memory only.
+    ///
+    /// (The forefront ordering list lives in `metadata.forefront_request_ids`,
+    /// the single source of truth, persisted on every metadata write.)
+    insertion_counter: u64,
     /// How long (ms) a freshly fetched request stays locked. Tunable via
     /// `set_expected_request_processing_time`. Only ever raised, never lowered
     /// (the longest-lived consumer wins), matching the JS frontend policy.
     lock_millis: i64,
-    /// The largest `orderNo` *magnitude* (i.e. `|orderNo|`) handed out so far,
-    /// excluding lock timestamps (which live far in the future). Used to make
-    /// `next_order_no` strictly monotonic so requests added within the same
-    /// millisecond never collide and always preserve insertion order. Seeded
-    /// from disk on `rebuild_index`.
-    last_order_magnitude: i64,
 }
 
 /// Filesystem-backed request queue client.
@@ -127,8 +134,8 @@ impl FileSystemRequestQueueClient {
             inner: Mutex::new(InnerState {
                 metadata,
                 requests: HashMap::new(),
+                insertion_counter: 0,
                 lock_millis: DEFAULT_LOCK_MILLIS,
-                last_order_magnitude: 0,
             }),
             path,
         };
@@ -175,6 +182,8 @@ impl FileSystemRequestQueueClient {
         }
 
         inner.requests.clear();
+        inner.insertion_counter = 0;
+        inner.metadata.forefront_request_ids.clear();
 
         inner.metadata.handled_request_count = 0;
         inner.metadata.pending_request_count = 0;
@@ -237,10 +246,13 @@ impl FileSystemRequestQueueClient {
                 continue;
             }
 
-            // Compute the orderNo: forefront => negative, regular => positive.
-            // Strictly monotonic so same-millisecond additions never collide
-            // and insertion order is preserved.
-            let order_no = Self::next_order_no(&mut inner, forefront);
+            // Compute the orderNo exactly like JS `_calculateOrderNo`: a plain
+            // signed unix-millis timestamp (negative = forefront). Collisions
+            // within the same millisecond are intentional and harmless —
+            // ordering is resolved by `forefront_request_ids` + `insertion_seq`.
+            let order_no = Self::calculate_order_no(forefront);
+            let insertion_seq = inner.insertion_counter;
+            inner.insertion_counter += 1;
 
             // Build the persisted request: inject id + orderNo, preserving the
             // opaque user payload.
@@ -258,8 +270,17 @@ impl FileSystemRequestQueueClient {
                 unique_key.clone(),
                 RequestEntry {
                     order_no: Some(order_no),
+                    insertion_seq,
                 },
             );
+
+            // Mirror JS: track forefront ids in an ordered list (LIFO on fetch).
+            if forefront {
+                inner
+                    .metadata
+                    .forefront_request_ids
+                    .push(unique_key.clone());
+            }
 
             if !already_present {
                 // Brand new request — bump counts. A forefront move of an
@@ -314,26 +335,22 @@ impl FileSystemRequestQueueClient {
     ///
     /// A request is fetchable if it is not handled and not currently locked
     /// (its `|orderNo|` is not in the future). The lock is persisted to the
-    /// request file on disk so other consumers sharing the queue skip it.
+    /// request file on disk (the `orderNo` is rewritten to `(now+lock)*sign`)
+    /// so other consumers sharing the queue skip it — exactly the crawlee-js v3
+    /// `listAndLockHead` model.
+    ///
+    /// Candidate order mirrors JS `requestKeyIterator`: forefront ids first
+    /// (in reverse/LIFO insertion order), then regular requests by ascending
+    /// `orderNo` with a stable `insertion_seq` tie-break.
     pub async fn fetch_next_request(&self) -> Result<Option<Value>> {
         let mut inner = self.inner.lock().await;
 
         let now = Utc::now().timestamp_millis();
         let lock_millis = inner.lock_millis;
 
-        // Build a candidate ordering from the index: unhandled, unlocked,
-        // sorted by orderNo ascending (negatives/forefront first).
-        let mut candidates: Vec<(String, i64)> = inner
-            .requests
-            .iter()
-            .filter_map(|(key, entry)| match entry.order_no {
-                Some(n) if !Self::is_locked_order(n, now) => Some((key.clone(), n)),
-                _ => None,
-            })
-            .collect();
-        candidates.sort_by_key(|(_, n)| *n);
+        let candidates = Self::ordered_candidate_keys(&inner);
 
-        for (unique_key, _) in candidates {
+        for unique_key in candidates {
             let file_path = self.get_request_path(&unique_key);
 
             // Re-read the file: it is the source of truth for the lock. Another
@@ -370,7 +387,8 @@ impl FileSystemRequestQueueClient {
                 }
                 Some(n) => {
                     // Fetchable. Lock it: push |orderNo| into the future,
-                    // preserving sign (forefront stays forefront).
+                    // preserving sign (forefront stays forefront). This is the
+                    // v3 model — the lock lives in orderNo itself.
                     let sign = if n > 0 { 1 } else { -1 };
                     let locked = (now + lock_millis) * sign;
 
@@ -394,6 +412,47 @@ impl FileSystemRequestQueueClient {
         }
 
         Ok(None)
+    }
+
+    /// Compute the candidate fetch order: forefront ids first (reverse/LIFO),
+    /// then unhandled, unlocked regular requests ordered by `(order_no,
+    /// insertion_seq)`. Deduplicated. Mirrors JS `requestKeyIterator`.
+    fn ordered_candidate_keys(inner: &InnerState) -> Vec<String> {
+        let now = Utc::now().timestamp_millis();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+
+        // Forefront ids, most-recently-added first (LIFO), as JS does.
+        for key in inner.metadata.forefront_request_ids.iter().rev() {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Some(entry) = inner.requests.get(key) {
+                if matches!(entry.order_no, Some(n) if !Self::is_locked_order(n, now)) {
+                    out.push(key.clone());
+                }
+            }
+        }
+
+        // Regular requests: ascending orderNo, stable insertion_seq tie-break.
+        let mut regulars: Vec<(&String, i64, u64)> = inner
+            .requests
+            .iter()
+            .filter_map(|(key, entry)| match entry.order_no {
+                Some(n) if !Self::is_locked_order(n, now) && !seen.contains(key) => {
+                    Some((key, n, entry.insertion_seq))
+                }
+                _ => None,
+            })
+            .collect();
+        regulars.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+        for (key, _, _) in regulars {
+            if seen.insert(key.clone()) {
+                out.push(key.clone());
+            }
+        }
+
+        out
     }
 
     /// Mark a request as handled.
@@ -445,9 +504,23 @@ impl FileSystemRequestQueueClient {
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
 
-        inner
+        let insertion_seq = inner
             .requests
-            .insert(unique_key.clone(), RequestEntry { order_no: None });
+            .get(&unique_key)
+            .map(|e| e.insertion_seq)
+            .unwrap_or(0);
+        inner.requests.insert(
+            unique_key.clone(),
+            RequestEntry {
+                order_no: None,
+                insertion_seq,
+            },
+        );
+        // A handled request no longer participates in forefront ordering.
+        inner
+            .metadata
+            .forefront_request_ids
+            .retain(|k| k != &unique_key);
 
         inner.metadata.handled_request_count += 1;
         inner.metadata.pending_request_count =
@@ -497,10 +570,10 @@ impl FileSystemRequestQueueClient {
             return Ok(None);
         }
 
-        // Reset orderNo to a fresh, unlocked, fetchable-immediately value,
-        // preserving the forefront/regular sign. Using the monotonic generator
-        // keeps it collision-free and correctly ordered relative to peers.
-        let order_no = Self::next_order_no(&mut inner, forefront);
+        // Reset orderNo to "now" (unlocked, fetchable immediately), preserving
+        // the forefront/regular sign — matching JS `deleteRequestLock`
+        // (`forefront ? -start : start`).
+        let order_no = Self::calculate_order_no(forefront);
 
         if let Value::Object(ref mut map) = request {
             map.insert("orderNo".to_string(), Value::Number(order_no.into()));
@@ -511,12 +584,29 @@ impl FileSystemRequestQueueClient {
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
 
+        // Preserve the original insertion order for a reclaim; only mint a new
+        // sequence if (somehow) the request wasn't already indexed.
+        let insertion_seq = match inner.requests.get(&unique_key) {
+            Some(e) => e.insertion_seq,
+            None => {
+                let s = inner.insertion_counter;
+                inner.insertion_counter += 1;
+                s
+            }
+        };
         inner.requests.insert(
             unique_key.clone(),
             RequestEntry {
                 order_no: Some(order_no),
+                insertion_seq,
             },
         );
+        if forefront && !inner.metadata.forefront_request_ids.contains(&unique_key) {
+            inner
+                .metadata
+                .forefront_request_ids
+                .push(unique_key.clone());
+        }
 
         let now_dt = Utc::now();
         inner.metadata.base.accessed_at = now_dt;
@@ -585,16 +675,19 @@ impl FileSystemRequestQueueClient {
     }
 
     /// Retained for binding compatibility. The orderNo lock model persists
-    /// everything inline in the request files, so there is no separate state
-    /// blob to flush — this is a no-op.
+    /// everything inline in the request files (plus the forefront ordering in
+    /// metadata), so there is no separate state blob to flush — this is a no-op.
     pub async fn persist_state(&self) {
-        // Intentionally empty: state lives in the request files.
+        // Intentionally empty: state lives in the request files + metadata.
     }
 
     // ─── Private ────────────────────────────────────────────────────────────
 
     /// A request is locked if it is not handled and its `|orderNo|` lies in the
-    /// future relative to `now` (unix millis). Matches the JS `isRequestLocked`.
+    /// future relative to `now` (unix millis). Matches the JS `isRequestLocked`:
+    /// `orderNo > now || orderNo < -now`. Because `orderNo` is always exactly
+    /// `±now` at add time (never inflated), a freshly-added request is never
+    /// mistaken for a lock — the cause of the earlier creep race is gone.
     fn is_locked_order(order_no: i64, now: i64) -> bool {
         order_no > now || order_no < -now
     }
@@ -618,33 +711,22 @@ impl FileSystemRequestQueueClient {
         }
     }
 
-    /// Compute the next orderNo for a freshly added/forefronted/reclaimed
-    /// request.
+    /// Compute the orderNo for a freshly added/reclaimed request, exactly like
+    /// JS `_calculateOrderNo`: a plain signed unix-millis timestamp. Positive =
+    /// regular, negative = forefront.
     ///
-    /// The magnitude is a unix-millis timestamp like the JS v3
-    /// `_calculateOrderNo`, but made **strictly monotonic** so that two
-    /// requests created in the same millisecond never collide: each call
-    /// returns a magnitude `> ` every previously handed-out magnitude. This is
-    /// what guarantees stable FIFO order (regular) and a deterministic order
-    /// among forefront requests — `HashMap` iteration order is undefined, so
-    /// `fetch_next_request` relies entirely on these unique sort keys.
-    ///
-    /// Sign encodes priority: positive = regular, negative = forefront. Since
-    /// every negative sorts strictly before every positive, a forefront request
-    /// always jumps ahead of all regular ones regardless of insertion time.
-    ///
-    /// The magnitude can creep slightly past `now` under a burst of
-    /// same-millisecond additions, but a lock pushes `|orderNo|` `lock_millis`
-    /// (minutes) into the future, so the tiny creep here can never be mistaken
-    /// for a lock (`is_locked_order`).
-    fn next_order_no(inner: &mut InnerState, forefront: bool) -> i64 {
+    /// Same-millisecond collisions are intentional and harmless. Ordering is
+    /// not derived from unique orderNos; it comes from `forefront_request_ids`
+    /// (forefront priority/LIFO) and `insertion_seq` (stable FIFO tie-break for
+    /// regulars), mirroring how JS uses its `forefrontRequestIds` list plus the
+    /// insertion order of its request `Map`. Crucially, the magnitude is always
+    /// exactly `now`, so it can never be misread as a future-dated lock.
+    fn calculate_order_no(forefront: bool) -> i64 {
         let now = Utc::now().timestamp_millis();
-        let magnitude = now.max(inner.last_order_magnitude + 1);
-        inner.last_order_magnitude = magnitude;
         if forefront {
-            -magnitude
+            -now
         } else {
-            magnitude
+            now
         }
     }
 
@@ -677,27 +759,29 @@ impl FileSystemRequestQueueClient {
     /// recompute the metadata counts from the authoritative file contents.
     ///
     /// Crash recovery: a request that was *locked* (a future `|orderNo|`) when
-    /// the previous run died is no longer being processed by anyone, yet its
-    /// on-disk lock would otherwise keep it un-fetchable for the full lock
-    /// duration (minutes). Since `open()` is the moment a fresh process takes
-    /// ownership of the queue, we reclaim every such stale lock here: rewrite
-    /// the `orderNo` to an immediately-fetchable value (preserving the
-    /// forefront/regular sign) and persist it back to disk so the on-disk
-    /// source of truth reflects the reclaim. This is what makes in-progress
-    /// requests recoverable after a crash.
+    /// the previous run died is no longer being processed. Since `open()` is the
+    /// moment a fresh process takes ownership of the queue, we reclaim every
+    /// such stale lock here — reset the `orderNo` back to `±now` (preserving the
+    /// forefront/regular sign) and persist it, so the in-progress request is
+    /// immediately re-fetchable. The `forefront_request_ids` ordering list is
+    /// restored from metadata (it deserializes with the metadata) and pruned
+    /// here to drop handled/missing entries.
     ///
-    /// We also seed `last_order_magnitude` from the largest magnitude seen so
-    /// that orderNos minted after reopen stay strictly monotonic.
+    /// `insertion_seq` is assigned in (sorted) file-read order so reopened
+    /// regular requests keep a stable, deterministic FIFO order.
     async fn rebuild_index(&self) -> Result<()> {
-        let request_files = Self::get_request_files(&self.path).await?;
+        let mut request_files = Self::get_request_files(&self.path).await?;
+        // Stable file order so insertion_seq assignment is deterministic.
+        request_files.sort();
 
         let mut inner = self.inner.lock().await;
         inner.requests.clear();
+        let prior_forefront = std::mem::take(&mut inner.metadata.forefront_request_ids);
 
         let now = Utc::now().timestamp_millis();
         let mut handled = 0usize;
         let mut pending = 0usize;
-        let mut max_magnitude = 0i64;
+        let mut seq = 0u64;
 
         for file_path in request_files {
             let content = match fs::read_to_string(&file_path).await {
@@ -740,22 +824,17 @@ impl FileSystemRequestQueueClient {
                 let disk_order = Self::read_order_no(&request).unwrap_or(now);
 
                 if Self::is_locked_order(disk_order, now) {
-                    // Stale lock from a previous (now-dead) run — reclaim it so
-                    // it is fetchable immediately, preserving the sign. Use a
-                    // strictly monotonic magnitude so multiple reclaimed
-                    // requests don't collide on a single `now` value.
+                    // Stale lock from a previous (now-dead) run — reset to ±now
+                    // so it is fetchable immediately, preserving the sign.
                     let sign = if disk_order > 0 { 1 } else { -1 };
-                    let magnitude = now.max(max_magnitude + 1);
-                    max_magnitude = magnitude;
-                    let reclaimed = magnitude * sign;
-
+                    let reclaimed = now * sign;
                     if let Value::Object(ref mut map) = request {
                         map.insert("orderNo".to_string(), Value::Number(reclaimed.into()));
                     }
                     if let Err(e) = atomic_write(&file_path, json_dumps(&request)?.as_bytes()).await
                     {
                         warn!(
-                            "Failed to reclaim stale lock for {}: {}",
+                            "Failed to clear stale lock for {}: {}",
                             file_path.display(),
                             e
                         );
@@ -766,20 +845,36 @@ impl FileSystemRequestQueueClient {
                 }
             };
 
-            if let Some(n) = order_no {
-                max_magnitude = max_magnitude.max(n.abs());
-            }
-
             if order_no.is_none() {
                 handled += 1;
             } else {
                 pending += 1;
             }
 
-            inner.requests.insert(unique_key, RequestEntry { order_no });
+            let insertion_seq = seq;
+            seq += 1;
+            inner.requests.insert(
+                unique_key,
+                RequestEntry {
+                    order_no,
+                    insertion_seq,
+                },
+            );
         }
 
-        inner.last_order_magnitude = max_magnitude;
+        // Restore the forefront ordering, dropping entries that are gone or no
+        // longer pending (mirrors JS pruning handled forefront ids).
+        inner.insertion_counter = seq;
+        inner.metadata.forefront_request_ids = prior_forefront
+            .into_iter()
+            .filter(|k| {
+                inner
+                    .requests
+                    .get(k)
+                    .map(|e| e.order_no.is_some())
+                    .unwrap_or(false)
+            })
+            .collect();
         inner.metadata.handled_request_count = handled;
         inner.metadata.pending_request_count = pending;
         inner.metadata.total_request_count = handled + pending;
@@ -1101,6 +1196,64 @@ mod tests {
         let _ = client.get_request("req1").await.unwrap();
         let accessed_after = client.get_metadata().await.base.accessed_at;
         assert!(accessed_after > accessed_before);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_after_purge_with_carried_creep() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Burst of same-millisecond adds inflates the monotonic magnitude well
+        // past `now`, then purge clears the index. If purge fails to reset the
+        // creep (or is_locked_order can't tell creep from a real lock), the
+        // freshly-added request after purge looks "locked" and is skipped.
+        let batch: Vec<Value> = (0..50).map(|i| req(&format!("pre{i}"))).collect();
+        client.add_batch_of_requests(batch, false).await.unwrap();
+        client.purge().await.unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("after")], false)
+            .await
+            .unwrap();
+
+        assert!(
+            !client.is_empty().await,
+            "queue must not report empty when a fetchable request exists post-purge"
+        );
+        let fetched = client.fetch_next_request().await.unwrap();
+        assert!(
+            fetched.is_some(),
+            "fetch_next_request must return the request that exists on disk post-purge"
+        );
+        assert_eq!(fetched.unwrap()["uniqueKey"], "after");
+    }
+
+    #[tokio::test]
+    async fn test_large_same_ms_burst_all_fetchable() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // A big burst in (likely) one millisecond inflates magnitudes far past
+        // `now`. Every one of them must still be fetchable — none may be
+        // mistaken for a future-dated lock.
+        let n = 500;
+        let batch: Vec<Value> = (0..n).map(|i| req(&format!("b{i:04}"))).collect();
+        client.add_batch_of_requests(batch, false).await.unwrap();
+
+        assert!(!client.is_empty().await);
+        let mut fetched = 0;
+        while let Some(r) = client.fetch_next_request().await.unwrap() {
+            client.mark_request_as_handled(r).await.unwrap();
+            fetched += 1;
+        }
+        assert_eq!(
+            fetched, n,
+            "every request in a same-ms burst must be fetchable"
+        );
     }
 
     #[tokio::test]
