@@ -359,6 +359,36 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
     Ok(())
 }
 
+/// Run `ruff format` over the generated stub files so they match the project's
+/// formatting conventions (line-length, signature wrapping, etc.).
+///
+/// The generator emits unformatted output (collapsed single-line signatures), so
+/// without this step every regeneration produces noisy cosmetic diffs.
+///
+/// This is best-effort: if `ruff` is not on `PATH` we emit a warning rather than
+/// failing the whole generation, since the stubs are otherwise valid.
+fn format_stubs(paths: &[&std::path::Path]) {
+    let existing: Vec<&std::path::Path> = paths.iter().copied().filter(|p| p.exists()).collect();
+    if existing.is_empty() {
+        return;
+    }
+
+    let mut cmd = std::process::Command::new("ruff");
+    cmd.arg("format").args(&existing);
+
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            eprintln!("Formatted stubs with `ruff format`");
+        }
+        Ok(status) => {
+            eprintln!("Warning: `ruff format` exited with status {status}; stubs left unformatted");
+        }
+        Err(err) => {
+            eprintln!("Warning: could not run `ruff format` ({err}); stubs left unformatted.");
+        }
+    }
+}
+
 /// Append TypedDict names to the `__all__` list in a re-export stub file.
 fn fixup_reexport_stubs(path: &std::path::Path) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
@@ -415,6 +445,9 @@ fn main() -> Result<()> {
             toplevel_stub_path.display()
         );
     }
+
+    // Format the generated stubs so they match the project's ruff conventions.
+    format_stubs(&[&native_stub_path, &toplevel_stub_path]);
 
     Ok(())
 }
