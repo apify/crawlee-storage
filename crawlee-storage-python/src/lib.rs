@@ -786,7 +786,10 @@ impl FileSystemRequestQueueClient {
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
     fn is_finished<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(client.is_finished().await) })
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { Ok(client.is_finished().await) },
+        )
     }
 
     #[gen_stub(override_return_type(type_repr = "None"))]

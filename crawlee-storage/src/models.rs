@@ -268,5 +268,3 @@ pub struct AddRequestsResponse {
     #[serde(rename = "unprocessedRequests")]
     pub unprocessed_requests: Vec<UnprocessedRequest>,
 }
-
-

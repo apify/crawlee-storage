@@ -438,10 +438,9 @@ impl FileSystemRequestQueueClient {
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
 
-        inner.requests.insert(
-            unique_key.clone(),
-            RequestEntry { order_no: None },
-        );
+        inner
+            .requests
+            .insert(unique_key.clone(), RequestEntry { order_no: None });
 
         inner.metadata.handled_request_count += 1;
         inner.metadata.pending_request_count =
@@ -717,9 +716,7 @@ impl FileSystemRequestQueueClient {
                 pending += 1;
             }
 
-            inner
-                .requests
-                .insert(unique_key, RequestEntry { order_no });
+            inner.requests.insert(unique_key, RequestEntry { order_no });
         }
 
         inner.metadata.handled_request_count = handled;

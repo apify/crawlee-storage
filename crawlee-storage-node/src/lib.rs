@@ -594,9 +594,7 @@ impl FileSystemRequestQueueClient {
 
     #[napi]
     pub async fn set_expected_request_processing_time(&self, secs: f64) {
-        self.inner
-            .set_expected_request_processing_time(secs)
-            .await;
+        self.inner.set_expected_request_processing_time(secs).await;
     }
 
     #[napi]
