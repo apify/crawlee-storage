@@ -57,7 +57,7 @@ export interface RequestQueueMetadata {
 }
 
 export interface ProcessedRequest {
-    id: string | null;
+    requestId: string;
     uniqueKey: string;
     wasAlreadyPresent: boolean;
     wasAlreadyHandled: boolean;

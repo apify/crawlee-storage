@@ -68,7 +68,7 @@ class DatasetItemsListPage(typing.TypedDict):
     items: builtins.list[dict[builtins.str, typing.Any]]
 
 class ProcessedRequest(typing.TypedDict):
-    id: typing.Optional[builtins.str]
+    requestId: builtins.str
     uniqueKey: builtins.str
     wasAlreadyPresent: builtins.bool
     wasAlreadyHandled: builtins.bool
@@ -192,6 +192,8 @@ class FileSystemRequestQueueClient:
         self, request: typing.Any, forefront: builtins.bool = False
     ) -> typing.Optional[ProcessedRequest]: ...
     async def is_empty(self) -> builtins.bool: ...
+    async def is_finished(self) -> builtins.bool: ...
+    async def set_expected_request_processing_time(self, secs: builtins.float) -> None: ...
     async def persist_state(self) -> None: ...
 
 @typing.final

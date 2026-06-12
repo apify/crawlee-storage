@@ -588,6 +588,18 @@ impl FileSystemRequestQueueClient {
     }
 
     #[napi]
+    pub async fn is_finished(&self) -> bool {
+        self.inner.is_finished().await
+    }
+
+    #[napi]
+    pub async fn set_expected_request_processing_time(&self, secs: f64) {
+        self.inner
+            .set_expected_request_processing_time(secs)
+            .await;
+    }
+
+    #[napi]
     pub async fn persist_state(&self) {
         self.inner.persist_state().await;
     }

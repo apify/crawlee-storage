@@ -234,9 +234,16 @@ pub struct KvsKeysPage {
 
 /// These structs are never deserialized from disk — they're constructed in Rust
 /// and serialized to pass to the binding layer. No aliases needed.
+///
+/// `request_id` is the sha256-derived id of the request (see
+/// [`crate::utils::unique_key_to_request_id`]), matching the JS
+/// `QueueOperationInfo.requestId` contract (non-null). The legacy `id` field
+/// is kept as an alias of the same value for backward compatibility with
+/// callers that still read `id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessedRequest {
-    pub id: Option<String>,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
     #[serde(rename = "uniqueKey")]
     pub unique_key: String,
     #[serde(rename = "wasAlreadyPresent")]
@@ -262,42 +269,4 @@ pub struct AddRequestsResponse {
     pub unprocessed_requests: Vec<UnprocessedRequest>,
 }
 
-// ─── Request Queue Internal State ───────────────────────────────────────────
 
-/// Internal state for the request queue, persisted to KVS as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestQueueState {
-    #[serde(default, rename = "sequenceCounter", alias = "sequence_counter")]
-    pub sequence_counter: i64,
-    #[serde(
-        default,
-        rename = "forefrontSequenceCounter",
-        alias = "forefront_sequence_counter"
-    )]
-    pub forefront_sequence_counter: i64,
-    /// unique_key -> sequence_number
-    #[serde(default, rename = "forefrontRequests", alias = "forefront_requests")]
-    pub forefront_requests: serde_json::Map<String, Value>,
-    /// unique_key -> sequence_number
-    #[serde(default, rename = "regularRequests", alias = "regular_requests")]
-    pub regular_requests: serde_json::Map<String, Value>,
-    /// Set of unique_keys currently in progress
-    #[serde(default, rename = "inProgressRequests", alias = "in_progress_requests")]
-    pub in_progress_requests: Vec<String>,
-    /// Set of unique_keys that have been handled
-    #[serde(default, rename = "handledRequests", alias = "handled_requests")]
-    pub handled_requests: Vec<String>,
-}
-
-impl Default for RequestQueueState {
-    fn default() -> Self {
-        Self {
-            sequence_counter: 0,
-            forefront_sequence_counter: 0,
-            forefront_requests: serde_json::Map::new(),
-            regular_requests: serde_json::Map::new(),
-            in_progress_requests: Vec::new(),
-            handled_requests: Vec::new(),
-        }
-    }
-}

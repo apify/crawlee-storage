@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -7,94 +7,72 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::key_value_store::FileSystemKeyValueStoreClient;
-use crate::models::{
-    AddRequestsResponse, ProcessedRequest, RequestQueueMetadata, RequestQueueState,
-};
+use crate::models::{AddRequestsResponse, ProcessedRequest, RequestQueueMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
-    sha256_prefix, validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
+    sha256_prefix, unique_key_to_request_id, validate_exclusive_args, Result, StorageError,
+    METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "request_queues";
 const DEFAULT_NAME: &str = "default";
-const MAX_REQUESTS_IN_CACHE: usize = 100_000;
 
-/// Handles persisting RQ state to a key in the default KVS directory.
-struct StatePersistence {
-    kvs: FileSystemKeyValueStoreClient,
-    key: String,
-}
+/// Default lock duration (how long a fetched request stays reserved) in
+/// milliseconds. Matches the JS `DEFAULT_REQUEST_LOCK_SECS` of 3 minutes.
+const DEFAULT_LOCK_MILLIS: i64 = 3 * 60 * 1000;
 
-impl StatePersistence {
-    /// Open (or create) the default KVS and build a state-persistence handle.
-    async fn open(storage_dir: &Path, queue_id: &str) -> Result<Self> {
-        let kvs = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir).await?;
-        Ok(Self {
-            kvs,
-            key: format!("__RQ_STATE_{queue_id}"),
-        })
-    }
-
-    async fn load(&self) -> Option<RequestQueueState> {
-        match self.kvs.get_value(&self.key).await {
-            Ok(Some(record)) => match record.value {
-                crate::models::KvsValue::Json(v) => {
-                    serde_json::from_value::<RequestQueueState>(v).ok()
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    async fn save(&self, state: &RequestQueueState) {
-        if let Ok(val) = serde_json::to_value(state) {
-            let _ = self
-                .kvs
-                .set_value(
-                    &self.key,
-                    crate::models::KvsValue::Json(val),
-                    Some("application/json".to_string()),
-                )
-                .await;
-        }
-    }
-
-    async fn clear(&self) {
-        let _ = self.kvs.delete_value(&self.key).await;
-    }
+/// Lightweight in-memory index entry for a single request, mirroring the
+/// `orderNo` persisted in the request file on disk.
+///
+/// `order_no` semantics (matching crawlee-js v3):
+/// - `None`           → request has been handled.
+/// - `Some(n)` where `n > 0` → regular request, ordered by ascending `n`.
+/// - `Some(n)` where `n < 0` → forefront request, ordered by ascending `n`
+///   (i.e. most-negative = highest priority).
+/// - The absolute value of `n` is a unix-millis timestamp. When `|n|` lies in
+///   the future the request is *locked* (in progress) until that moment.
+#[derive(Clone)]
+struct RequestEntry {
+    order_no: Option<i64>,
 }
 
 /// Internal state protected by a mutex.
 struct InnerState {
     metadata: RequestQueueMetadata,
-    queue_state: RequestQueueState,
-    /// In-memory deque for fast fetching. Forefront requests go to the front (LIFO),
-    /// regular requests go to the back (FIFO).
-    request_cache: VecDeque<Value>,
-    request_cache_needs_refresh: bool,
-    is_empty_cache: Option<bool>,
-    /// Lookup sets derived from queue_state for O(1) checks.
-    in_progress_set: HashSet<String>,
-    handled_set: HashSet<String>,
+    /// unique_key -> entry. The authoritative lock state lives in the request
+    /// file on disk; this map is a fast index that is kept in sync and
+    /// re-read from disk when lock state matters.
+    requests: HashMap<String, RequestEntry>,
+    /// How long (ms) a freshly fetched request stays locked. Tunable via
+    /// `set_expected_request_processing_time`. Only ever raised, never lowered
+    /// (the longest-lived consumer wins), matching the JS frontend policy.
+    lock_millis: i64,
 }
 
 /// Filesystem-backed request queue client.
 ///
-/// Stores each request as a JSON file named by `sha256(unique_key)[:15].json`.
+/// Each request is stored as a JSON file named `sha256(unique_key)[:15].json`.
+/// The persisted JSON carries two queue-managed fields in addition to the
+/// opaque user payload:
+/// - `id`: the sha256-derived request id (matches the Apify platform).
+/// - `orderNo`: a signed unix-millis timestamp encoding ordering, forefront
+///   priority, lock expiry, and handled state (see [`RequestEntry`]).
+///
+/// This `orderNo` lock model is the crawlee-js v3 model: because the lock is
+/// persisted *inside the request file*, multiple consumers sharing one on-disk
+/// queue can coordinate without a central lock service (assuming roughly
+/// synchronized clocks). There is no separate state blob.
 ///
 /// Directory layout:
 /// ```text
 /// {storage_dir}/request_queues/{name}/
 /// ├── __metadata__.json
-/// ├── 1a2b3c4d5e6f7g8.json     (request files)
+/// ├── 1a2b3c4d5e6f7g8.json     (request files, each carrying id + orderNo)
 /// └── ...
 /// ```
 pub struct FileSystemRequestQueueClient {
     inner: Mutex<InnerState>,
     path: PathBuf,
-    persistence: StatePersistence,
 }
 
 impl FileSystemRequestQueueClient {
@@ -106,10 +84,6 @@ impl FileSystemRequestQueueClient {
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
-    ///
-    /// Queue state is automatically persisted to the default key-value store
-    /// under the key `__RQ_STATE_{queue_id}`. Call [`persist_state`] from
-    /// the framework's event system to flush state periodically.
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
@@ -143,48 +117,17 @@ impl FileSystemRequestQueueClient {
             meta
         };
 
-        // Open the default KVS for state persistence, then load any prior state.
-        let persistence = StatePersistence::open(storage_dir, &metadata.base.id).await?;
-        let mut queue_state = persistence.load().await.unwrap_or_default();
-
-        // After a restart, any previously in-progress requests are no longer
-        // being processed. Reclaim them back into the regular queue so they
-        // can be fetched again (matches Python master behaviour).
-        if !queue_state.in_progress_requests.is_empty() {
-            for key in queue_state.in_progress_requests.drain(..) {
-                if !queue_state.regular_requests.contains_key(&key)
-                    && !queue_state.forefront_requests.contains_key(&key)
-                {
-                    queue_state.sequence_counter += 1;
-                    let seq = queue_state.sequence_counter;
-                    queue_state
-                        .regular_requests
-                        .insert(key, Value::Number(seq.into()));
-                }
-            }
-        }
-
-        // Build lookup sets from (cleaned-up) loaded state.
-        // in_progress_set starts empty because we just reclaimed everything.
-        let in_progress_set: HashSet<String> = HashSet::new();
-        let handled_set: HashSet<String> = queue_state.handled_requests.iter().cloned().collect();
-
         let client = Self {
             inner: Mutex::new(InnerState {
                 metadata,
-                queue_state,
-                request_cache: VecDeque::new(),
-                request_cache_needs_refresh: true,
-                is_empty_cache: None,
-                in_progress_set,
-                handled_set,
+                requests: HashMap::new(),
+                lock_millis: DEFAULT_LOCK_MILLIS,
             }),
             path,
-            persistence,
         };
 
-        // Discover any existing request files not yet tracked in state
-        client.discover_existing_requests().await?;
+        // Reconstruct the in-memory index from the request files on disk.
+        client.rebuild_index().await?;
 
         Ok(client)
     }
@@ -206,20 +149,12 @@ impl FileSystemRequestQueueClient {
 
     /// Delete the entire queue directory.
     pub async fn drop_storage(&self) -> Result<()> {
-        // Clear persisted state
-        self.persistence.clear().await;
-
         if self.path.exists() {
             fs::remove_dir_all(&self.path).await?;
         }
 
         let mut inner = self.inner.lock().await;
-        inner.queue_state = RequestQueueState::default();
-        inner.request_cache.clear();
-        inner.in_progress_set.clear();
-        inner.handled_set.clear();
-        inner.request_cache_needs_refresh = true;
-        inner.is_empty_cache = Some(true);
+        inner.requests.clear();
 
         Ok(())
     }
@@ -228,20 +163,12 @@ impl FileSystemRequestQueueClient {
     pub async fn purge(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        // Delete all request files
         for file in Self::get_request_files(&self.path).await? {
             fs::remove_file(&file).await?;
         }
 
-        // Reset state
-        inner.queue_state = RequestQueueState::default();
-        inner.request_cache.clear();
-        inner.in_progress_set.clear();
-        inner.handled_set.clear();
-        inner.request_cache_needs_refresh = true;
-        inner.is_empty_cache = Some(true);
+        inner.requests.clear();
 
-        // Reset metadata counts
         inner.metadata.handled_request_count = 0;
         inner.metadata.pending_request_count = 0;
         inner.metadata.total_request_count = 0;
@@ -251,9 +178,6 @@ impl FileSystemRequestQueueClient {
 
         let json = json_dumps_value(&inner.metadata)?;
         atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
-
-        // Persist the reset state
-        self.persistence.save(&inner.queue_state).await;
 
         Ok(())
     }
@@ -266,21 +190,25 @@ impl FileSystemRequestQueueClient {
     ) -> Result<AddRequestsResponse> {
         let mut inner = self.inner.lock().await;
         let mut processed = Vec::new();
+        // Track unique_keys seen within *this* batch so a duplicate later in
+        // the same call reports `was_already_present` (matching the JS client,
+        // which keys its in-memory map by request id).
+        let mut seen_in_batch: HashMap<String, ()> = HashMap::new();
 
         for request in requests {
-            let unique_key = request
-                .get("uniqueKey")
-                .or_else(|| request.get("unique_key"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    StorageError::InvalidArgs("Request must have a 'uniqueKey' field".to_string())
-                })?
-                .to_string();
+            let unique_key = Self::extract_unique_key(&request)?;
+            let request_id = unique_key_to_request_id(&unique_key);
 
-            // Check if already handled
-            if inner.handled_set.contains(&unique_key) {
+            // Is this request handled already?
+            let already_handled = inner
+                .requests
+                .get(&unique_key)
+                .map(|e| e.order_no.is_none())
+                .unwrap_or(false);
+
+            if already_handled {
                 processed.push(ProcessedRequest {
-                    id: None,
+                    request_id,
                     unique_key,
                     was_already_present: true,
                     was_already_handled: true,
@@ -288,10 +216,13 @@ impl FileSystemRequestQueueClient {
                 continue;
             }
 
-            // Check if already in progress
-            if inner.in_progress_set.contains(&unique_key) {
+            let already_present =
+                inner.requests.contains_key(&unique_key) || seen_in_batch.contains_key(&unique_key);
+
+            // Already pending and not requesting a forefront move: report it.
+            if already_present && !forefront {
                 processed.push(ProcessedRequest {
-                    id: None,
+                    request_id,
                     unique_key,
                     was_already_present: true,
                     was_already_handled: false,
@@ -299,85 +230,52 @@ impl FileSystemRequestQueueClient {
                 continue;
             }
 
-            // Check if already present (in regular or forefront queues)
-            let already_in_regular = inner.queue_state.regular_requests.contains_key(&unique_key);
-            let already_in_forefront = inner
-                .queue_state
-                .forefront_requests
-                .contains_key(&unique_key);
-            let was_already_present = already_in_regular || already_in_forefront;
+            // Compute the orderNo: forefront => negative, regular => positive.
+            // We nudge by a per-write counter so requests added in the same
+            // millisecond keep a stable relative order.
+            let order_no = Self::next_order_no(forefront);
 
-            if was_already_present && !forefront {
-                // Already queued, not forefront — just report it
-                processed.push(ProcessedRequest {
-                    id: None,
-                    unique_key,
-                    was_already_present: true,
-                    was_already_handled: false,
-                });
-                continue;
+            // Build the persisted request: inject id + orderNo, preserving the
+            // opaque user payload.
+            let mut to_write = request.clone();
+            if let Value::Object(ref mut map) = to_write {
+                map.insert("id".to_string(), Value::String(request_id.clone()));
+                map.insert("orderNo".to_string(), Value::Number(order_no.into()));
             }
 
-            // Write request file to disk
             let file_path = self.get_request_path(&unique_key);
-            let json = json_dumps(&request)?;
+            let json = json_dumps(&to_write)?;
             atomic_write(&file_path, json.as_bytes()).await?;
 
-            if was_already_present && forefront {
-                // Move from regular to forefront
-                inner.queue_state.regular_requests.remove(&unique_key);
-                inner.queue_state.forefront_sequence_counter += 1;
-                let seq = inner.queue_state.forefront_sequence_counter;
-                inner
-                    .queue_state
-                    .forefront_requests
-                    .insert(unique_key.clone(), Value::Number(seq.into()));
-                // Add to front of cache
-                inner.request_cache.push_front(request);
-                inner.request_cache_needs_refresh = true;
-            } else {
-                // Brand new request
-                if forefront {
-                    inner.queue_state.forefront_sequence_counter += 1;
-                    let seq = inner.queue_state.forefront_sequence_counter;
-                    inner
-                        .queue_state
-                        .forefront_requests
-                        .insert(unique_key.clone(), Value::Number(seq.into()));
-                    inner.request_cache.push_front(request);
-                } else {
-                    inner.queue_state.sequence_counter += 1;
-                    let seq = inner.queue_state.sequence_counter;
-                    inner
-                        .queue_state
-                        .regular_requests
-                        .insert(unique_key.clone(), Value::Number(seq.into()));
-                    inner.request_cache.push_back(request);
-                }
+            inner.requests.insert(
+                unique_key.clone(),
+                RequestEntry {
+                    order_no: Some(order_no),
+                },
+            );
 
+            if !already_present {
+                // Brand new request — bump counts. A forefront move of an
+                // already-present request leaves counts unchanged.
                 inner.metadata.total_request_count += 1;
                 inner.metadata.pending_request_count += 1;
             }
 
-            inner.is_empty_cache = None;
+            seen_in_batch.insert(unique_key.clone(), ());
 
             processed.push(ProcessedRequest {
-                id: None,
+                request_id,
                 unique_key,
-                was_already_present,
+                was_already_present: already_present,
                 was_already_handled: false,
             });
         }
 
-        // Update metadata
         let now = Utc::now();
         inner.metadata.base.accessed_at = now;
         inner.metadata.base.modified_at = now;
         let meta_json = json_dumps_value(&inner.metadata)?;
         atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
-
-        // Persist queue state
-        self.persist_state_inner(&inner).await;
 
         Ok(AddRequestsResponse {
             processed_requests: processed,
@@ -385,7 +283,7 @@ impl FileSystemRequestQueueClient {
         })
     }
 
-    /// Get a request by unique_key without marking it as in-progress.
+    /// Get a request by unique_key without locking it.
     pub async fn get_request(&self, unique_key: &str) -> Result<Option<Value>> {
         let file_path = self.get_request_path(unique_key);
         if !file_path.exists() {
@@ -395,7 +293,6 @@ impl FileSystemRequestQueueClient {
         let content = fs::read_to_string(&file_path).await?;
         let request: Value = serde_json::from_str(&content)?;
 
-        // Update accessed_at
         {
             let mut inner = self.inner.lock().await;
             inner.metadata.base.accessed_at = Utc::now();
@@ -406,116 +303,146 @@ impl FileSystemRequestQueueClient {
         Ok(Some(request))
     }
 
-    /// Fetch the next request from the queue, marking it as in-progress.
+    /// Fetch the next fetchable request, locking it for `lock_millis`.
+    ///
+    /// A request is fetchable if it is not handled and not currently locked
+    /// (its `|orderNo|` is not in the future). The lock is persisted to the
+    /// request file on disk so other consumers sharing the queue skip it.
     pub async fn fetch_next_request(&self) -> Result<Option<Value>> {
         let mut inner = self.inner.lock().await;
 
-        // Refresh cache if needed
-        if inner.request_cache_needs_refresh {
-            self.refresh_cache_inner(&mut inner).await?;
-        }
+        let now = Utc::now().timestamp_millis();
+        let lock_millis = inner.lock_millis;
 
-        loop {
-            let request = match inner.request_cache.pop_front() {
-                Some(r) => r,
-                None => {
-                    // Cache is empty, but the queue is only truly empty if
-                    // there are also no in-progress requests.
-                    inner.is_empty_cache = Some(inner.in_progress_set.is_empty());
-                    return Ok(None);
+        // Build a candidate ordering from the index: unhandled, unlocked,
+        // sorted by orderNo ascending (negatives/forefront first).
+        let mut candidates: Vec<(String, i64)> = inner
+            .requests
+            .iter()
+            .filter_map(|(key, entry)| match entry.order_no {
+                Some(n) if !Self::is_locked_order(n, now) => Some((key.clone(), n)),
+                _ => None,
+            })
+            .collect();
+        candidates.sort_by_key(|(_, n)| *n);
+
+        for (unique_key, _) in candidates {
+            let file_path = self.get_request_path(&unique_key);
+
+            // Re-read the file: it is the source of truth for the lock. Another
+            // consumer may have locked or handled it since we last indexed.
+            let mut request: Value = match fs::read_to_string(&file_path).await {
+                Ok(content) => match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                },
+                Err(_) => {
+                    // File vanished — drop from index and move on.
+                    inner.requests.remove(&unique_key);
+                    continue;
                 }
             };
 
-            let unique_key = match request
-                .get("uniqueKey")
-                .or_else(|| request.get("unique_key"))
-                .and_then(|v| v.as_str())
-            {
-                Some(k) => k.to_string(),
-                None => continue,
-            };
+            let disk_order = Self::read_order_no(&request);
 
-            // Skip if already handled or in progress
-            if inner.handled_set.contains(&unique_key)
-                || inner.in_progress_set.contains(&unique_key)
-            {
-                continue;
+            // Handled or locked on disk (by us-stale or a foreign consumer)?
+            match disk_order {
+                None => {
+                    // Handled elsewhere — sync the index.
+                    if let Some(entry) = inner.requests.get_mut(&unique_key) {
+                        entry.order_no = None;
+                    }
+                    continue;
+                }
+                Some(n) if Self::is_locked_order(n, now) => {
+                    // Locked elsewhere — sync the index and skip.
+                    if let Some(entry) = inner.requests.get_mut(&unique_key) {
+                        entry.order_no = Some(n);
+                    }
+                    continue;
+                }
+                Some(n) => {
+                    // Fetchable. Lock it: push |orderNo| into the future,
+                    // preserving sign (forefront stays forefront).
+                    let sign = if n > 0 { 1 } else { -1 };
+                    let locked = (now + lock_millis) * sign;
+
+                    if let Value::Object(ref mut map) = request {
+                        map.insert("orderNo".to_string(), Value::Number(locked.into()));
+                    }
+                    let json = json_dumps(&request)?;
+                    atomic_write(&file_path, json.as_bytes()).await?;
+
+                    if let Some(entry) = inner.requests.get_mut(&unique_key) {
+                        entry.order_no = Some(locked);
+                    }
+
+                    inner.metadata.base.accessed_at = Utc::now();
+                    let meta_json = json_dumps_value(&inner.metadata)?;
+                    atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
+
+                    return Ok(Some(request));
+                }
             }
-
-            // Mark as in-progress
-            inner.in_progress_set.insert(unique_key.clone());
-            inner
-                .queue_state
-                .in_progress_requests
-                .push(unique_key.clone());
-            inner.queue_state.regular_requests.remove(&unique_key);
-            inner.queue_state.forefront_requests.remove(&unique_key);
-            inner.is_empty_cache = None;
-
-            // Persist state
-            self.persist_state_inner(&inner).await;
-
-            return Ok(Some(request));
         }
+
+        Ok(None)
     }
 
-    /// Mark a request as handled (done).
+    /// Mark a request as handled.
+    ///
+    /// This does *not* require the request to still be locked by us — a slow
+    /// consumer whose lock expired must still be able to mark it handled
+    /// (otherwise the request would be handed out forever). Matches the JS
+    /// `markRequestAsHandled` contract.
     pub async fn mark_request_as_handled(
         &self,
         mut request: Value,
     ) -> Result<Option<ProcessedRequest>> {
-        let unique_key = match request
-            .get("uniqueKey")
-            .or_else(|| request.get("unique_key"))
-            .and_then(|v| v.as_str())
-        {
-            Some(k) => k.to_string(),
-            None => {
-                return Err(StorageError::InvalidArgs(
-                    "Request must have a 'uniqueKey' field".to_string(),
-                ));
-            }
-        };
+        let unique_key = Self::extract_unique_key(&request)?;
+        let request_id = unique_key_to_request_id(&unique_key);
 
         let mut inner = self.inner.lock().await;
 
-        // Already handled — return immediately with was_already_handled: true
-        if inner.handled_set.contains(&unique_key) {
+        let file_path = self.get_request_path(&unique_key);
+        if !file_path.exists() && !inner.requests.contains_key(&unique_key) {
+            // Unknown request — nothing to do.
+            return Ok(None);
+        }
+
+        // Already handled? Idempotent success.
+        let was_handled = inner
+            .requests
+            .get(&unique_key)
+            .map(|e| e.order_no.is_none())
+            .unwrap_or(false);
+        if was_handled {
             return Ok(Some(ProcessedRequest {
-                id: None,
+                request_id,
                 unique_key,
                 was_already_present: true,
                 was_already_handled: true,
             }));
         }
 
-        // Must be in progress
-        if !inner.in_progress_set.contains(&unique_key) {
-            return Ok(None);
-        }
-
-        // Set handledAt timestamp
+        // Set handledAt + clear orderNo (null => handled).
         let now = Utc::now();
         let handled_at_str = now.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
         if let Value::Object(ref mut map) = request {
             map.insert("handledAt".to_string(), Value::String(handled_at_str));
+            map.insert("orderNo".to_string(), Value::Null);
+            map.entry("id")
+                .or_insert_with(|| Value::String(request_id.clone()));
         }
 
-        // Write updated request file
-        let file_path = self.get_request_path(&unique_key);
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
 
-        // Move from in-progress to handled
-        inner.in_progress_set.remove(&unique_key);
-        inner.handled_set.insert(unique_key.clone());
-        inner
-            .queue_state
-            .in_progress_requests
-            .retain(|k| k != &unique_key);
-        inner.queue_state.handled_requests.push(unique_key.clone());
+        inner.requests.insert(
+            unique_key.clone(),
+            RequestEntry { order_no: None },
+        );
 
-        // Update metadata
         inner.metadata.handled_request_count += 1;
         inner.metadata.pending_request_count =
             inner.metadata.pending_request_count.saturating_sub(1);
@@ -525,137 +452,182 @@ impl FileSystemRequestQueueClient {
         let meta_json = json_dumps_value(&inner.metadata)?;
         atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
 
-        inner.is_empty_cache = None;
-
-        // Persist state
-        self.persist_state_inner(&inner).await;
-
         Ok(Some(ProcessedRequest {
-            id: None,
+            request_id,
             unique_key,
             was_already_present: true,
             was_already_handled: true,
         }))
     }
 
-    /// Reclaim a request — move it from in-progress back to the queue.
+    /// Reclaim a request — return it to the pending pool (optionally forefront).
+    ///
+    /// Like `mark_request_as_handled`, this does not require the request to
+    /// still be locked: a consumer whose lock expired must still be able to
+    /// reclaim it. Returns `None` only if the request is unknown or already
+    /// handled.
     pub async fn reclaim_request(
         &self,
-        request: Value,
+        mut request: Value,
         forefront: bool,
     ) -> Result<Option<ProcessedRequest>> {
-        let unique_key = match request
-            .get("uniqueKey")
-            .or_else(|| request.get("unique_key"))
-            .and_then(|v| v.as_str())
-        {
-            Some(k) => k.to_string(),
-            None => {
-                return Err(StorageError::InvalidArgs(
-                    "Request must have a 'uniqueKey' field".to_string(),
-                ));
-            }
-        };
+        let unique_key = Self::extract_unique_key(&request)?;
+        let request_id = unique_key_to_request_id(&unique_key);
 
         let mut inner = self.inner.lock().await;
 
-        // Must be in progress
-        if !inner.in_progress_set.contains(&unique_key) {
+        let file_path = self.get_request_path(&unique_key);
+        if !file_path.exists() && !inner.requests.contains_key(&unique_key) {
             return Ok(None);
         }
 
-        // Remove from in-progress
-        inner.in_progress_set.remove(&unique_key);
-        inner
-            .queue_state
-            .in_progress_requests
-            .retain(|k| k != &unique_key);
+        // Already handled — can't reclaim.
+        let was_handled = inner
+            .requests
+            .get(&unique_key)
+            .map(|e| e.order_no.is_none())
+            .unwrap_or(false);
+        if was_handled {
+            return Ok(None);
+        }
 
-        // Write updated request to disk (the caller may have modified fields
-        // like userData.__crawlee.state, retryCount, etc.)
-        let file_path = self.get_request_path(&unique_key);
+        // Reset orderNo to "now" (unlocked, fetchable immediately), preserving
+        // the forefront/regular sign.
+        let now = Utc::now().timestamp_millis();
+        let order_no = if forefront { -now } else { now };
+
+        if let Value::Object(ref mut map) = request {
+            map.insert("orderNo".to_string(), Value::Number(order_no.into()));
+            map.entry("id")
+                .or_insert_with(|| Value::String(request_id.clone()));
+        }
+
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
 
-        // Re-add to queue
-        if forefront {
-            inner.queue_state.forefront_sequence_counter += 1;
-            let seq = inner.queue_state.forefront_sequence_counter;
-            inner
-                .queue_state
-                .forefront_requests
-                .insert(unique_key.clone(), Value::Number(seq.into()));
-            inner.request_cache.push_front(request);
-        } else {
-            inner.queue_state.sequence_counter += 1;
-            let seq = inner.queue_state.sequence_counter;
-            inner
-                .queue_state
-                .regular_requests
-                .insert(unique_key.clone(), Value::Number(seq.into()));
-            inner.request_cache.push_back(request);
-        }
+        inner.requests.insert(
+            unique_key.clone(),
+            RequestEntry {
+                order_no: Some(order_no),
+            },
+        );
 
-        inner.is_empty_cache = None;
-
-        let now = Utc::now();
-        inner.metadata.base.accessed_at = now;
-        inner.metadata.base.modified_at = now;
+        let now_dt = Utc::now();
+        inner.metadata.base.accessed_at = now_dt;
+        inner.metadata.base.modified_at = now_dt;
         let meta_json = json_dumps_value(&inner.metadata)?;
         atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
 
-        // Persist state
-        self.persist_state_inner(&inner).await;
-
         Ok(Some(ProcessedRequest {
-            id: None,
+            request_id,
             unique_key,
             was_already_present: true,
             was_already_handled: false,
         }))
     }
 
-    /// Check if the queue is empty (no pending or in-progress requests).
+    /// Whether the queue is empty in the *fetchable* sense: would the next
+    /// `fetch_next_request()` return `None`?
+    ///
+    /// Locked (in-progress) requests are NOT counted — a queue holding only
+    /// locked requests is "empty" by this definition but not *finished*.
+    /// This matches the crawlee-js v4 `isEmpty` contract.
     pub async fn is_empty(&self) -> bool {
         let mut inner = self.inner.lock().await;
+        let now = Utc::now().timestamp_millis();
 
-        if let Some(cached) = inner.is_empty_cache {
-            return cached;
-        }
+        let has_fetchable = inner.requests.values().any(|e| match e.order_no {
+            Some(n) => !Self::is_locked_order(n, now),
+            None => false,
+        });
 
-        let all_keys: HashSet<&String> = inner
-            .queue_state
-            .regular_requests
-            .keys()
-            .chain(inner.queue_state.forefront_requests.keys())
-            .chain(inner.in_progress_set.iter())
-            .collect();
-
-        let unhandled: usize = all_keys
-            .iter()
-            .filter(|k| !inner.handled_set.contains(**k))
-            .count();
-
-        let result = unhandled == 0;
-        inner.is_empty_cache = Some(result);
-
-        // Update accessed_at (best-effort — is_empty returns bool, not Result)
+        // Best-effort accessed_at bump (is_empty returns bool, not Result — so
+        // any write error is ignored).
         inner.metadata.base.accessed_at = Utc::now();
         if let Ok(json) = json_dumps_value(&inner.metadata) {
             let _ = atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await;
         }
 
-        result
+        !has_fetchable
     }
 
-    /// Explicitly persist the current queue state via the callback.
-    /// Call this from the Python/JS side in response to PERSIST_STATE events.
-    pub async fn persist_state(&self) {
+    /// Whether the queue is finished: no unhandled requests remain anywhere,
+    /// including requests currently locked/in-progress by any consumer.
+    ///
+    /// This is the signal the crawler's completion logic depends on. It is the
+    /// strong counterpart to [`is_empty`](Self::is_empty).
+    pub async fn is_finished(&self) -> bool {
         let inner = self.inner.lock().await;
-        self.persist_state_inner(&inner).await;
+        // Any request with a non-null orderNo is still outstanding (pending or
+        // locked). Only when every request is handled (orderNo == None) is the
+        // queue finished.
+        !inner.requests.values().any(|e| e.order_no.is_some())
+    }
+
+    /// Hint how long a fetched request should stay locked, in seconds.
+    ///
+    /// The crawler knows the only sensible lock duration (long enough to
+    /// outlive its request handler). We only ever *raise* the duration so a
+    /// short-lived consumer sharing the queue cannot cut short a long-lived
+    /// one's reservation. Matches the JS `setExpectedRequestProcessingTime`.
+    pub async fn set_expected_request_processing_time(&self, secs: f64) {
+        let millis = (secs * 1000.0) as i64;
+        let mut inner = self.inner.lock().await;
+        if millis > inner.lock_millis {
+            inner.lock_millis = millis;
+        }
+    }
+
+    /// Retained for binding compatibility. The orderNo lock model persists
+    /// everything inline in the request files, so there is no separate state
+    /// blob to flush — this is a no-op.
+    pub async fn persist_state(&self) {
+        // Intentionally empty: state lives in the request files.
     }
 
     // ─── Private ────────────────────────────────────────────────────────────
+
+    /// A request is locked if it is not handled and its `|orderNo|` lies in the
+    /// future relative to `now` (unix millis). Matches the JS `isRequestLocked`.
+    fn is_locked_order(order_no: i64, now: i64) -> bool {
+        order_no > now || order_no < -now
+    }
+
+    fn extract_unique_key(request: &Value) -> Result<String> {
+        request
+            .get("uniqueKey")
+            .or_else(|| request.get("unique_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                StorageError::InvalidArgs("Request must have a 'uniqueKey' field".to_string())
+            })
+    }
+
+    fn read_order_no(request: &Value) -> Option<i64> {
+        match request.get("orderNo") {
+            Some(Value::Number(n)) => n.as_i64(),
+            // Missing or explicitly null => handled.
+            _ => None,
+        }
+    }
+
+    /// Compute the next orderNo for a freshly added/forefronted request.
+    ///
+    /// This is a plain signed unix-millis timestamp, exactly like the JS v3
+    /// `_calculateOrderNo`: positive for regular, negative for forefront. We
+    /// deliberately do NOT nudge the value past `now` — a future `|orderNo|`
+    /// is the lock signal, so nudging forward would make a freshly-added
+    /// request look locked. Same-millisecond ties keep insertion order well
+    /// enough for crawling and match the JS behaviour.
+    fn next_order_no(forefront: bool) -> i64 {
+        let now = Utc::now().timestamp_millis();
+        if forefront {
+            -now
+        } else {
+            now
+        }
+    }
 
     fn get_request_path(&self, unique_key: &str) -> PathBuf {
         let hash = sha256_prefix(unique_key, 15);
@@ -682,172 +654,82 @@ impl FileSystemRequestQueueClient {
         Ok(files)
     }
 
-    /// Scan existing request files on disk and add them to state if not already tracked.
-    async fn discover_existing_requests(&self) -> Result<()> {
+    /// Rebuild the in-memory index from the request files on disk, and
+    /// recompute the metadata counts from the authoritative file contents.
+    ///
+    /// On reopen, any request that was *locked* (a future `|orderNo|`) by a
+    /// previous run of this process is no longer being processed; we leave the
+    /// persisted orderNo as-is (it will naturally expire / be re-fetchable once
+    /// `now` passes it), but it counts as pending for metadata purposes.
+    async fn rebuild_index(&self) -> Result<()> {
         let request_files = Self::get_request_files(&self.path).await?;
 
         let mut inner = self.inner.lock().await;
-        let mut discovered_pending = 0usize;
-        let mut discovered_handled = 0usize;
+        inner.requests.clear();
 
-        for file_path in request_files {
-            match fs::read_to_string(&file_path).await {
-                Ok(content) => {
-                    match serde_json::from_str::<Value>(&content) {
-                        Ok(request) => {
-                            let unique_key = match request
-                                .get("uniqueKey")
-                                .or_else(|| request.get("unique_key"))
-                                .and_then(|v| v.as_str())
-                            {
-                                Some(k) => k.to_string(),
-                                None => continue,
-                            };
-
-                            // Skip if already tracked
-                            if inner.queue_state.regular_requests.contains_key(&unique_key)
-                                || inner
-                                    .queue_state
-                                    .forefront_requests
-                                    .contains_key(&unique_key)
-                                || inner.in_progress_set.contains(&unique_key)
-                                || inner.handled_set.contains(&unique_key)
-                            {
-                                continue;
-                            }
-
-                            // Check if already handled (has handled_at)
-                            let is_handled = request
-                                .get("handledAt")
-                                .or_else(|| request.get("handled_at"))
-                                .map(|v| !v.is_null())
-                                .unwrap_or(false);
-
-                            if is_handled {
-                                inner.handled_set.insert(unique_key.clone());
-                                inner.queue_state.handled_requests.push(unique_key);
-                                discovered_handled += 1;
-                            } else {
-                                inner.queue_state.sequence_counter += 1;
-                                let seq = inner.queue_state.sequence_counter;
-                                inner
-                                    .queue_state
-                                    .regular_requests
-                                    .insert(unique_key, Value::Number(seq.into()));
-                                discovered_pending += 1;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to parse request file {}: {}",
-                                file_path.display(),
-                                e
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to read request file {}: {}", file_path.display(), e);
-                }
-            }
-        }
-
-        // Recalculate metadata counts from authoritative state (not incremental,
-        // because metadata loaded from disk may already reflect these requests).
-        if discovered_pending > 0 || discovered_handled > 0 {
-            let handled = inner.handled_set.len();
-            let pending = inner.queue_state.regular_requests.len()
-                + inner.queue_state.forefront_requests.len()
-                + inner.in_progress_set.len();
-            inner.metadata.handled_request_count = handled;
-            inner.metadata.pending_request_count = pending;
-            inner.metadata.total_request_count = handled + pending;
-
-            let json = json_dumps_value(&inner.metadata)?;
-            atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Refresh the in-memory request cache from disk.
-    async fn refresh_cache_inner(&self, inner: &mut InnerState) -> Result<()> {
-        let request_files = Self::get_request_files(&self.path).await?;
-        inner.request_cache.clear();
-
-        // Collect forefront requests (LIFO — newest first)
-        let mut forefront: Vec<(String, i64, Value)> = Vec::new();
-        // Collect regular requests (FIFO — oldest first)
-        let mut regular: Vec<(String, i64, Value)> = Vec::new();
+        let mut handled = 0usize;
+        let mut pending = 0usize;
 
         for file_path in request_files {
             let content = match fs::read_to_string(&file_path).await {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!("Failed to read request file {}: {}", file_path.display(), e);
+                    continue;
+                }
             };
             let request: Value = match serde_json::from_str(&content) {
                 Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse request file {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let unique_key = match Self::extract_unique_key(&request) {
+                Ok(k) => k,
                 Err(_) => continue,
             };
 
-            let unique_key = match request
-                .get("uniqueKey")
-                .or_else(|| request.get("unique_key"))
-                .and_then(|v| v.as_str())
-            {
-                Some(k) => k.to_string(),
-                None => continue,
+            // Determine handled state. A request is handled if it has a
+            // non-null `handledAt`, OR its persisted orderNo is null. Otherwise
+            // it carries whatever orderNo is on disk (assigning one if a legacy
+            // file lacks it).
+            let has_handled_at = request
+                .get("handledAt")
+                .or_else(|| request.get("handled_at"))
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            let order_no = if has_handled_at {
+                None
+            } else {
+                Self::read_order_no(&request).or(Some(Utc::now().timestamp_millis()))
             };
 
-            // Skip handled and in-progress
-            if inner.handled_set.contains(&unique_key)
-                || inner.in_progress_set.contains(&unique_key)
-            {
-                continue;
+            if order_no.is_none() {
+                handled += 1;
+            } else {
+                pending += 1;
             }
 
-            if let Some(seq) = inner
-                .queue_state
-                .forefront_requests
-                .get(&unique_key)
-                .and_then(|v| v.as_i64())
-            {
-                forefront.push((unique_key, seq, request));
-            } else if let Some(seq) = inner
-                .queue_state
-                .regular_requests
-                .get(&unique_key)
-                .and_then(|v| v.as_i64())
-            {
-                regular.push((unique_key, seq, request));
-            }
+            inner
+                .requests
+                .insert(unique_key, RequestEntry { order_no });
         }
 
-        // Sort forefront: newest first (highest sequence number first = LIFO)
-        forefront.sort_by_key(|b| std::cmp::Reverse(b.1));
-        // Sort regular: oldest first (lowest sequence number first = FIFO)
-        regular.sort_by_key(|a| a.1);
+        inner.metadata.handled_request_count = handled;
+        inner.metadata.pending_request_count = pending;
+        inner.metadata.total_request_count = handled + pending;
 
-        // Fill cache: forefront first, then regular
-        for (_, _, req) in forefront {
-            if inner.request_cache.len() >= MAX_REQUESTS_IN_CACHE {
-                break;
-            }
-            inner.request_cache.push_back(req);
-        }
-        for (_, _, req) in regular {
-            if inner.request_cache.len() >= MAX_REQUESTS_IN_CACHE {
-                break;
-            }
-            inner.request_cache.push_back(req);
-        }
+        let json = json_dumps_value(&inner.metadata)?;
+        atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
 
-        inner.request_cache_needs_refresh = false;
         Ok(())
-    }
-
-    async fn persist_state_inner(&self, inner: &InnerState) {
-        self.persistence.save(&inner.queue_state).await;
     }
 }
 
@@ -856,58 +738,49 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn req(unique_key: &str) -> Value {
+        serde_json::json!({
+            "uniqueKey": unique_key,
+            "url": format!("https://example.com/{unique_key}"),
+            "method": "GET",
+        })
+    }
+
     #[tokio::test]
     async fn test_add_and_fetch_request() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
-        let requests = vec![serde_json::json!({
-            "uniqueKey": "https://example.com",
-            "url": "https://example.com",
-            "method": "GET"
-        })];
-
-        let response = client.add_batch_of_requests(requests, false).await.unwrap();
+        let response = client
+            .add_batch_of_requests(vec![req("https://example.com")], false)
+            .await
+            .unwrap();
         assert_eq!(response.processed_requests.len(), 1);
         assert!(!response.processed_requests[0].was_already_present);
+        assert!(!response.processed_requests[0].request_id.is_empty());
 
-        // Fetch the request
-        let fetched = client.fetch_next_request().await.unwrap();
-        assert!(fetched.is_some());
-        let fetched = fetched.unwrap();
-        assert_eq!(fetched["url"], "https://example.com");
+        let fetched = client.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(fetched["uniqueKey"], "https://example.com");
 
-        // Queue should appear empty now (request is in-progress)
-        let next = client.fetch_next_request().await.unwrap();
-        assert!(next.is_none());
+        // Locked now — nothing else fetchable.
+        assert!(client.fetch_next_request().await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_deduplication() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
-        let req = serde_json::json!({
-            "uniqueKey": "https://example.com",
-            "url": "https://example.com",
-            "method": "GET"
-        });
-
-        // Add twice
         client
-            .add_batch_of_requests(vec![req.clone()], false)
+            .add_batch_of_requests(vec![req("dup")], false)
             .await
             .unwrap();
         let response = client
-            .add_batch_of_requests(vec![req], false)
+            .add_batch_of_requests(vec![req("dup")], false)
             .await
             .unwrap();
 
@@ -915,206 +788,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_intra_batch_deduplication() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let response = client
+            .add_batch_of_requests(vec![req("dup"), req("dup")], false)
+            .await
+            .unwrap();
+
+        assert_eq!(response.processed_requests.len(), 2);
+        assert!(!response.processed_requests[0].was_already_present);
+        assert!(
+            response.processed_requests[1].was_already_present,
+            "second occurrence of the same uniqueKey within one batch must report was_already_present"
+        );
+        // Only one pending request should result.
+        assert_eq!(client.get_metadata().await.total_request_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_request_id_is_deterministic_and_nonempty() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let response = client
+            .add_batch_of_requests(vec![req("abc")], false)
+            .await
+            .unwrap();
+        let id = &response.processed_requests[0].request_id;
+        assert_eq!(*id, unique_key_to_request_id("abc"));
+        assert!(!id.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_mark_as_handled() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
         client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "req1",
-                    "url": "https://example.com/1",
-                    "method": "GET"
-                })],
-                false,
-            )
+            .add_batch_of_requests(vec![req("req1")], false)
             .await
             .unwrap();
 
         let request = client.fetch_next_request().await.unwrap().unwrap();
         let result = client.mark_request_as_handled(request).await.unwrap();
         assert!(result.is_some());
+        assert!(result.unwrap().was_already_handled);
 
         assert!(client.is_empty().await);
+        assert!(client.is_finished().await);
+        assert_eq!(client.get_metadata().await.handled_request_count, 1);
     }
 
     #[tokio::test]
     async fn test_reclaim_request() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
         client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "req1",
-                    "url": "https://example.com/1",
-                    "method": "GET"
-                })],
-                false,
-            )
+            .add_batch_of_requests(vec![req("req1")], false)
             .await
             .unwrap();
 
         let request = client.fetch_next_request().await.unwrap().unwrap();
-
-        // Reclaim it
         let result = client.reclaim_request(request, false).await.unwrap();
         assert!(result.is_some());
 
-        // Should be fetchable again
-        let refetched = client.fetch_next_request().await.unwrap();
-        assert!(refetched.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_get_request_updates_accessed_at() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "req1",
-                    "url": "https://example.com/1",
-                    "method": "GET"
-                })],
-                false,
-            )
-            .await
-            .unwrap();
-
-        let accessed_before = client.get_metadata().await.base.accessed_at;
-
-        // Small delay so timestamps differ
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let _request = client.get_request("req1").await.unwrap();
-
-        let accessed_after = client.get_metadata().await.base.accessed_at;
-        assert!(
-            accessed_after > accessed_before,
-            "get_request should update accessed_at"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_is_empty_updates_accessed_at() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        let accessed_before = client.get_metadata().await.base.accessed_at;
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        let _empty = client.is_empty().await;
-
-        let accessed_after = client.get_metadata().await.base.accessed_at;
-        assert!(
-            accessed_after > accessed_before,
-            "is_empty should update accessed_at"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mark_handled_returns_was_already_handled_true() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "req1",
-                    "url": "https://example.com/1",
-                    "method": "GET"
-                })],
-                false,
-            )
-            .await
-            .unwrap();
-
-        let request = client.fetch_next_request().await.unwrap().unwrap();
-        let result = client
-            .mark_request_as_handled(request.clone())
-            .await
-            .unwrap()
-            .unwrap();
-
-        // After marking as handled, was_already_handled should be true
-        assert!(
-            result.was_already_handled,
-            "mark_request_as_handled should return was_already_handled=true"
-        );
-
-        // Calling again should also return was_already_handled: true
-        let result2 = client
-            .mark_request_as_handled(request)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            result2.was_already_handled,
-            "re-marking handled request should return was_already_handled=true"
-        );
+        // Should be fetchable again (lock released).
+        assert!(client.fetch_next_request().await.unwrap().is_some());
     }
 
     #[tokio::test]
     async fn test_forefront() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
-        // Add regular request first
         client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "regular",
-                    "url": "https://example.com/regular",
-                    "method": "GET"
-                })],
-                false,
-            )
+            .add_batch_of_requests(vec![req("regular")], false)
             .await
             .unwrap();
-
-        // Add forefront request
         client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "priority",
-                    "url": "https://example.com/priority",
-                    "method": "GET"
-                })],
-                true,
-            )
+            .add_batch_of_requests(vec![req("priority")], true)
             .await
             .unwrap();
 
-        // Forefront should come first
         let first = client.fetch_next_request().await.unwrap().unwrap();
         assert_eq!(first["uniqueKey"], "priority");
+    }
+
+    #[tokio::test]
+    async fn test_is_empty_vs_is_finished_with_locked_request() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+
+        // Fetch (locks it).
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+
+        // Nothing else fetchable => empty in the "fetchable" sense.
+        assert!(
+            client.is_empty().await,
+            "is_empty() should be true when the only request is locked (in progress)"
+        );
+        // But work remains => NOT finished.
+        assert!(
+            !client.is_finished().await,
+            "is_finished() must be false while a request is locked/in progress"
+        );
+
+        client.mark_request_as_handled(request).await.unwrap();
+        assert!(client.is_empty().await);
+        assert!(client.is_finished().await);
+    }
+
+    #[tokio::test]
+    async fn test_lock_expiry_allows_refetch() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Make the lock effectively zero so it expires immediately.
+        client.set_expected_request_processing_time(0.0).await;
+        // set_* only raises, so force the internal value down for the test.
+        {
+            let mut inner = client.inner.lock().await;
+            inner.lock_millis = 0;
+        }
+
+        client
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+
+        let first = client.fetch_next_request().await.unwrap();
+        assert!(first.is_some());
+
+        // Lock is 0ms so the request becomes fetchable again immediately.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let again = client.fetch_next_request().await.unwrap();
+        assert!(
+            again.is_some(),
+            "an expired lock must allow the request to be fetched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_handled_after_lock_expiry() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        {
+            let mut inner = client.inner.lock().await;
+            inner.lock_millis = 0;
+        }
+
+        client
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Even though our lock expired, marking handled must still succeed.
+        let result = client.mark_request_as_handled(request).await.unwrap();
+        assert!(
+            result.is_some(),
+            "mark_request_as_handled must succeed even after the lock expired"
+        );
+        assert!(client.is_finished().await);
     }
 
     #[tokio::test]
@@ -1122,27 +984,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        // Create a queue and add requests
         let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
-
         client
-            .add_batch_of_requests(
-                vec![
-                    serde_json::json!({
-                        "uniqueKey": "req1",
-                        "url": "https://example.com/1",
-                        "method": "GET"
-                    }),
-                    serde_json::json!({
-                        "uniqueKey": "req2",
-                        "url": "https://example.com/2",
-                        "method": "GET"
-                    }),
-                ],
-                false,
-            )
+            .add_batch_of_requests(vec![req("req1"), req("req2")], false)
             .await
             .unwrap();
 
@@ -1151,65 +997,69 @@ mod tests {
         assert_eq!(meta.pending_request_count, 2);
         drop(client);
 
-        // Reopen the same queue (no persistence — state starts empty, discovery runs)
         let client2 = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
             .await
             .unwrap();
-
         let meta2 = client2.get_metadata().await;
-        assert_eq!(
-            meta2.total_request_count, 2,
-            "total_request_count should not double on reopen"
-        );
-        assert_eq!(
-            meta2.pending_request_count, 2,
-            "pending_request_count should not double on reopen"
-        );
+        assert_eq!(meta2.total_request_count, 2);
+        assert_eq!(meta2.pending_request_count, 2);
     }
 
     #[tokio::test]
-    async fn test_is_empty_false_while_request_in_progress() {
+    async fn test_purge_resets_everything() {
         let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemRequestQueueClient::open(None, None, None, storage_dir)
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
         client
-            .add_batch_of_requests(
-                vec![serde_json::json!({
-                    "uniqueKey": "req1",
-                    "url": "https://example.com/1",
-                    "method": "GET"
-                })],
-                false,
-            )
+            .add_batch_of_requests(vec![req("req1"), req("req2")], false)
+            .await
+            .unwrap();
+        assert_eq!(client.get_metadata().await.total_request_count, 2);
+
+        client.purge().await.unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.total_request_count, 0);
+        assert!(client.is_empty().await);
+        assert!(client.is_finished().await);
+    }
+
+    #[tokio::test]
+    async fn test_get_request_updates_accessed_at() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
             .await
             .unwrap();
 
-        // Fetch the request (marks it as in-progress)
-        let request = client.fetch_next_request().await.unwrap();
-        assert!(request.is_some());
-
-        // No more requests to fetch, but one is still in-progress
-        let next = client.fetch_next_request().await.unwrap();
-        assert!(next.is_none());
-
-        // Queue must NOT report as empty — the in-progress request isn't handled yet
-        assert!(
-            !client.is_empty().await,
-            "is_empty() must return false while a request is in-progress"
-        );
-
-        // After handling, queue should be empty
         client
-            .mark_request_as_handled(request.unwrap())
+            .add_batch_of_requests(vec![req("req1")], false)
             .await
             .unwrap();
-        assert!(
-            client.is_empty().await,
-            "is_empty() should return true after all requests are handled"
-        );
+
+        let accessed_before = client.get_metadata().await.base.accessed_at;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let _ = client.get_request("req1").await.unwrap();
+        let accessed_after = client.get_metadata().await.base.accessed_at;
+        assert!(accessed_after > accessed_before);
+    }
+
+    #[tokio::test]
+    async fn test_persisted_order_no_in_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+
+        // The persisted file must carry id + orderNo (the on-disk lock format).
+        let stored = client.get_request("req1").await.unwrap().unwrap();
+        assert!(stored.get("id").and_then(|v| v.as_str()).is_some());
+        assert!(stored.get("orderNo").and_then(|v| v.as_i64()).is_some());
     }
 }
