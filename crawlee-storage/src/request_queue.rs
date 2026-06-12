@@ -47,6 +47,12 @@ struct InnerState {
     /// `set_expected_request_processing_time`. Only ever raised, never lowered
     /// (the longest-lived consumer wins), matching the JS frontend policy.
     lock_millis: i64,
+    /// The largest `orderNo` *magnitude* (i.e. `|orderNo|`) handed out so far,
+    /// excluding lock timestamps (which live far in the future). Used to make
+    /// `next_order_no` strictly monotonic so requests added within the same
+    /// millisecond never collide and always preserve insertion order. Seeded
+    /// from disk on `rebuild_index`.
+    last_order_magnitude: i64,
 }
 
 /// Filesystem-backed request queue client.
@@ -122,6 +128,7 @@ impl FileSystemRequestQueueClient {
                 metadata,
                 requests: HashMap::new(),
                 lock_millis: DEFAULT_LOCK_MILLIS,
+                last_order_magnitude: 0,
             }),
             path,
         };
@@ -231,9 +238,9 @@ impl FileSystemRequestQueueClient {
             }
 
             // Compute the orderNo: forefront => negative, regular => positive.
-            // We nudge by a per-write counter so requests added in the same
-            // millisecond keep a stable relative order.
-            let order_no = Self::next_order_no(forefront);
+            // Strictly monotonic so same-millisecond additions never collide
+            // and insertion order is preserved.
+            let order_no = Self::next_order_no(&mut inner, forefront);
 
             // Build the persisted request: inject id + orderNo, preserving the
             // opaque user payload.
@@ -490,10 +497,10 @@ impl FileSystemRequestQueueClient {
             return Ok(None);
         }
 
-        // Reset orderNo to "now" (unlocked, fetchable immediately), preserving
-        // the forefront/regular sign.
-        let now = Utc::now().timestamp_millis();
-        let order_no = if forefront { -now } else { now };
+        // Reset orderNo to a fresh, unlocked, fetchable-immediately value,
+        // preserving the forefront/regular sign. Using the monotonic generator
+        // keeps it collision-free and correctly ordered relative to peers.
+        let order_no = Self::next_order_no(&mut inner, forefront);
 
         if let Value::Object(ref mut map) = request {
             map.insert("orderNo".to_string(), Value::Number(order_no.into()));
@@ -611,20 +618,33 @@ impl FileSystemRequestQueueClient {
         }
     }
 
-    /// Compute the next orderNo for a freshly added/forefronted request.
+    /// Compute the next orderNo for a freshly added/forefronted/reclaimed
+    /// request.
     ///
-    /// This is a plain signed unix-millis timestamp, exactly like the JS v3
-    /// `_calculateOrderNo`: positive for regular, negative for forefront. We
-    /// deliberately do NOT nudge the value past `now` — a future `|orderNo|`
-    /// is the lock signal, so nudging forward would make a freshly-added
-    /// request look locked. Same-millisecond ties keep insertion order well
-    /// enough for crawling and match the JS behaviour.
-    fn next_order_no(forefront: bool) -> i64 {
+    /// The magnitude is a unix-millis timestamp like the JS v3
+    /// `_calculateOrderNo`, but made **strictly monotonic** so that two
+    /// requests created in the same millisecond never collide: each call
+    /// returns a magnitude `> ` every previously handed-out magnitude. This is
+    /// what guarantees stable FIFO order (regular) and a deterministic order
+    /// among forefront requests — `HashMap` iteration order is undefined, so
+    /// `fetch_next_request` relies entirely on these unique sort keys.
+    ///
+    /// Sign encodes priority: positive = regular, negative = forefront. Since
+    /// every negative sorts strictly before every positive, a forefront request
+    /// always jumps ahead of all regular ones regardless of insertion time.
+    ///
+    /// The magnitude can creep slightly past `now` under a burst of
+    /// same-millisecond additions, but a lock pushes `|orderNo|` `lock_millis`
+    /// (minutes) into the future, so the tiny creep here can never be mistaken
+    /// for a lock (`is_locked_order`).
+    fn next_order_no(inner: &mut InnerState, forefront: bool) -> i64 {
         let now = Utc::now().timestamp_millis();
+        let magnitude = now.max(inner.last_order_magnitude + 1);
+        inner.last_order_magnitude = magnitude;
         if forefront {
-            -now
+            -magnitude
         } else {
-            now
+            magnitude
         }
     }
 
@@ -656,18 +676,28 @@ impl FileSystemRequestQueueClient {
     /// Rebuild the in-memory index from the request files on disk, and
     /// recompute the metadata counts from the authoritative file contents.
     ///
-    /// On reopen, any request that was *locked* (a future `|orderNo|`) by a
-    /// previous run of this process is no longer being processed; we leave the
-    /// persisted orderNo as-is (it will naturally expire / be re-fetchable once
-    /// `now` passes it), but it counts as pending for metadata purposes.
+    /// Crash recovery: a request that was *locked* (a future `|orderNo|`) when
+    /// the previous run died is no longer being processed by anyone, yet its
+    /// on-disk lock would otherwise keep it un-fetchable for the full lock
+    /// duration (minutes). Since `open()` is the moment a fresh process takes
+    /// ownership of the queue, we reclaim every such stale lock here: rewrite
+    /// the `orderNo` to an immediately-fetchable value (preserving the
+    /// forefront/regular sign) and persist it back to disk so the on-disk
+    /// source of truth reflects the reclaim. This is what makes in-progress
+    /// requests recoverable after a crash.
+    ///
+    /// We also seed `last_order_magnitude` from the largest magnitude seen so
+    /// that orderNos minted after reopen stay strictly monotonic.
     async fn rebuild_index(&self) -> Result<()> {
         let request_files = Self::get_request_files(&self.path).await?;
 
         let mut inner = self.inner.lock().await;
         inner.requests.clear();
 
+        let now = Utc::now().timestamp_millis();
         let mut handled = 0usize;
         let mut pending = 0usize;
+        let mut max_magnitude = 0i64;
 
         for file_path in request_files {
             let content = match fs::read_to_string(&file_path).await {
@@ -677,7 +707,7 @@ impl FileSystemRequestQueueClient {
                     continue;
                 }
             };
-            let request: Value = match serde_json::from_str(&content) {
+            let mut request: Value = match serde_json::from_str(&content) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(
@@ -707,8 +737,38 @@ impl FileSystemRequestQueueClient {
             let order_no = if has_handled_at {
                 None
             } else {
-                Self::read_order_no(&request).or(Some(Utc::now().timestamp_millis()))
+                let disk_order = Self::read_order_no(&request).unwrap_or(now);
+
+                if Self::is_locked_order(disk_order, now) {
+                    // Stale lock from a previous (now-dead) run — reclaim it so
+                    // it is fetchable immediately, preserving the sign. Use a
+                    // strictly monotonic magnitude so multiple reclaimed
+                    // requests don't collide on a single `now` value.
+                    let sign = if disk_order > 0 { 1 } else { -1 };
+                    let magnitude = now.max(max_magnitude + 1);
+                    max_magnitude = magnitude;
+                    let reclaimed = magnitude * sign;
+
+                    if let Value::Object(ref mut map) = request {
+                        map.insert("orderNo".to_string(), Value::Number(reclaimed.into()));
+                    }
+                    if let Err(e) = atomic_write(&file_path, json_dumps(&request)?.as_bytes()).await
+                    {
+                        warn!(
+                            "Failed to reclaim stale lock for {}: {}",
+                            file_path.display(),
+                            e
+                        );
+                    }
+                    Some(reclaimed)
+                } else {
+                    Some(disk_order)
+                }
             };
+
+            if let Some(n) = order_no {
+                max_magnitude = max_magnitude.max(n.abs());
+            }
 
             if order_no.is_none() {
                 handled += 1;
@@ -719,6 +779,7 @@ impl FileSystemRequestQueueClient {
             inner.requests.insert(unique_key, RequestEntry { order_no });
         }
 
+        inner.last_order_magnitude = max_magnitude;
         inner.metadata.handled_request_count = handled;
         inner.metadata.pending_request_count = pending;
         inner.metadata.total_request_count = handled + pending;
@@ -1040,6 +1101,141 @@ mod tests {
         let _ = client.get_request("req1").await.unwrap();
         let accessed_after = client.get_metadata().await.base.accessed_at;
         assert!(accessed_after > accessed_before);
+    }
+
+    #[tokio::test]
+    async fn test_fifo_order_within_same_millisecond_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Add many requests in a single batch (same/adjacent millisecond) so
+        // any timestamp-only orderNo would collide.
+        let keys: Vec<String> = (0..20).map(|i| format!("r{i:02}")).collect();
+        let batch: Vec<Value> = keys.iter().map(|k| req(k)).collect();
+        client.add_batch_of_requests(batch, false).await.unwrap();
+
+        // They must come back in insertion order (FIFO).
+        for expected in &keys {
+            let fetched = client.fetch_next_request().await.unwrap().unwrap();
+            assert_eq!(
+                fetched["uniqueKey"], *expected,
+                "FIFO order violated: expected {expected}, got {}",
+                fetched["uniqueKey"]
+            );
+            client.mark_request_as_handled(fetched).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_forefront_jumps_queue_even_same_millisecond() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Add regulars, then a forefront — all likely within one millisecond.
+        client
+            .add_batch_of_requests(vec![req("first"), req("second")], false)
+            .await
+            .unwrap();
+        client
+            .add_batch_of_requests(vec![req("priority")], true)
+            .await
+            .unwrap();
+
+        let fetched = client.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(
+            fetched["uniqueKey"], "priority",
+            "forefront request must be fetched first"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_forefront_preserve_lifo_or_fifo_order() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("regular")], false)
+            .await
+            .unwrap();
+        // Two forefront requests added in the same batch: both must precede the
+        // regular one, and must have a deterministic order between themselves.
+        client
+            .add_batch_of_requests(vec![req("ff1"), req("ff2")], true)
+            .await
+            .unwrap();
+
+        let a = client.fetch_next_request().await.unwrap().unwrap();
+        let b = client.fetch_next_request().await.unwrap().unwrap();
+        let c = client.fetch_next_request().await.unwrap().unwrap();
+
+        assert_eq!(c["uniqueKey"], "regular", "regular must be fetched last");
+        let front: Vec<String> = [&a, &b]
+            .iter()
+            .map(|v| v["uniqueKey"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            front.contains(&"ff1".to_string()) && front.contains(&"ff2".to_string()),
+            "both forefront requests must precede the regular one, got {front:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_in_progress_requests_recovered_after_crash() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client =
+            FileSystemRequestQueueClient::open(None, None, Some("crash".to_string()), storage_dir)
+                .await
+                .unwrap();
+        client
+            .add_batch_of_requests(vec![req("a"), req("b"), req("c")], false)
+            .await
+            .unwrap();
+
+        // Fetch one (locks/in-progress), then "crash" (drop without handling).
+        let fetched = client.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(fetched["uniqueKey"], "a");
+        client.persist_state().await;
+        drop(client);
+
+        // Reopen: all three requests must be recoverable (none lost).
+        let client2 =
+            FileSystemRequestQueueClient::open(None, None, Some("crash".to_string()), storage_dir)
+                .await
+                .unwrap();
+
+        let meta = client2.get_metadata().await;
+        assert_eq!(
+            meta.pending_request_count, 3,
+            "all 3 unhandled requests must survive a crash"
+        );
+        assert!(!client2.is_finished().await);
+
+        // Drain everything — must get all three distinct keys back.
+        {
+            let mut inner = client2.inner.lock().await;
+            inner.lock_millis = 0;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            let r = client2.fetch_next_request().await.unwrap().unwrap();
+            seen.insert(r["uniqueKey"].as_str().unwrap().to_string());
+            client2.mark_request_as_handled(r).await.unwrap();
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "all 3 distinct requests must be recovered, got {seen:?}"
+        );
+        assert!(client2.is_finished().await);
     }
 
     #[tokio::test]
