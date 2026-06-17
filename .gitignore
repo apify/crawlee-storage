@@ -10,6 +10,5 @@ dist/
 *.whl
 node_modules/
 *.node
-crawlee-storage-node/npm/
 crawlee-storage-node/artifacts/
 artifacts/
