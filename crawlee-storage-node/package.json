@@ -1,6 +1,6 @@
 {
     "name": "@crawlee/fs-storage-native",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Low-level Rust-powered napi-rs bindings for Crawlee's filesystem storage. Not intended for direct use in crawlers — depend on @crawlee/fs-storage instead.",
     "homepage": "https://github.com/apify/crawlee-storage",
     "license": "Apache-2.0",
