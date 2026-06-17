@@ -1,0 +1,24 @@
+{
+  "name": "@crawlee/fs-storage-native-win32-x64-msvc",
+  "version": "0.1.1",
+  "cpu": [
+    "x64"
+  ],
+  "main": "fs-storage-native.win32-x64-msvc.node",
+  "files": [
+    "fs-storage-native.win32-x64-msvc.node"
+  ],
+  "description": "Low-level Rust-powered napi-rs bindings for Crawlee's filesystem storage. Not intended for direct use in crawlers — depend on @crawlee/fs-storage instead.",
+  "homepage": "https://github.com/apify/crawlee-storage",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apify/crawlee-storage.git"
+  },
+  "os": [
+    "win32"
+  ]
+}

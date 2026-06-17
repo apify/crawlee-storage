@@ -5,5 +5,6 @@
     "useTabs": false,
     "semi": true,
     "singleQuote": true,
-    "trailingComma": "all"
+    "trailingComma": "all",
+    "ignorePatterns": ["npm/", "index.js", "index.d.ts"]
 }
