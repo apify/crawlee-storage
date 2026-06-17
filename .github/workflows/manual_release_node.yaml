@@ -1,18 +1,32 @@
-name: CI (main)
+name: Node release
+
+permissions:
+  contents: write
+  actions: write # Required to dispatch publish_to_npm.yaml.
 
 on:
-  push:
-    branches:
-      - main
-    tags-ignore:
-      - "**" # Ignore all tags to avoid duplicate executions triggered by tag pushes.
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - custom
+      custom_version:
+        description: The custom version to bump to (only for "custom" type)
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: release
   cancel-in-progress: false
-
-permissions:
-  contents: read
 
 jobs:
   code_checks:
@@ -20,33 +34,27 @@ jobs:
     uses: ./.github/workflows/_check_code.yaml
 
   release_metadata:
-    # Run this only for commits that would trigger a version bump.
-    if: >-
-      startsWith(github.event.head_commit.message, 'feat') ||
-      startsWith(github.event.head_commit.message, 'fix') ||
-      startsWith(github.event.head_commit.message, 'perf') ||
-      startsWith(github.event.head_commit.message, 'refactor') ||
-      startsWith(github.event.head_commit.message, 'style')
     name: Release metadata
     needs: [code_checks]
     runs-on: ubuntu-latest
     outputs:
       version_number: ${{ steps.metadata.outputs.version_number }}
+      tag_name: ${{ steps.metadata.outputs.tag_name }}
+      release_notes: ${{ steps.metadata.outputs.release_notes }}
       changelog: ${{ steps.metadata.outputs.changelog }}
     steps:
       - uses: apify/actions/git-cliff-release@v1.2.0
         id: metadata
         name: Prepare release metadata
         with:
-          release_type: prerelease
+          release_type: ${{ github.event.inputs.release_type }}
+          custom_version: ${{ github.event.inputs.custom_version }}
           existing_changelog_path: CHANGELOG.md
 
   update_changelog:
     name: Changelog & version bump
     needs: [release_metadata]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       release_commit_sha: ${{ steps.commit.outputs.commit_long_sha }}
     steps:
@@ -81,19 +89,32 @@ jobs:
         id: commit
         uses: apify/actions/signed-commit@v1.2.0
         with:
-          message: "chore(release): Set pre-release version to ${{ needs.release_metadata.outputs.version_number }} and update changelog [skip ci]"
+          message: "chore(release): Set package version to ${{ needs.release_metadata.outputs.version_number }} and update changelog [skip ci]"
           pull: "--rebase --autostash"
           github-token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
+  github_release:
+    name: GitHub release
+    needs: [release_metadata, update_changelog]
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
+    steps:
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.release_metadata.outputs.tag_name }}
+          name: ${{ needs.release_metadata.outputs.version_number }}
+          target_commitish: ${{ needs.update_changelog.outputs.release_commit_sha }}
+          body: ${{ needs.release_metadata.outputs.release_notes }}
+
   publish:
-    name: Publish pre-release to npm
+    name: Publish to npm
     needs: [update_changelog]
     runs-on: ubuntu-latest
-    permissions:
-      actions: write # Required to dispatch publish_to_npm.yaml.
     steps:
-      # Pre-releases are published under the "next" dist-tag via the single
-      # npm-OIDC-trusted workflow. No GitHub release is created for pre-releases.
+      # Publishing happens in the single npm-OIDC-trusted workflow, dispatched
+      # against the freshly bumped commit.
       - name: Publish to npm
         uses: apify/actions/execute-workflow@v1.2.0
         with:
@@ -101,6 +122,6 @@ jobs:
           inputs: >
             {
               "ref": "${{ needs.update_changelog.outputs.release_commit_sha }}",
-              "tag": "next"
+              "tag": "latest"
             }
           token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
