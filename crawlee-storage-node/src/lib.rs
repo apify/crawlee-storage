@@ -521,7 +521,6 @@ impl KvsKeyIterator {
 }
 
 // ─── Request Queue Client ───────────────────────────────────────────────────
-
 #[napi]
 pub struct FileSystemRequestQueueClient {
     inner: Arc<crawlee_storage::request_queue::FileSystemRequestQueueClient>,
@@ -530,6 +529,18 @@ pub struct FileSystemRequestQueueClient {
 
 #[napi]
 impl FileSystemRequestQueueClient {
+    /// Open a request queue.
+    ///
+    /// `useTestClock`: see `advanceClockForTesting` below.
+    ///
+    /// `assumeSoleOwner` (default `false`): controls how locks on disk are
+    /// treated at open time. With `false` (the safe default), any future-dated
+    /// `orderNo` is respected as a potential live peer's lock — crashed peers'
+    /// locks expire naturally on the wall clock. With `true`, the caller
+    /// asserts nothing else is using this queue and any in-progress locks are
+    /// reclaimed immediately, so a request whose previous run died is
+    /// instantly re-fetchable. Set to `true` only if you know you're the sole
+    /// consumer; otherwise you risk two peers processing the same request.
     #[napi(factory)]
     pub async fn open(
         id: Option<String>,
@@ -537,6 +548,7 @@ impl FileSystemRequestQueueClient {
         alias: Option<String>,
         storage_dir: Option<String>,
         use_test_clock: Option<bool>,
+        assume_sole_owner: Option<bool>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
         let (clock, test_clock) = pick_clock(use_test_clock);
@@ -546,6 +558,7 @@ impl FileSystemRequestQueueClient {
             alias,
             &storage_dir,
             clock,
+            assume_sole_owner.unwrap_or(false),
         )
         .await
         .map_err(storage_err)?;

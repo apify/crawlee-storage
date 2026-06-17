@@ -366,14 +366,7 @@ describe('FileSystemRequestQueueClient', () => {
             expect(() => client.advanceClockForTesting(1000)).toThrow(/useTestClock/);
         });
 
-        // KNOWN BUG: opening a second client over the same on-disk queue while
-        // the first client still has live locks resets those locks during
-        // `rebuild_index` (which can't distinguish a stale crash-recovery lock
-        // from a live concurrent lock). Tracked separately from the test-clock
-        // work — once the rebuild-index reclaim heuristic is fixed, this test
-        // should pass as written and lose its `.skip`.
-        // oxlint-disable-next-line no-disabled-tests
-        it.skip("a second client opened against the same dir+useTestClock sees the first client's lock", async () => {
+        it("a second client opened against the same dir+useTestClock sees the first client's lock", async () => {
             const clientA = await FileSystemRequestQueueClient.open(
                 null,
                 null,
@@ -404,6 +397,73 @@ describe('FileSystemRequestQueueClient', () => {
             clientB.advanceClockForTesting(4 * 60 * 1000);
             const fetched = await clientB.fetchNextRequest();
             expect(fetched).not.toBeNull();
+        });
+    });
+
+    // ─── assumeSoleOwner mode ──────────────────────────────────────────────
+    //
+    // When the caller knows nothing else is using the on-disk queue (the
+    // typical single-process crawler case), opening with `assumeSoleOwner:
+    // true` causes any future-dated `orderNo` on disk to be reclaimed
+    // immediately. This restores the historical instant-crash-recovery
+    // behavior; without it, a crashed peer's locks would naturally expire
+    // after the lock window (default 3 min) instead.
+    describe('assumeSoleOwner', () => {
+        it('default (false) respects an in-progress lock left on disk by a previous run', async () => {
+            const first = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true, // useTestClock so the lock window doesn't elapse during the test
+            );
+            await first.addBatchOfRequests(
+                [{ uniqueKey: 'r1', url: 'https://example.com/1', method: 'GET' }],
+                false,
+            );
+            await first.fetchNextRequest(); // locks r1 on disk
+
+            // Reopen without sole-ownership opt-in: the lock is still in
+            // effect, so r1 is not fetchable.
+            const reopened = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+                false, // assumeSoleOwner
+            );
+            const blocked = await reopened.fetchNextRequest();
+            expect(blocked).toBeNull();
+        });
+
+        it('true reclaims stale locks on open so they are immediately fetchable', async () => {
+            const first = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+            );
+            await first.addBatchOfRequests(
+                [{ uniqueKey: 'r1', url: 'https://example.com/1', method: 'GET' }],
+                false,
+            );
+            await first.fetchNextRequest(); // locks r1 on disk
+
+            // Reopen with assumeSoleOwner: true. The on-disk lock is treated
+            // as a stale crash artifact and reclaimed immediately.
+            const reopened = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+                true, // assumeSoleOwner
+            );
+            const fetched = await reopened.fetchNextRequest();
+            expect(fetched).not.toBeNull();
+            expect(fetched!.uniqueKey).toBe('r1');
         });
     });
 });

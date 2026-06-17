@@ -195,7 +195,23 @@ class FileSystemRequestQueueClient:
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
-    ) -> FileSystemRequestQueueClient: ...
+        assume_sole_owner: builtins.bool = False,
+    ) -> FileSystemRequestQueueClient:
+        r"""
+        Open a request queue.
+
+        ``use_test_clock``: see ``advance_clock_for_testing`` below.
+
+        ``assume_sole_owner`` (default ``False``): controls how locks on disk
+        are treated at open time. With ``False`` (the safe default), any
+        future-dated ``orderNo`` is respected as a potential live peer's lock —
+        crashed peers' locks expire naturally on the wall clock. With
+        ``True``, the caller asserts nothing else is using this queue and any
+        in-progress locks are reclaimed immediately, so a request whose
+        previous run died is instantly re-fetchable. Set to ``True`` only if
+        you know you're the sole consumer; otherwise you risk two peers
+        processing the same request.
+        """
     def advance_clock_for_testing(self, millis: builtins.int) -> None:
         r"""
         Advance the client's clock by ``millis`` milliseconds. Only usable when

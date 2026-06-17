@@ -677,8 +677,21 @@ struct FileSystemRequestQueueClient {
 #[gen_stub_pymethods]
 #[pymethods]
 impl FileSystemRequestQueueClient {
+    /// Open a request queue.
+    ///
+    /// ``use_test_clock``: see ``advance_clock_for_testing`` below.
+    ///
+    /// ``assume_sole_owner`` (default ``False``): controls how locks on disk
+    /// are treated at open time. With ``False`` (the safe default), any
+    /// future-dated ``orderNo`` is respected as a potential live peer's lock —
+    /// crashed peers' locks expire naturally on the wall clock. With
+    /// ``True``, the caller asserts nothing else is using this queue and any
+    /// in-progress locks are reclaimed immediately, so a request whose
+    /// previous run died is instantly re-fetchable. Set to ``True`` only if
+    /// you know you're the sole consumer; otherwise you risk two peers
+    /// processing the same request.
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, assume_sole_owner=false))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -687,6 +700,7 @@ impl FileSystemRequestQueueClient {
         alias: Option<String>,
         storage_dir: &str,
         use_test_clock: bool,
+        assume_sole_owner: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
         let (clock, test_clock) = pick_clock(use_test_clock);
@@ -698,6 +712,7 @@ impl FileSystemRequestQueueClient {
                     alias,
                     &storage_dir,
                     clock,
+                    assume_sole_owner,
                 )
                 .await
                 .map_err(storage_err)?;
