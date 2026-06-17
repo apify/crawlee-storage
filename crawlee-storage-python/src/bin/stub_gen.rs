@@ -4,7 +4,13 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// Method names that should remain synchronous (not marked async).
-const SYNC_METHODS: &[&str] = &["iterate_items", "iterate_keys"];
+const SYNC_METHODS: &[&str] = &[
+    "iterate_items",
+    "iterate_keys",
+    // advance_clock_for_testing is a plain sync PyO3 method — it doesn't
+    // go through `future_into_py`, so its stub must not be `async`.
+    "advance_clock_for_testing",
+];
 
 /// Dunder methods that ARE async (all other dunders stay sync).
 const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];

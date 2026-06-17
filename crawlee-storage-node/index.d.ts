@@ -102,7 +102,12 @@ export declare class DatasetItemIterator {
 }
 
 export declare class FileSystemDatasetClient {
-  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null): Promise<FileSystemDatasetClient>
+  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null): Promise<FileSystemDatasetClient>
+  /**
+   * Advance the client's clock by `millis` milliseconds. Only usable when
+   * the client was opened with `useTestClock: true`; throws otherwise.
+   */
+  advanceClockForTesting(millis: number): void
   get pathToDataset(): string
   get pathToMetadata(): string
   getMetadata(): Promise<DatasetMetadata>
@@ -114,7 +119,12 @@ export declare class FileSystemDatasetClient {
 }
 
 export declare class FileSystemKeyValueStoreClient {
-  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null): Promise<FileSystemKeyValueStoreClient>
+  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null): Promise<FileSystemKeyValueStoreClient>
+  /**
+   * Advance the client's clock by `millis` milliseconds. Only usable when
+   * the client was opened with `useTestClock: true`; throws otherwise.
+   */
+  advanceClockForTesting(millis: number): void
   get pathToKvs(): string
   get pathToMetadata(): string
   getMetadata(): Promise<KeyValueStoreMetadata>
@@ -131,7 +141,16 @@ export declare class FileSystemKeyValueStoreClient {
 }
 
 export declare class FileSystemRequestQueueClient {
-  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null): Promise<FileSystemRequestQueueClient>
+  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null): Promise<FileSystemRequestQueueClient>
+  /**
+   * Advance the client's clock by `millis` milliseconds. Only usable when
+   * the client was opened with `useTestClock: true`; throws otherwise.
+   *
+   * This is the hook that lets JS tests using `vi.useFakeTimers()` exercise
+   * lock-expiry behavior — fake JS timers don't reach into native code, so
+   * the test must drive the Rust-side clock explicitly via this method.
+   */
+  advanceClockForTesting(millis: number): void
   get pathToRq(): string
   get pathToMetadata(): string
   getMetadata(): Promise<RequestQueueMetadata>

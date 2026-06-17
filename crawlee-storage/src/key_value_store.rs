@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::clock::{system_clock, ClockRef};
 use crate::models::{
     KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata, KvsKeysPage, KvsValue,
 };
@@ -32,6 +32,7 @@ const DEFAULT_NAME: &str = "default";
 pub struct FileSystemKeyValueStoreClient {
     metadata: Mutex<KeyValueStoreMetadata>,
     path: PathBuf,
+    clock: ClockRef,
 }
 
 impl FileSystemKeyValueStoreClient {
@@ -43,11 +44,25 @@ impl FileSystemKeyValueStoreClient {
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
+    ///
+    /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
+    /// custom clock (e.g. for tests), use [`open_with_clock`](Self::open_with_clock).
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
+    ) -> Result<Self> {
+        Self::open_with_clock(id, name, alias, storage_dir, system_clock()).await
+    }
+
+    /// Open an existing KVS or create a new one, using the supplied clock.
+    pub async fn open_with_clock(
+        id: Option<String>,
+        name: Option<String>,
+        alias: Option<String>,
+        storage_dir: &Path,
+        clock: ClockRef,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
 
@@ -70,7 +85,11 @@ impl FileSystemKeyValueStoreClient {
         } else {
             // Only `name` goes into metadata, not alias
             let new_id = id.unwrap_or_else(|| crypto_random_object_id(17));
-            let meta = KeyValueStoreMetadata::new(new_id, name);
+            let mut meta = KeyValueStoreMetadata::new(new_id, name);
+            let now = clock.now();
+            meta.base.created_at = now;
+            meta.base.modified_at = now;
+            meta.base.accessed_at = now;
             fs::create_dir_all(&path).await?;
             let json = json_dumps_value(&meta)?;
             atomic_write(&metadata_path, json.as_bytes()).await?;
@@ -80,7 +99,13 @@ impl FileSystemKeyValueStoreClient {
         Ok(Self {
             metadata: Mutex::new(metadata),
             path,
+            clock,
         })
+    }
+
+    /// Return a reference to this client's clock.
+    pub fn clock(&self) -> &ClockRef {
+        &self.clock
     }
 
     /// Get the store metadata.
@@ -129,7 +154,7 @@ impl FileSystemKeyValueStoreClient {
             Err(e) => return Err(e.into()),
         }
 
-        let now = Utc::now();
+        let now = self.clock.now();
         meta.base.accessed_at = now;
         meta.base.modified_at = now;
 
@@ -148,7 +173,7 @@ impl FileSystemKeyValueStoreClient {
         // Always update accessed_at on read, even for missing keys
         {
             let mut meta = self.metadata.lock().await;
-            meta.base.accessed_at = Utc::now();
+            meta.base.accessed_at = self.clock.now();
             let json = json_dumps_value(&*meta)?;
             atomic_write(&self.metadata_path(), json.as_bytes()).await?;
         }
@@ -221,7 +246,7 @@ impl FileSystemKeyValueStoreClient {
         // Update store metadata
         {
             let mut meta = self.metadata.lock().await;
-            let now = Utc::now();
+            let now = self.clock.now();
             meta.base.accessed_at = now;
             meta.base.modified_at = now;
             let json = json_dumps_value(&*meta)?;
@@ -247,7 +272,7 @@ impl FileSystemKeyValueStoreClient {
         // Update store metadata
         {
             let mut meta = self.metadata.lock().await;
-            let now = Utc::now();
+            let now = self.clock.now();
             meta.base.accessed_at = now;
             meta.base.modified_at = now;
             let json = json_dumps_value(&*meta)?;
@@ -376,7 +401,7 @@ impl FileSystemKeyValueStoreClient {
         // Always update accessed_at on read, even for missing keys
         {
             let mut meta = self.metadata.lock().await;
-            meta.base.accessed_at = Utc::now();
+            meta.base.accessed_at = self.clock.now();
             let json = json_dumps_value(&*meta)?;
             atomic_write(&self.metadata_path(), json.as_bytes()).await?;
         }
@@ -412,7 +437,7 @@ impl FileSystemKeyValueStoreClient {
 
         {
             let mut meta = self.metadata.lock().await;
-            let now = Utc::now();
+            let now = self.clock.now();
             meta.base.accessed_at = now;
             meta.base.modified_at = now;
             let json = json_dumps_value(&*meta)?;
@@ -462,7 +487,7 @@ impl FileSystemKeyValueStoreClient {
         // Update store metadata
         {
             let mut meta = self.metadata.lock().await;
-            let now = Utc::now();
+            let now = self.clock.now();
             meta.base.accessed_at = now;
             meta.base.modified_at = now;
             let json = json_dumps_value(&*meta)?;

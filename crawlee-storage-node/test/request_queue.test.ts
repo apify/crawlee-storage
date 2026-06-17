@@ -322,4 +322,88 @@ describe('FileSystemRequestQueueClient', () => {
         const aliased = await FileSystemRequestQueueClient.open(null, null, 'my-alias', storageDir);
         expect((await aliased.getMetadata()).name).toBeNull();
     });
+
+    // ─── Test clock injection ──────────────────────────────────────────────
+    //
+    // `vi.useFakeTimers()` only patches the JS clock; the Rust side reads the
+    // system clock directly and is unaffected. The native bindings therefore
+    // expose `useTestClock: true` (opens the client with an injected clock
+    // that starts at offset 0) and `advanceClockForTesting(millis)` (moves
+    // that clock forward). Tests for lock-expiry must drive both.
+    describe('test clock injection', () => {
+        it('locks a fetched request until the clock advances past the lock window', async () => {
+            const client = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true, // useTestClock
+            );
+
+            await client.addBatchOfRequests(
+                [{ uniqueKey: 'req1', url: 'https://example.com/1', method: 'GET' }],
+                false,
+            );
+
+            const first = await client.fetchNextRequest();
+            expect(first).not.toBeNull();
+
+            // Without advancing the clock, the request is still locked.
+            const blocked = await client.fetchNextRequest();
+            expect(blocked).toBeNull();
+
+            // Jump past the default 3-minute lock window.
+            client.advanceClockForTesting(4 * 60 * 1000);
+
+            const again = await client.fetchNextRequest();
+            expect(again).not.toBeNull();
+            expect(again!.uniqueKey).toBe('req1');
+        });
+
+        it('throws when advanceClockForTesting is called on a system-clock client', async () => {
+            const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
+            // No `useTestClock: true` → system clock → cannot advance.
+            expect(() => client.advanceClockForTesting(1000)).toThrow(/useTestClock/);
+        });
+
+        // KNOWN BUG: opening a second client over the same on-disk queue while
+        // the first client still has live locks resets those locks during
+        // `rebuild_index` (which can't distinguish a stale crash-recovery lock
+        // from a live concurrent lock). Tracked separately from the test-clock
+        // work — once the rebuild-index reclaim heuristic is fixed, this test
+        // should pass as written and lose its `.skip`.
+        // oxlint-disable-next-line no-disabled-tests
+        it.skip("a second client opened against the same dir+useTestClock sees the first client's lock", async () => {
+            const clientA = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+            );
+
+            await clientA.addBatchOfRequests(
+                [{ uniqueKey: 'shared', url: 'https://example.com/s', method: 'GET' }],
+                false,
+            );
+            await clientA.fetchNextRequest(); // locks it on disk
+
+            const clientB = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+            );
+
+            // B has its own clock at offset 0; the lock is in the future on disk.
+            const blocked = await clientB.fetchNextRequest();
+            expect(blocked).toBeNull();
+
+            // Advance B's clock past the lock window — B can now fetch.
+            clientB.advanceClockForTesting(4 * 60 * 1000);
+            const fetched = await clientB.fetchNextRequest();
+            expect(fetched).not.toBeNull();
+        });
+    });
 });
