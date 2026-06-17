@@ -14,12 +14,19 @@
         "lib.js",
         "lib.d.ts"
     ],
+    "type": "module",
     "main": "lib.js",
     "types": "lib.d.ts",
+    "exports": {
+        ".": {
+            "types": "./lib.d.ts",
+            "import": "./lib.js"
+        }
+    },
     "scripts": {
         "artifacts": "napi artifacts --output-dir ../artifacts --npm-dir npm",
-        "build": "napi build --platform --release --no-const-enum",
-        "build:debug": "napi build --platform --no-const-enum",
+        "build": "napi build --platform --release --esm --no-const-enum",
+        "build:debug": "napi build --platform --esm --no-const-enum",
         "prepublishOnly": "napi prepublish -t npm --no-gh-release",
         "copy-version": "napi version",
         "test": "vitest run",
