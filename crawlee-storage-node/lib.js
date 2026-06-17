@@ -1,12 +1,12 @@
-const { createReadStream, createWriteStream } = require('fs');
-const { unlink } = require('fs/promises');
-const { Readable, Writable } = require('stream');
+import { createReadStream, createWriteStream } from 'fs';
+import { unlink } from 'fs/promises';
+import { Readable, Writable } from 'stream';
 
-const native = require('./index.js');
+import { DatasetItemIterator, FileSystemKeyValueStoreClient, KvsKeyIterator } from './index.js';
 
 // Add Symbol.asyncIterator to DatasetItemIterator so users can write:
 //   for await (const item of client.iterateItems()) { ... }
-native.DatasetItemIterator.prototype[Symbol.asyncIterator] = function () {
+DatasetItemIterator.prototype[Symbol.asyncIterator] = function () {
     return {
         next: async () => {
             const value = await this.next();
@@ -19,7 +19,7 @@ native.DatasetItemIterator.prototype[Symbol.asyncIterator] = function () {
 };
 
 // Same for KvsKeyIterator.
-native.KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
+KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
     return {
         next: async () => {
             const value = await this.next();
@@ -32,8 +32,8 @@ native.KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
 };
 
 // Wrap getValue to convert the byte-array value to a real Buffer.
-const origGetValue = native.FileSystemKeyValueStoreClient.prototype.getValue;
-native.FileSystemKeyValueStoreClient.prototype.getValue = async function (...args) {
+const origGetValue = FileSystemKeyValueStoreClient.prototype.getValue;
+FileSystemKeyValueStoreClient.prototype.getValue = async function (...args) {
     const record = await origGetValue.apply(this, args);
     if (record) {
         record.value = Buffer.from(record.value);
@@ -43,7 +43,7 @@ native.FileSystemKeyValueStoreClient.prototype.getValue = async function (...arg
 
 // getValueStream: returns { key, contentType, size, stream } or null.
 // The stream is a Web ReadableStream<Uint8Array> created from the file on disk.
-native.FileSystemKeyValueStoreClient.prototype.getValueStream = async function (key) {
+FileSystemKeyValueStoreClient.prototype.getValueStream = async function (key) {
     const info = await this._getValueFileInfo(key);
     if (info === null) {
         return null;
@@ -62,11 +62,7 @@ native.FileSystemKeyValueStoreClient.prototype.getValueStream = async function (
 
 // setValueStream: pipes a ReadableStream directly to a temp file on disk,
 // then atomically renames it into place. No buffering in memory.
-native.FileSystemKeyValueStoreClient.prototype.setValueStream = async function (
-    key,
-    stream,
-    contentType,
-) {
+FileSystemKeyValueStoreClient.prototype.setValueStream = async function (key, stream, contentType) {
     const tempPath = this._getTempFilePath();
     const ws = createWriteStream(tempPath);
     const writable = Writable.toWeb(ws);
@@ -90,4 +86,4 @@ native.FileSystemKeyValueStoreClient.prototype.setValueStream = async function (
     return this._finalizeStreamedValue(key, tempPath, size, ct);
 };
 
-module.exports = native;
+export * from './index.js';
