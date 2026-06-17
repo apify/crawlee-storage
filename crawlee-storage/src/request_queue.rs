@@ -292,20 +292,47 @@ impl FileSystemRequestQueueClient {
                 continue;
             }
 
+            // Does the *incoming* request carry a non-null `handledAt`? If so it
+            // is being added as already-handled (matches JS `_calculateOrderNo`,
+            // which returns `null` whenever `request.handledAt` is set, causing
+            // the JS `batchAddRequests` to bump `handledRequestCount` rather
+            // than `pendingRequestCount`). A forefront move of an existing
+            // pending request that *also* carries `handledAt` would be
+            // contradictory — treat the `handledAt` intent as authoritative and
+            // skip the forefront promotion, matching JS (which never promotes
+            // a handled request into the forefront list).
+            let add_as_handled = request
+                .get("handledAt")
+                .or_else(|| request.get("handled_at"))
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
             // Compute the orderNo exactly like JS `_calculateOrderNo`: a plain
-            // signed unix-millis timestamp (negative = forefront). Collisions
-            // within the same millisecond are intentional and harmless —
+            // signed unix-millis timestamp (negative = forefront), or `null`
+            // when the request is being added as already-handled.
+            // Same-millisecond collisions are intentional and harmless —
             // ordering is resolved by `forefront_request_ids` + `insertion_seq`.
-            let order_no = self.calculate_order_no(forefront);
+            let order_no = if add_as_handled {
+                None
+            } else {
+                Some(self.calculate_order_no(forefront))
+            };
             let insertion_seq = inner.insertion_counter;
             inner.insertion_counter += 1;
 
             // Build the persisted request: inject id + orderNo, preserving the
-            // opaque user payload.
+            // opaque user payload. `orderNo: null` marks the request as handled
+            // on disk (matches the `mark_request_as_handled` write shape and
+            // the `rebuild_index` reader, which treats null/missing orderNo as
+            // handled).
             let mut to_write = request.clone();
             if let Value::Object(ref mut map) = to_write {
                 map.insert("id".to_string(), Value::String(request_id.clone()));
-                map.insert("orderNo".to_string(), Value::Number(order_no.into()));
+                let order_no_value = match order_no {
+                    Some(n) => Value::Number(n.into()),
+                    None => Value::Null,
+                };
+                map.insert("orderNo".to_string(), order_no_value);
             }
 
             let file_path = self.get_request_path(&unique_key);
@@ -315,13 +342,15 @@ impl FileSystemRequestQueueClient {
             inner.requests.insert(
                 unique_key.clone(),
                 RequestEntry {
-                    order_no: Some(order_no),
+                    order_no,
                     insertion_seq,
                 },
             );
 
             // Mirror JS: track forefront ids in an ordered list (LIFO on fetch).
-            if forefront {
+            // A handled add never participates in fetch ordering, so it must
+            // not enter the forefront list even if `forefront=true` was passed.
+            if forefront && !add_as_handled {
                 inner
                     .metadata
                     .forefront_request_ids
@@ -332,7 +361,11 @@ impl FileSystemRequestQueueClient {
                 // Brand new request — bump counts. A forefront move of an
                 // already-present request leaves counts unchanged.
                 inner.metadata.total_request_count += 1;
-                inner.metadata.pending_request_count += 1;
+                if add_as_handled {
+                    inner.metadata.handled_request_count += 1;
+                } else {
+                    inner.metadata.pending_request_count += 1;
+                }
             }
 
             seen_in_batch.insert(unique_key.clone(), ());
@@ -341,6 +374,10 @@ impl FileSystemRequestQueueClient {
                 request_id,
                 unique_key,
                 was_already_present: already_present,
+                // Mirror JS: even when adding a fresh request that already
+                // carries `handledAt`, the response reports
+                // `was_already_handled: false`. (The JS comment: "that's how
+                // API behaves.")
                 was_already_handled: false,
             });
         }
@@ -1732,5 +1769,161 @@ mod tests {
         let stored = client.get_request("req1").await.unwrap().unwrap();
         assert!(stored.get("id").and_then(|v| v.as_str()).is_some());
         assert!(stored.get("orderNo").and_then(|v| v.as_i64()).is_some());
+    }
+
+    /// Adding a request that already carries a `handledAt` must store it as
+    /// handled (not pending) — bumping `handledRequestCount`, leaving
+    /// `pendingRequestCount` alone, and persisting `orderNo: null` so the
+    /// reader (`rebuild_index`) classifies it consistently. Mirrors the JS
+    /// `_calculateOrderNo` behavior (returns `null` when `handledAt` is set).
+    #[tokio::test]
+    async fn test_add_with_handled_at_counts_as_handled() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let mut handled_req = req("done");
+        if let Value::Object(ref mut map) = handled_req {
+            map.insert(
+                "handledAt".to_string(),
+                Value::String("2024-01-15T10:30:00.123456+00:00".to_string()),
+            );
+        }
+
+        let response = client
+            .add_batch_of_requests(vec![handled_req], false)
+            .await
+            .unwrap();
+
+        // JS contract: the response itself reports was_already_handled=false
+        // even for a fresh handled add. ("That's how API behaves.")
+        assert!(!response.processed_requests[0].was_already_handled);
+        assert!(!response.processed_requests[0].was_already_present);
+
+        let meta = client.get_metadata().await;
+        assert_eq!(
+            meta.handled_request_count, 1,
+            "adding with handledAt must bump handledRequestCount"
+        );
+        assert_eq!(
+            meta.pending_request_count, 0,
+            "adding with handledAt must NOT bump pendingRequestCount"
+        );
+        assert_eq!(meta.total_request_count, 1);
+
+        // The request must not be fetchable — it is already handled.
+        assert!(client.fetch_next_request().await.unwrap().is_none());
+        assert!(client.is_empty().await);
+        assert!(
+            client.is_finished().await,
+            "queue with a single handled-on-add request must be finished"
+        );
+
+        // The persisted file must carry orderNo: null so re-readers agree.
+        let stored = client.get_request("done").await.unwrap().unwrap();
+        assert!(
+            stored.get("orderNo").map(|v| v.is_null()).unwrap_or(false),
+            "handled-on-add request must persist with orderNo: null"
+        );
+    }
+
+    /// Re-opening a queue containing a handled-on-add request must reconstruct
+    /// the same counts (handled=1, pending=0). Guards against drift between
+    /// the write path (`add_batch_of_requests`) and the read path
+    /// (`rebuild_index`), which both interpret `handledAt`.
+    #[tokio::test]
+    async fn test_add_with_handled_at_survives_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+
+        {
+            let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+                .await
+                .unwrap();
+
+            let mut handled_req = req("done");
+            if let Value::Object(ref mut map) = handled_req {
+                map.insert(
+                    "handledAt".to_string(),
+                    Value::String("2024-01-15T10:30:00.123456+00:00".to_string()),
+                );
+            }
+            client
+                .add_batch_of_requests(vec![handled_req, req("pending")], false)
+                .await
+                .unwrap();
+
+            let meta = client.get_metadata().await;
+            assert_eq!(meta.handled_request_count, 1);
+            assert_eq!(meta.pending_request_count, 1);
+        }
+
+        let client2 = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+        let meta = client2.get_metadata().await;
+        assert_eq!(
+            meta.handled_request_count, 1,
+            "reopened queue must classify the handled-on-add request as handled"
+        );
+        assert_eq!(meta.pending_request_count, 1);
+        assert_eq!(meta.total_request_count, 2);
+
+        // Only the pending one is fetchable.
+        let fetched = client2.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(fetched["uniqueKey"], "pending");
+    }
+
+    /// `forefront=true` combined with an incoming `handledAt` is contradictory.
+    /// The `handledAt` intent must win: the request is stored as handled and
+    /// must NOT enter the forefront ordering list (which only governs fetch
+    /// order, and a handled request is never fetched).
+    #[tokio::test]
+    async fn test_add_with_handled_at_ignores_forefront_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let mut handled_req = req("done");
+        if let Value::Object(ref mut map) = handled_req {
+            map.insert(
+                "handledAt".to_string(),
+                Value::String("2024-01-15T10:30:00.123456+00:00".to_string()),
+            );
+        }
+        client
+            .add_batch_of_requests(vec![handled_req], true)
+            .await
+            .unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.handled_request_count, 1);
+        assert_eq!(meta.pending_request_count, 0);
+        assert!(
+            meta.forefront_request_ids.is_empty(),
+            "a handled-on-add request must not be tracked in forefront ordering"
+        );
+    }
+
+    /// `handledAt: null` must NOT be interpreted as handled — only a
+    /// non-null value flips the bit. (Some serializers emit explicit nulls
+    /// for missing fields; we must not regress on that.)
+    #[tokio::test]
+    async fn test_add_with_null_handled_at_is_still_pending() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let mut r = req("nullish");
+        if let Value::Object(ref mut map) = r {
+            map.insert("handledAt".to_string(), Value::Null);
+        }
+        client.add_batch_of_requests(vec![r], false).await.unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.handled_request_count, 0);
+        assert_eq!(meta.pending_request_count, 1);
     }
 }
