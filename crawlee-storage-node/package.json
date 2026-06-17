@@ -1,14 +1,27 @@
 {
-    "name": "@crawlee/storage",
+    "name": "@crawlee/fs-storage-native",
     "version": "0.1.0",
-    "description": "Filesystem storage client for Crawlee crawlers (Rust-powered)",
+    "description": "Low-level Rust-powered napi-rs bindings for Crawlee's filesystem storage. Not intended for direct use in crawlers — depend on @crawlee/fs-storage instead.",
+    "homepage": "https://github.com/apify/crawlee-storage",
     "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/apify/crawlee-storage.git"
+    },
+    "files": [
+        "index.js",
+        "index.d.ts",
+        "lib.js",
+        "lib.d.ts"
+    ],
     "main": "lib.js",
     "types": "lib.d.ts",
     "scripts": {
-        "artifacts": "napi artifacts",
+        "artifacts": "napi artifacts --output-dir ../artifacts --npm-dir npm",
         "build": "napi build --platform --release --no-const-enum",
         "build:debug": "napi build --platform --no-const-enum",
+        "prepublishOnly": "napi prepublish -t npm --no-gh-release",
+        "copy-version": "napi version",
         "test": "vitest run",
         "lint": "oxlint",
         "lint:fix": "oxlint --fix",
@@ -20,12 +33,18 @@
         "@types/node": "^22",
         "oxfmt": "^0.44.0",
         "oxlint": "^1.59.0",
-        "oxlint-tsgolint": "^0.20.0",
+        "oxlint-tsgolint": "^0.23.0",
         "typescript": "^5",
         "vitest": "^3"
     },
+    "optionalDependencies": {
+        "@crawlee/fs-storage-native-darwin-arm64": "0.1.0",
+        "@crawlee/fs-storage-native-darwin-x64": "0.1.0",
+        "@crawlee/fs-storage-native-linux-x64-gnu": "0.1.0",
+        "@crawlee/fs-storage-native-win32-x64-msvc": "0.1.0"
+    },
     "napi": {
-        "binaryName": "crawlee-storage",
+        "binaryName": "fs-storage-native",
         "dtsHeaderFile": "dts-header.d.ts",
         "targets": [
             "x86_64-unknown-linux-gnu",
@@ -33,5 +52,8 @@
             "aarch64-apple-darwin",
             "x86_64-pc-windows-msvc"
         ]
+    },
+    "engines": {
+        "node": ">= 20"
     }
 }

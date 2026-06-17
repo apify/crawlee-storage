@@ -1,0 +1,16 @@
+target
+Cargo.lock
+Cargo.toml
+.cargo
+.github
+npm
+build.rs
+rustfmt.toml
+*.node
+*.rs
+src
+test
+tsconfig.json
+.oxlintrc.json
+.oxfmtrc.json
+package-lock.json
