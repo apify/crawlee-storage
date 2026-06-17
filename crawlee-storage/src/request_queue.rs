@@ -99,16 +99,17 @@ impl FileSystemRequestQueueClient {
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
     ///
-    /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
-    /// custom clock (e.g. for tests of lock expiry without real sleeps), use
-    /// [`open_with_clock`](Self::open_with_clock).
+    /// Uses the default [`SystemClock`](crate::clock::SystemClock) and the
+    /// conservative cross-process default `assume_sole_owner = false` (so any
+    /// future-dated `orderNo` on disk is treated as a live peer's lock). To
+    /// customize either, use [`open_with_clock`](Self::open_with_clock).
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
     ) -> Result<Self> {
-        Self::open_with_clock(id, name, alias, storage_dir, system_clock()).await
+        Self::open_with_clock(id, name, alias, storage_dir, system_clock(), false).await
     }
 
     /// Open an existing request queue or create a new one, using the supplied clock.
@@ -117,12 +118,26 @@ impl FileSystemRequestQueueClient {
     /// layer (JS, Python) advance the time the queue sees without real waits,
     /// which is the only way to exercise lock-expiry behavior under fake
     /// timers — `vi.useFakeTimers()` etc. don't reach into native code.
+    ///
+    /// `assume_sole_owner` controls how `rebuild_index` treats future-dated
+    /// `orderNo`s on disk at open time:
+    ///
+    /// - `false` (safe default): respect them as a live peer's locks. Crashed
+    ///   peers' locks expire naturally on the wall clock (default 3 min, see
+    ///   [`set_expected_request_processing_time`](Self::set_expected_request_processing_time)).
+    ///   This is the cross-process-safe mode.
+    /// - `true` (single-process opt-in): reclaim every future-dated `orderNo`
+    ///   by resetting it to `±now`, so a previously in-progress request is
+    ///   immediately re-fetchable. Use only when you know nothing else is
+    ///   using this on-disk queue — otherwise you'll clobber a live peer's
+    ///   reservation and let two consumers process the same request.
     pub async fn open_with_clock(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
         clock: ClockRef,
+        assume_sole_owner: bool,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
 
@@ -167,7 +182,7 @@ impl FileSystemRequestQueueClient {
         };
 
         // Reconstruct the in-memory index from the request files on disk.
-        client.rebuild_index().await?;
+        client.rebuild_index(assume_sole_owner).await?;
 
         Ok(client)
     }
@@ -789,18 +804,28 @@ impl FileSystemRequestQueueClient {
     /// Rebuild the in-memory index from the request files on disk, and
     /// recompute the metadata counts from the authoritative file contents.
     ///
-    /// Crash recovery: a request that was *locked* (a future `|orderNo|`) when
-    /// the previous run died is no longer being processed. Since `open()` is the
-    /// moment a fresh process takes ownership of the queue, we reclaim every
-    /// such stale lock here — reset the `orderNo` back to `±now` (preserving the
-    /// forefront/regular sign) and persist it, so the in-progress request is
-    /// immediately re-fetchable. The `forefront_request_ids` ordering list is
-    /// restored from metadata (it deserializes with the metadata) and pruned
-    /// here to drop handled/missing entries.
+    /// `assume_sole_owner` controls how future-dated `orderNo`s are handled:
+    ///
+    /// - `false` (default): trust the on-disk value. A future-dated `|orderNo|`
+    ///   is either a still-running peer's live lock (must be respected) or a
+    ///   crashed peer's lock (which will expire naturally on the wall clock).
+    ///   The worst-case stall after a crash is therefore one lock window
+    ///   (default 3 minutes, tunable via `set_expected_request_processing_time`).
+    ///   This is the safe cross-process default.
+    /// - `true`: reclaim every future-dated `|orderNo|` by rewriting it to
+    ///   `±now` (preserving the forefront/regular sign) and persisting it,
+    ///   so a previously in-progress request is immediately re-fetchable.
+    ///   The caller is asserting nothing else is using this queue — if a peer
+    ///   *is* live, this will clobber its reservation and let two consumers
+    ///   hand out the same request.
+    ///
+    /// The `forefront_request_ids` ordering list is restored from metadata (it
+    /// deserializes with the metadata) and pruned here to drop handled/missing
+    /// entries.
     ///
     /// `insertion_seq` is assigned in (sorted) file-read order so reopened
     /// regular requests keep a stable, deterministic FIFO order.
-    async fn rebuild_index(&self) -> Result<()> {
+    async fn rebuild_index(&self, assume_sole_owner: bool) -> Result<()> {
         let mut request_files = Self::get_request_files(&self.path).await?;
         // Stable file order so insertion_seq assignment is deterministic.
         request_files.sort();
@@ -854,9 +879,11 @@ impl FileSystemRequestQueueClient {
             } else {
                 let disk_order = Self::read_order_no(&request).unwrap_or(now);
 
-                if Self::is_locked_order(disk_order, now) {
-                    // Stale lock from a previous (now-dead) run — reset to ±now
-                    // so it is fetchable immediately, preserving the sign.
+                if assume_sole_owner && Self::is_locked_order(disk_order, now) {
+                    // Sole-owner mode: a future-dated orderNo is assumed to be
+                    // a stale lock from a previous (now-dead) run, so we reset
+                    // it to ±now (preserving the forefront/regular sign) and
+                    // persist that, making the request immediately fetchable.
                     let sign = if disk_order > 0 { 1 } else { -1 };
                     let reclaimed = now * sign;
                     if let Value::Object(ref mut map) = request {
@@ -872,6 +899,10 @@ impl FileSystemRequestQueueClient {
                     }
                     Some(reclaimed)
                 } else {
+                    // Default (cross-process-safe) mode: trust the on-disk
+                    // value. If it's in the future, it's either a live peer's
+                    // lock (must respect) or a crashed peer's lock (will
+                    // naturally expire on the wall clock).
                     Some(disk_order)
                 }
             };
@@ -1152,6 +1183,7 @@ mod tests {
             None,
             temp_dir.path(),
             clock.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -1203,6 +1235,7 @@ mod tests {
             None,
             temp_dir.path(),
             clock.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -1225,6 +1258,7 @@ mod tests {
             None,
             temp_dir.path(),
             clock.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -1234,6 +1268,74 @@ mod tests {
             fetched.is_some(),
             "second client sharing the test clock should see the lock as expired"
         );
+    }
+
+    /// Cross-process correctness: when one client locks a request and a second
+    /// client opens against the same on-disk queue *while the lock is still
+    /// live*, the second client must NOT reclaim the lock. Otherwise two
+    /// peers could hand out the same request.
+    ///
+    /// Previously, `rebuild_index` reset every future-dated `orderNo` on the
+    /// theory that it was a stale crash artifact. That heuristic is wrong
+    /// under concurrency: a future-dated `orderNo` is exactly what a live
+    /// peer's lock looks like. Now we trust the on-disk value; the lock
+    /// window itself handles the crashed-peer case via expiry.
+    #[tokio::test]
+    async fn test_open_does_not_clobber_live_peer_lock() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        // Two independent clocks: A and B don't share a notion of "now". This
+        // matches reality across two processes — their wall clocks are merely
+        // *roughly* synchronized, not literally identical.
+        let clock_a = Arc::new(TestClock::new());
+        let clock_b = Arc::new(TestClock::new());
+
+        let client_a = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock_a.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        client_a
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+        let locked = client_a.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(locked["uniqueKey"], "req1");
+
+        // B opens *now*, while A still holds the lock. B must respect it.
+        let client_b = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock_b.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let blocked = client_b.fetch_next_request().await.unwrap();
+        assert!(
+            blocked.is_none(),
+            "client B must NOT fetch a request that client A has locked — \
+             open() must not clobber a live peer's lock"
+        );
+
+        // And A can still complete its work as if B had never opened.
+        let processed = client_a
+            .mark_request_as_handled(locked)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(processed.was_already_handled);
     }
 
     #[tokio::test]
@@ -1473,13 +1575,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_progress_requests_recovered_after_crash() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
+        let clock = Arc::new(TestClock::new());
 
-        let client =
-            FileSystemRequestQueueClient::open(None, None, Some("crash".to_string()), storage_dir)
-                .await
-                .unwrap();
+        let client = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            Some("crash".to_string()),
+            storage_dir,
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
         client
             .add_batch_of_requests(vec![req("a"), req("b"), req("c")], false)
             .await
@@ -1491,11 +1603,19 @@ mod tests {
         client.persist_state().await;
         drop(client);
 
-        // Reopen: all three requests must be recoverable (none lost).
-        let client2 =
-            FileSystemRequestQueueClient::open(None, None, Some("crash".to_string()), storage_dir)
-                .await
-                .unwrap();
+        // Reopen on the *same* test clock. The locked request's lock is still
+        // in effect by the queue's reckoning (the lock window hasn't passed),
+        // so the request is recovered as pending-but-locked.
+        let client2 = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            Some("crash".to_string()),
+            storage_dir,
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
 
         let meta = client2.get_metadata().await;
         assert_eq!(
@@ -1504,17 +1624,19 @@ mod tests {
         );
         assert!(!client2.is_finished().await);
 
-        // Drain everything — must get all three distinct keys back.
-        {
-            let mut inner = client2.inner.lock().await;
-            inner.lock_millis = 0;
-        }
+        // Crash recovery story: walk the clock past the lock window so the
+        // crashed peer's lock expires. After that, all three requests are
+        // fetchable in turn.
+        clock.advance(4 * 60 * 1000);
+
         let mut seen = std::collections::HashSet::new();
         for _ in 0..3 {
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             let r = client2.fetch_next_request().await.unwrap().unwrap();
             seen.insert(r["uniqueKey"].as_str().unwrap().to_string());
             client2.mark_request_as_handled(r).await.unwrap();
+            // Push the clock forward between fetches so each fresh lock also
+            // expires before the next iteration.
+            clock.advance(4 * 60 * 1000);
         }
         assert_eq!(
             seen.len(),
@@ -1522,6 +1644,76 @@ mod tests {
             "all 3 distinct requests must be recovered, got {seen:?}"
         );
         assert!(client2.is_finished().await);
+    }
+
+    /// Sole-owner mode: when the caller asserts nothing else is using the
+    /// queue, `open()` actively reclaims future-dated `orderNo`s on disk
+    /// instead of waiting for them to expire. This restores the historical
+    /// "instant crash recovery" behavior for single-process consumers.
+    #[tokio::test]
+    async fn test_assume_sole_owner_reclaims_locks_on_open() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+        let clock = Arc::new(TestClock::new());
+
+        // First client locks the request, then "crashes".
+        let client = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            Some("sole".to_string()),
+            storage_dir,
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+        client
+            .add_batch_of_requests(vec![req("a")], false)
+            .await
+            .unwrap();
+        let _ = client.fetch_next_request().await.unwrap().unwrap(); // locks
+        drop(client);
+
+        // Sanity check: opening with the default (safe) mode at the SAME
+        // wall-clock time leaves the lock in place — request not fetchable.
+        let safe_reopen = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            Some("sole".to_string()),
+            storage_dir,
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            safe_reopen.fetch_next_request().await.unwrap().is_none(),
+            "default safe mode must respect the persisted lock"
+        );
+        drop(safe_reopen);
+
+        // Now reopen with assume_sole_owner=true on the same clock. The lock
+        // is reclaimed during rebuild_index, so the request is immediately
+        // fetchable — no clock advancement needed.
+        let sole_owner_reopen = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            Some("sole".to_string()),
+            storage_dir,
+            clock.clone(),
+            true,
+        )
+        .await
+        .unwrap();
+        let fetched = sole_owner_reopen.fetch_next_request().await.unwrap();
+        assert!(
+            fetched.is_some(),
+            "assume_sole_owner=true must reclaim the stale lock on open"
+        );
+        assert_eq!(fetched.unwrap()["uniqueKey"], "a");
     }
 
     #[tokio::test]

@@ -141,7 +141,21 @@ export declare class FileSystemKeyValueStoreClient {
 }
 
 export declare class FileSystemRequestQueueClient {
-  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null): Promise<FileSystemRequestQueueClient>
+  /**
+   * Open a request queue.
+   *
+   * `useTestClock`: see `advanceClockForTesting` below.
+   *
+   * `assumeSoleOwner` (default `false`): controls how locks on disk are
+   * treated at open time. With `false` (the safe default), any future-dated
+   * `orderNo` is respected as a potential live peer's lock — crashed peers'
+   * locks expire naturally on the wall clock. With `true`, the caller
+   * asserts nothing else is using this queue and any in-progress locks are
+   * reclaimed immediately, so a request whose previous run died is
+   * instantly re-fetchable. Set to `true` only if you know you're the sole
+   * consumer; otherwise you risk two peers processing the same request.
+   */
+  static open(id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null, assumeSoleOwner?: boolean | undefined | null): Promise<FileSystemRequestQueueClient>
   /**
    * Advance the client's clock by `millis` milliseconds. Only usable when
    * the client was opened with `useTestClock: true`; throws otherwise.
