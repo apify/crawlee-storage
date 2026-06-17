@@ -14,6 +14,7 @@ on:
         default: auto
         options:
           - auto
+          - prerelease
           - patch
           - minor
           - major
@@ -42,6 +43,8 @@ jobs:
       tag_name: ${{ steps.metadata.outputs.tag_name }}
       release_notes: ${{ steps.metadata.outputs.release_notes }}
       changelog: ${{ steps.metadata.outputs.changelog }}
+      is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
+      npm_dist_tag: ${{ steps.metadata.outputs.is_prerelease == 'true' && 'next' || 'latest' }}
     steps:
       - uses: apify/actions/git-cliff-release@v1.2.0
         id: metadata
@@ -79,6 +82,7 @@ jobs:
           npm run copy-version
 
       - name: Write changelog
+        if: needs.release_metadata.outputs.is_prerelease != 'true'
         uses: DamianReeves/write-file-action@master
         with:
           path: CHANGELOG.md
@@ -89,7 +93,7 @@ jobs:
         id: commit
         uses: apify/actions/signed-commit@v1.2.0
         with:
-          message: "chore(release): Set package version to ${{ needs.release_metadata.outputs.version_number }} and update changelog [skip ci]"
+          message: "chore(release): Set package version to ${{ needs.release_metadata.outputs.version_number }}${{ needs.release_metadata.outputs.is_prerelease == 'true' && '' || ' and update changelog' }} [skip ci]"
           pull: "--rebase --autostash"
           github-token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
@@ -107,10 +111,11 @@ jobs:
           name: ${{ needs.release_metadata.outputs.version_number }}
           target_commitish: ${{ needs.update_changelog.outputs.release_commit_sha }}
           body: ${{ needs.release_metadata.outputs.release_notes }}
+          prerelease: ${{ needs.release_metadata.outputs.is_prerelease == 'true' }}
 
   publish:
     name: Publish to npm
-    needs: [update_changelog]
+    needs: [release_metadata, update_changelog]
     runs-on: ubuntu-latest
     steps:
       # Publishing happens in the single npm-OIDC-trusted workflow, dispatched
@@ -122,6 +127,6 @@ jobs:
           inputs: >
             {
               "ref": "${{ needs.update_changelog.outputs.release_commit_sha }}",
-              "tag": "latest"
+              "tag": "${{ needs.release_metadata.outputs.npm_dist_tag }}"
             }
           token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
