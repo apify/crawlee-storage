@@ -105,7 +105,14 @@ class FileSystemDatasetClient:
         name: typing.Optional[builtins.str] = None,
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
+        use_test_clock: builtins.bool = False,
     ) -> FileSystemDatasetClient: ...
+    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+        r"""
+        Advance the client's clock by ``millis`` milliseconds. Only usable when
+        the client was opened with ``use_test_clock=True``; raises ``ValueError``
+        otherwise.
+        """
     async def get_metadata(self) -> DatasetMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
@@ -144,7 +151,14 @@ class FileSystemKeyValueStoreClient:
         name: typing.Optional[builtins.str] = None,
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
+        use_test_clock: builtins.bool = False,
     ) -> FileSystemKeyValueStoreClient: ...
+    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+        r"""
+        Advance the client's clock by ``millis`` milliseconds. Only usable when
+        the client was opened with ``use_test_clock=True``; raises ``ValueError``
+        otherwise.
+        """
     async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
@@ -180,7 +194,19 @@ class FileSystemRequestQueueClient:
         name: typing.Optional[builtins.str] = None,
         alias: typing.Optional[builtins.str] = None,
         storage_dir: builtins.str = "./storage",
+        use_test_clock: builtins.bool = False,
     ) -> FileSystemRequestQueueClient: ...
+    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+        r"""
+        Advance the client's clock by ``millis`` milliseconds. Only usable when
+        the client was opened with ``use_test_clock=True``; raises ``ValueError``
+        otherwise.
+
+        This is the hook that lets Python tests using ``freezegun`` or
+        similar frameworks exercise lock-expiry behavior — frozen Python
+        clocks don't reach into native code, so the test must drive the
+        Rust-side clock explicitly via this method.
+        """
     async def get_metadata(self) -> RequestQueueMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...

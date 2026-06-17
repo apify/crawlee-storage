@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crawlee_storage::clock::{ClockRef, TestClock};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
@@ -8,6 +9,36 @@ use tokio::sync::Mutex;
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     napi::Error::from_reason(e.to_string())
+}
+
+/// Pick a clock for a client given the `useTestClock` flag passed across the
+/// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
+/// concrete `TestClock` we keep on the wrapper so JS can drive it later (or
+/// `None` when running with a system clock).
+fn pick_clock(use_test_clock: Option<bool>) -> (ClockRef, Option<Arc<TestClock>>) {
+    if use_test_clock.unwrap_or(false) {
+        let tc = Arc::new(TestClock::new());
+        (tc.clone() as ClockRef, Some(tc))
+    } else {
+        (crawlee_storage::clock::system_clock(), None)
+    }
+}
+
+/// Shared `advanceClockForTesting` implementation. Throws a descriptive error
+/// if the client was opened without `useTestClock: true` — calling it on a
+/// system-clock-backed client is almost certainly a bug.
+fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, millis: i64) -> napi::Result<()> {
+    match test_clock {
+        Some(tc) => {
+            tc.advance(millis);
+            Ok(())
+        }
+        None => Err(napi::Error::from_reason(
+            "advanceClockForTesting() requires the client to have been opened \
+             with { useTestClock: true }. The default SystemClock cannot be advanced."
+                .to_string(),
+        )),
+    }
 }
 
 /// Serialize any serde-compatible struct to a `serde_json::Value`.
@@ -23,6 +54,7 @@ fn to_js<T: serde::Serialize>(src: &T) -> napi::Result<Value> {
 #[napi]
 pub struct FileSystemDatasetClient {
     inner: Arc<crawlee_storage::dataset::FileSystemDatasetClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[napi]
@@ -33,15 +65,30 @@ impl FileSystemDatasetClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: Option<String>,
+        use_test_clock: Option<bool>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
-        let client =
-            crawlee_storage::dataset::FileSystemDatasetClient::open(id, name, alias, &storage_dir)
-                .await
-                .map_err(storage_err)?;
+        let (clock, test_clock) = pick_clock(use_test_clock);
+        let client = crawlee_storage::dataset::FileSystemDatasetClient::open_with_clock(
+            id,
+            name,
+            alias,
+            &storage_dir,
+            clock,
+        )
+        .await
+        .map_err(storage_err)?;
         Ok(Self {
             inner: Arc::new(client),
+            test_clock,
         })
+    }
+
+    /// Advance the client's clock by `millis` milliseconds. Only usable when
+    /// the client was opened with `useTestClock: true`; throws otherwise.
+    #[napi]
+    pub fn advance_clock_for_testing(&self, millis: i64) -> napi::Result<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     #[napi(getter)]
@@ -199,6 +246,7 @@ impl DatasetItemIterator {
 #[napi]
 pub struct FileSystemKeyValueStoreClient {
     inner: Arc<crawlee_storage::key_value_store::FileSystemKeyValueStoreClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[napi]
@@ -209,19 +257,31 @@ impl FileSystemKeyValueStoreClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: Option<String>,
+        use_test_clock: Option<bool>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
-        let client = crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open(
-            id,
-            name,
-            alias,
-            &storage_dir,
-        )
-        .await
-        .map_err(storage_err)?;
+        let (clock, test_clock) = pick_clock(use_test_clock);
+        let client =
+            crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open_with_clock(
+                id,
+                name,
+                alias,
+                &storage_dir,
+                clock,
+            )
+            .await
+            .map_err(storage_err)?;
         Ok(Self {
             inner: Arc::new(client),
+            test_clock,
         })
+    }
+
+    /// Advance the client's clock by `millis` milliseconds. Only usable when
+    /// the client was opened with `useTestClock: true`; throws otherwise.
+    #[napi]
+    pub fn advance_clock_for_testing(&self, millis: i64) -> napi::Result<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     #[napi(getter)]
@@ -465,6 +525,7 @@ impl KvsKeyIterator {
 #[napi]
 pub struct FileSystemRequestQueueClient {
     inner: Arc<crawlee_storage::request_queue::FileSystemRequestQueueClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[napi]
@@ -475,19 +536,34 @@ impl FileSystemRequestQueueClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: Option<String>,
+        use_test_clock: Option<bool>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
-        let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
+        let (clock, test_clock) = pick_clock(use_test_clock);
+        let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open_with_clock(
             id,
             name,
             alias,
             &storage_dir,
+            clock,
         )
         .await
         .map_err(storage_err)?;
         Ok(Self {
             inner: Arc::new(client),
+            test_clock,
         })
+    }
+
+    /// Advance the client's clock by `millis` milliseconds. Only usable when
+    /// the client was opened with `useTestClock: true`; throws otherwise.
+    ///
+    /// This is the hook that lets JS tests using `vi.useFakeTimers()` exercise
+    /// lock-expiry behavior — fake JS timers don't reach into native code, so
+    /// the test must drive the Rust-side clock explicitly via this method.
+    #[napi]
+    pub fn advance_clock_for_testing(&self, millis: i64) -> napi::Result<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     #[napi(getter)]

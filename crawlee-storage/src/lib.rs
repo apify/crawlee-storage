@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod dataset;
 pub mod key_value_store;
 pub mod models;

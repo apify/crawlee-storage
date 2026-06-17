@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crawlee_storage::clock::{ClockRef, TestClock};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
 };
@@ -10,6 +11,34 @@ use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+/// Pick a clock for a client given the `use_test_clock` flag passed across the
+/// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
+/// concrete `TestClock` we keep on the wrapper so Python can drive it later
+/// (or `None` when running with a system clock).
+fn pick_clock(use_test_clock: bool) -> (ClockRef, Option<Arc<TestClock>>) {
+    if use_test_clock {
+        let tc = Arc::new(TestClock::new());
+        (tc.clone() as ClockRef, Some(tc))
+    } else {
+        (crawlee_storage::clock::system_clock(), None)
+    }
+}
+
+/// Shared `advance_clock_for_testing` implementation. Raises `ValueError` if
+/// the client was opened without `use_test_clock=True`.
+fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, millis: i64) -> PyResult<()> {
+    match test_clock {
+        Some(tc) => {
+            tc.advance(millis);
+            Ok(())
+        }
+        None => Err(PyValueError::new_err(
+            "advance_clock_for_testing() requires the client to have been opened \
+             with use_test_clock=True. The default SystemClock cannot be advanced.",
+        )),
+    }
+}
 
 fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
@@ -309,13 +338,14 @@ impl KvsKeyIterator {
 #[pyclass]
 struct FileSystemDatasetClient {
     inner: Arc<crawlee_storage::dataset::FileSystemDatasetClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl FileSystemDatasetClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false))]
     #[gen_stub(override_return_type(type_repr = "FileSystemDatasetClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -323,21 +353,33 @@ impl FileSystemDatasetClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &str,
+        use_test_clock: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
+        let (clock, test_clock) = pick_clock(use_test_clock);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = crawlee_storage::dataset::FileSystemDatasetClient::open(
+            let client = crawlee_storage::dataset::FileSystemDatasetClient::open_with_clock(
                 id,
                 name,
                 alias,
                 &storage_dir,
+                clock,
             )
             .await
             .map_err(storage_err)?;
             Ok(FileSystemDatasetClient {
                 inner: Arc::new(client),
+                test_clock,
             })
         })
+    }
+
+    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
+    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
+    /// otherwise.
+    #[gen_stub(override_return_type(type_repr = "None"))]
+    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     /// Path to the dataset directory.
@@ -444,13 +486,14 @@ impl FileSystemDatasetClient {
 #[pyclass]
 struct FileSystemKeyValueStoreClient {
     inner: Arc<crawlee_storage::key_value_store::FileSystemKeyValueStoreClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl FileSystemKeyValueStoreClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false))]
     #[gen_stub(override_return_type(type_repr = "FileSystemKeyValueStoreClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -458,21 +501,34 @@ impl FileSystemKeyValueStoreClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &str,
+        use_test_clock: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
+        let (clock, test_clock) = pick_clock(use_test_clock);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open(
-                id,
-                name,
-                alias,
-                &storage_dir,
-            )
-            .await
-            .map_err(storage_err)?;
+            let client =
+                crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open_with_clock(
+                    id,
+                    name,
+                    alias,
+                    &storage_dir,
+                    clock,
+                )
+                .await
+                .map_err(storage_err)?;
             Ok(FileSystemKeyValueStoreClient {
                 inner: Arc::new(client),
+                test_clock,
             })
         })
+    }
+
+    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
+    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
+    /// otherwise.
+    #[gen_stub(override_return_type(type_repr = "None"))]
+    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     /// Path to the key-value store directory.
@@ -615,13 +671,14 @@ impl FileSystemKeyValueStoreClient {
 #[pyclass]
 struct FileSystemRequestQueueClient {
     inner: Arc<crawlee_storage::request_queue::FileSystemRequestQueueClient>,
+    test_clock: Option<Arc<TestClock>>,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl FileSystemRequestQueueClient {
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage"))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -629,21 +686,39 @@ impl FileSystemRequestQueueClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &str,
+        use_test_clock: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
+        let (clock, test_clock) = pick_clock(use_test_clock);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open(
-                id,
-                name,
-                alias,
-                &storage_dir,
-            )
-            .await
-            .map_err(storage_err)?;
+            let client =
+                crawlee_storage::request_queue::FileSystemRequestQueueClient::open_with_clock(
+                    id,
+                    name,
+                    alias,
+                    &storage_dir,
+                    clock,
+                )
+                .await
+                .map_err(storage_err)?;
             Ok(FileSystemRequestQueueClient {
                 inner: Arc::new(client),
+                test_clock,
             })
         })
+    }
+
+    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
+    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
+    /// otherwise.
+    ///
+    /// This is the hook that lets Python tests using ``freezegun`` or
+    /// similar frameworks exercise lock-expiry behavior — frozen Python
+    /// clocks don't reach into native code, so the test must drive the
+    /// Rust-side clock explicitly via this method.
+    #[gen_stub(override_return_type(type_repr = "None"))]
+    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, millis)
     }
 
     /// Path to the request queue directory.

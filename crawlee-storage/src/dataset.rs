@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::clock::{system_clock, ClockRef};
 use crate::models::{DatasetItemsListPage, DatasetItemsPage, DatasetMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
@@ -31,6 +31,7 @@ const ITEM_FILENAME_DIGITS: usize = 9;
 pub struct FileSystemDatasetClient {
     metadata: Mutex<DatasetMetadata>,
     path: PathBuf,
+    clock: ClockRef,
 }
 
 impl FileSystemDatasetClient {
@@ -42,11 +43,29 @@ impl FileSystemDatasetClient {
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
+    ///
+    /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
+    /// custom clock (e.g. for tests), use [`open_with_clock`](Self::open_with_clock).
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
+    ) -> Result<Self> {
+        Self::open_with_clock(id, name, alias, storage_dir, system_clock()).await
+    }
+
+    /// Open an existing dataset or create a new one, using the supplied clock.
+    ///
+    /// Pass a [`TestClock`](crate::clock::TestClock) here when you need to
+    /// control the time the client sees (e.g. testing lock expiry without
+    /// real wall-clock waits).
+    pub async fn open_with_clock(
+        id: Option<String>,
+        name: Option<String>,
+        alias: Option<String>,
+        storage_dir: &Path,
+        clock: ClockRef,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
 
@@ -72,7 +91,13 @@ impl FileSystemDatasetClient {
         } else {
             // Create new dataset — only `name` goes into metadata, not alias
             let new_id = id.unwrap_or_else(|| crypto_random_object_id(17));
-            let meta = DatasetMetadata::new(new_id, name);
+            let mut meta = DatasetMetadata::new(new_id, name);
+            // Stamp metadata with the injected clock's "now" so test clocks
+            // produce deterministic timestamps from the very first write.
+            let now = clock.now();
+            meta.base.created_at = now;
+            meta.base.modified_at = now;
+            meta.base.accessed_at = now;
             fs::create_dir_all(&path).await?;
             let json = json_dumps_value(&meta)?;
             atomic_write(&metadata_path, json.as_bytes()).await?;
@@ -82,7 +107,15 @@ impl FileSystemDatasetClient {
         Ok(Self {
             metadata: Mutex::new(metadata),
             path,
+            clock,
         })
+    }
+
+    /// Return a reference to this client's clock. The bindings use this to
+    /// expose `advanceClockForTesting` only when a [`TestClock`](crate::clock::TestClock)
+    /// was injected.
+    pub fn clock(&self) -> &ClockRef {
+        &self.clock
     }
 
     /// Get the dataset metadata.
@@ -118,7 +151,7 @@ impl FileSystemDatasetClient {
         }
 
         meta.item_count = 0;
-        let now = Utc::now();
+        let now = self.clock.now();
         meta.base.accessed_at = now;
         meta.base.modified_at = now;
 
@@ -143,7 +176,7 @@ impl FileSystemDatasetClient {
             meta.item_count = item_id;
         }
 
-        let now = Utc::now();
+        let now = self.clock.now();
         meta.base.accessed_at = now;
         meta.base.modified_at = now;
 
@@ -203,7 +236,7 @@ impl FileSystemDatasetClient {
         // Update accessed_at
         {
             let mut meta = self.metadata.lock().await;
-            meta.base.accessed_at = Utc::now();
+            meta.base.accessed_at = self.clock.now();
             let json = json_dumps_value(&*meta)?;
             atomic_write(&self.metadata_path(), json.as_bytes()).await?;
         }

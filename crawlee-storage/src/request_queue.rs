@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use crate::clock::{system_clock, ClockRef};
 use crate::models::{AddRequestsResponse, ProcessedRequest, RequestQueueMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
@@ -86,6 +86,7 @@ struct InnerState {
 pub struct FileSystemRequestQueueClient {
     inner: Mutex<InnerState>,
     path: PathBuf,
+    clock: ClockRef,
 }
 
 impl FileSystemRequestQueueClient {
@@ -97,11 +98,31 @@ impl FileSystemRequestQueueClient {
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
+    ///
+    /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
+    /// custom clock (e.g. for tests of lock expiry without real sleeps), use
+    /// [`open_with_clock`](Self::open_with_clock).
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
+    ) -> Result<Self> {
+        Self::open_with_clock(id, name, alias, storage_dir, system_clock()).await
+    }
+
+    /// Open an existing request queue or create a new one, using the supplied clock.
+    ///
+    /// Passing a [`TestClock`](crate::clock::TestClock) here lets the binding
+    /// layer (JS, Python) advance the time the queue sees without real waits,
+    /// which is the only way to exercise lock-expiry behavior under fake
+    /// timers — `vi.useFakeTimers()` etc. don't reach into native code.
+    pub async fn open_with_clock(
+        id: Option<String>,
+        name: Option<String>,
+        alias: Option<String>,
+        storage_dir: &Path,
+        clock: ClockRef,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
 
@@ -123,7 +144,11 @@ impl FileSystemRequestQueueClient {
             serde_json::from_str::<RequestQueueMetadata>(&content)?
         } else {
             let new_id = id.unwrap_or_else(|| crypto_random_object_id(17));
-            let meta = RequestQueueMetadata::new(new_id, name);
+            let mut meta = RequestQueueMetadata::new(new_id, name);
+            let now = clock.now();
+            meta.base.created_at = now;
+            meta.base.modified_at = now;
+            meta.base.accessed_at = now;
             fs::create_dir_all(&path).await?;
             let json = json_dumps_value(&meta)?;
             atomic_write(&metadata_path, json.as_bytes()).await?;
@@ -138,12 +163,18 @@ impl FileSystemRequestQueueClient {
                 lock_millis: DEFAULT_LOCK_MILLIS,
             }),
             path,
+            clock,
         };
 
         // Reconstruct the in-memory index from the request files on disk.
         client.rebuild_index().await?;
 
         Ok(client)
+    }
+
+    /// Return a reference to this client's clock.
+    pub fn clock(&self) -> &ClockRef {
+        &self.clock
     }
 
     /// Get the queue metadata.
@@ -188,7 +219,7 @@ impl FileSystemRequestQueueClient {
         inner.metadata.handled_request_count = 0;
         inner.metadata.pending_request_count = 0;
         inner.metadata.total_request_count = 0;
-        let now = Utc::now();
+        let now = self.clock.now();
         inner.metadata.base.accessed_at = now;
         inner.metadata.base.modified_at = now;
 
@@ -250,7 +281,7 @@ impl FileSystemRequestQueueClient {
             // signed unix-millis timestamp (negative = forefront). Collisions
             // within the same millisecond are intentional and harmless —
             // ordering is resolved by `forefront_request_ids` + `insertion_seq`.
-            let order_no = Self::calculate_order_no(forefront);
+            let order_no = self.calculate_order_no(forefront);
             let insertion_seq = inner.insertion_counter;
             inner.insertion_counter += 1;
 
@@ -299,7 +330,7 @@ impl FileSystemRequestQueueClient {
             });
         }
 
-        let now = Utc::now();
+        let now = self.clock.now();
         inner.metadata.base.accessed_at = now;
         inner.metadata.base.modified_at = now;
         let meta_json = json_dumps_value(&inner.metadata)?;
@@ -323,7 +354,7 @@ impl FileSystemRequestQueueClient {
 
         {
             let mut inner = self.inner.lock().await;
-            inner.metadata.base.accessed_at = Utc::now();
+            inner.metadata.base.accessed_at = self.clock.now();
             let json = json_dumps_value(&inner.metadata)?;
             atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
         }
@@ -345,10 +376,10 @@ impl FileSystemRequestQueueClient {
     pub async fn fetch_next_request(&self) -> Result<Option<Value>> {
         let mut inner = self.inner.lock().await;
 
-        let now = Utc::now().timestamp_millis();
+        let now = self.clock.now().timestamp_millis();
         let lock_millis = inner.lock_millis;
 
-        let candidates = Self::ordered_candidate_keys(&inner);
+        let candidates = self.ordered_candidate_keys(&inner);
 
         for unique_key in candidates {
             let file_path = self.get_request_path(&unique_key);
@@ -402,7 +433,7 @@ impl FileSystemRequestQueueClient {
                         entry.order_no = Some(locked);
                     }
 
-                    inner.metadata.base.accessed_at = Utc::now();
+                    inner.metadata.base.accessed_at = self.clock.now();
                     let meta_json = json_dumps_value(&inner.metadata)?;
                     atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
 
@@ -417,8 +448,8 @@ impl FileSystemRequestQueueClient {
     /// Compute the candidate fetch order: forefront ids first (reverse/LIFO),
     /// then unhandled, unlocked regular requests ordered by `(order_no,
     /// insertion_seq)`. Deduplicated. Mirrors JS `requestKeyIterator`.
-    fn ordered_candidate_keys(inner: &InnerState) -> Vec<String> {
-        let now = Utc::now().timestamp_millis();
+    fn ordered_candidate_keys(&self, inner: &InnerState) -> Vec<String> {
+        let now = self.clock.now().timestamp_millis();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
 
@@ -492,7 +523,7 @@ impl FileSystemRequestQueueClient {
         }
 
         // Set handledAt + clear orderNo (null => handled).
-        let now = Utc::now();
+        let now = self.clock.now();
         let handled_at_str = now.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
         if let Value::Object(ref mut map) = request {
             map.insert("handledAt".to_string(), Value::String(handled_at_str));
@@ -573,7 +604,7 @@ impl FileSystemRequestQueueClient {
         // Reset orderNo to "now" (unlocked, fetchable immediately), preserving
         // the forefront/regular sign — matching JS `deleteRequestLock`
         // (`forefront ? -start : start`).
-        let order_no = Self::calculate_order_no(forefront);
+        let order_no = self.calculate_order_no(forefront);
 
         if let Value::Object(ref mut map) = request {
             map.insert("orderNo".to_string(), Value::Number(order_no.into()));
@@ -608,7 +639,7 @@ impl FileSystemRequestQueueClient {
                 .push(unique_key.clone());
         }
 
-        let now_dt = Utc::now();
+        let now_dt = self.clock.now();
         inner.metadata.base.accessed_at = now_dt;
         inner.metadata.base.modified_at = now_dt;
         let meta_json = json_dumps_value(&inner.metadata)?;
@@ -630,7 +661,7 @@ impl FileSystemRequestQueueClient {
     /// This matches the crawlee-js v4 `isEmpty` contract.
     pub async fn is_empty(&self) -> bool {
         let mut inner = self.inner.lock().await;
-        let now = Utc::now().timestamp_millis();
+        let now = self.clock.now().timestamp_millis();
 
         let has_fetchable = inner.requests.values().any(|e| match e.order_no {
             Some(n) => !Self::is_locked_order(n, now),
@@ -639,7 +670,7 @@ impl FileSystemRequestQueueClient {
 
         // Best-effort accessed_at bump (is_empty returns bool, not Result — so
         // any write error is ignored).
-        inner.metadata.base.accessed_at = Utc::now();
+        inner.metadata.base.accessed_at = self.clock.now();
         if let Ok(json) = json_dumps_value(&inner.metadata) {
             let _ = atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await;
         }
@@ -721,8 +752,8 @@ impl FileSystemRequestQueueClient {
     /// regulars), mirroring how JS uses its `forefrontRequestIds` list plus the
     /// insertion order of its request `Map`. Crucially, the magnitude is always
     /// exactly `now`, so it can never be misread as a future-dated lock.
-    fn calculate_order_no(forefront: bool) -> i64 {
-        let now = Utc::now().timestamp_millis();
+    fn calculate_order_no(&self, forefront: bool) -> i64 {
+        let now = self.clock.now().timestamp_millis();
         if forefront {
             -now
         } else {
@@ -778,7 +809,7 @@ impl FileSystemRequestQueueClient {
         inner.requests.clear();
         let prior_forefront = std::mem::take(&mut inner.metadata.forefront_request_ids);
 
-        let now = Utc::now().timestamp_millis();
+        let now = self.clock.now().timestamp_millis();
         let mut handled = 0usize;
         let mut pending = 0usize;
         let mut seq = 0u64;
@@ -1100,6 +1131,108 @@ mod tests {
         assert!(
             again.is_some(),
             "an expired lock must allow the request to be fetched again"
+        );
+    }
+
+    /// Same behavior as `test_lock_expiry_allows_refetch`, but proves the
+    /// [`TestClock`](crate::clock::TestClock) injection actually moves the time
+    /// the queue observes. This is what the binding layer relies on so that
+    /// JS/Python tests can verify lock-expiry without real sleeps (since
+    /// `vi.useFakeTimers()` etc. don't cross the FFI).
+    #[tokio::test]
+    async fn test_lock_expiry_with_injected_test_clock() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let clock = Arc::new(TestClock::new());
+        let client = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Keep the lock at the default 3 minutes — we'll travel past it on the
+        // test clock instead of shrinking it. The point is to prove the clock
+        // hook works, not to retest the zero-lock path.
+        client
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+
+        let first = client.fetch_next_request().await.unwrap();
+        assert!(first.is_some(), "first fetch should succeed");
+
+        // Without advancing, the lock is still in the future — request must
+        // not be fetchable.
+        let blocked = client.fetch_next_request().await.unwrap();
+        assert!(
+            blocked.is_none(),
+            "request should still be locked while clock hasn't advanced"
+        );
+
+        // Jump past the default 3-minute lock window.
+        clock.advance(4 * 60 * 1000);
+
+        let again = client.fetch_next_request().await.unwrap();
+        assert!(
+            again.is_some(),
+            "after advancing the test clock past the lock window, the request must be re-fetchable"
+        );
+    }
+
+    /// A [`TestClock`](crate::clock::TestClock) can be shared by multiple
+    /// clients in the same process — both observe the same advancement. This
+    /// is how a JS test for two clients sharing one on-disk queue can advance
+    /// time uniformly.
+    #[tokio::test]
+    async fn test_test_clock_is_shared_across_clients() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let clock = Arc::new(TestClock::new());
+
+        let client_a = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        client_a
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+        let _locked = client_a.fetch_next_request().await.unwrap().unwrap();
+
+        // Advance time on the shared clock.
+        clock.advance(4 * 60 * 1000);
+
+        // A *second* client opened against the same dir+clock must also see
+        // the request as unlocked. We open it after the advancement so it
+        // inherits the same view of time.
+        let client_b = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let fetched = client_b.fetch_next_request().await.unwrap();
+        assert!(
+            fetched.is_some(),
+            "second client sharing the test clock should see the lock as expired"
         );
     }
 
