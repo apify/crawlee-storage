@@ -1,6 +1,6 @@
 {
   "name": "@crawlee/fs-storage-native-linux-x64-gnu",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "cpu": [
     "x64"
   ],
