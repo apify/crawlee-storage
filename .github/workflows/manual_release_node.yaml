@@ -99,6 +99,10 @@ jobs:
 
   github_release:
     name: GitHub release
+    # No GitHub release for prereleases — the committed version (e.g. 0.1.6)
+    # doesn't match the actual npm-published version (e.g. 0.1.6-beta.0), and
+    # creating a v0.1.6 tag here would block the next stable release.
+    if: needs.release_metadata.outputs.is_prerelease != 'true'
     needs: [release_metadata, update_changelog]
     runs-on: ubuntu-latest
     env:
@@ -111,7 +115,6 @@ jobs:
           name: ${{ needs.release_metadata.outputs.version_number }}
           target_commitish: ${{ needs.update_changelog.outputs.release_commit_sha }}
           body: ${{ needs.release_metadata.outputs.release_notes }}
-          prerelease: ${{ needs.release_metadata.outputs.is_prerelease == 'true' }}
 
   publish:
     name: Publish to npm
