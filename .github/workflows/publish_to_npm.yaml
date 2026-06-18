@@ -129,5 +129,16 @@ jobs:
         run: ls -R ./npm
         shell: bash
 
+      # Tack on a `-beta.N` suffix for prerelease publishes. The upstream
+      # git-cliff-release action emits bare versions (e.g. 0.1.5) for
+      # `release_type: prerelease`, so we patch the version here right before
+      # publishing. The committed package.json keeps the bare version.
+      # See .github/scripts/before-beta-release.js for the gory details.
+      - name: Bump prerelease version
+        if: ${{ inputs.tag == 'next' }}
+        run: |
+          node ../.github/scripts/before-beta-release.js
+          npm run copy-version
+
       - name: Publish to npm
         run: npm publish --access public --provenance --tag ${{ inputs.tag }}
