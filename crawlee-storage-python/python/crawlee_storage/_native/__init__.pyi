@@ -120,7 +120,7 @@ class FileSystemDatasetClient:
     async def get_data(
         self,
         offset: builtins.int = 0,
-        limit: builtins.int = 999999999999,
+        limit: typing.Optional[builtins.int] = None,
         desc: builtins.bool = False,
         skip_empty: builtins.bool = False,
     ) -> DatasetItemsListPage: ...
