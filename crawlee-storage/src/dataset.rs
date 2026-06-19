@@ -508,6 +508,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_data_desc_with_offset() {
+        // `desc:true` + non-zero `offset` case: the offset must be applied *after* the list is reversed, not before.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemDatasetClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        for i in 0..10 {
+            client
+                .push_data(serde_json::json!({"index": i}))
+                .await
+                .unwrap();
+        }
+
+        // Reversed order is [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]; offset=2 limit=5
+        // should yield the slice [2..7] of that, i.e. [7, 6, 5, 4, 3].
+        let page = client.get_data(2, 5, true, false).await.unwrap();
+        assert_eq!(page.count, 5);
+        assert_eq!(page.total, 10);
+        assert_eq!(page.offset, 2);
+        assert_eq!(page.desc, true);
+        let got: Vec<i64> = page
+            .items
+            .iter()
+            .map(|item| item["index"].as_i64().unwrap())
+            .collect();
+        assert_eq!(got, vec![7, 6, 5, 4, 3]);
+    }
+
+    #[tokio::test]
     async fn test_purge() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();

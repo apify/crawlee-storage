@@ -1020,6 +1020,54 @@ mod tests {
         assert!(client.fetch_next_request().await.unwrap().is_none());
     }
 
+    /// Stray non-JSON files (and malformed JSON) dropped into the queue directory must be
+    /// ignored when the index is rebuilt on open, not error and not be counted as requests.
+    #[tokio::test]
+    async fn test_ignore_non_json_files_on_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Create a queue with a single valid request and persist it to disk.
+        let client =
+            FileSystemRequestQueueClient::open(None, Some("q".to_string()), None, storage_dir)
+                .await
+                .unwrap();
+        client
+            .add_batch_of_requests(vec![req("only-valid")], false)
+            .await
+            .unwrap();
+        drop(client);
+
+        // Drop stray files directly into the queue directory, out-of-band.
+        let queue_dir = storage_dir.join("request_queues").join("q");
+        fs::write(queue_dir.join(".DS_Store"), b"not json at all")
+            .await
+            .unwrap();
+        fs::write(queue_dir.join("invalid.txt"), b"also not json")
+            .await
+            .unwrap();
+        // A malformed *.json file: right extension, garbage contents. This one
+        // is enumerated by get_request_files but must be warn-and-skipped by
+        // rebuild_index rather than aborting the open.
+        fs::write(queue_dir.join("broken.json"), b"{ this is not valid json")
+            .await
+            .unwrap();
+
+        // Reopening must succeed and see exactly the one valid request.
+        let reopened =
+            FileSystemRequestQueueClient::open(None, Some("q".to_string()), None, storage_dir)
+                .await
+                .unwrap();
+
+        assert_eq!(reopened.get_metadata().await.total_request_count, 1);
+
+        let fetched = reopened.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(fetched["uniqueKey"], "only-valid");
+
+        // Only the one valid request existed; nothing else is fetchable.
+        assert!(reopened.fetch_next_request().await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn test_deduplication() {
         let temp_dir = TempDir::new().unwrap();
