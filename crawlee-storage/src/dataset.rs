@@ -9,12 +9,18 @@ use crate::clock::{system_clock, ClockRef};
 use crate::models::{DatasetItemsListPage, DatasetItemsPage, DatasetMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
-    validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
+    validate_exclusive_args, validate_subdirectory, Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "datasets";
 const DEFAULT_NAME: &str = "default";
 const ITEM_FILENAME_DIGITS: usize = 9;
+
+/// The canonical "no limit / all items" sentinel reported in a
+/// [`DatasetItemsListPage`]'s `limit` field when the caller requested no limit.
+/// Matches the value crawlee (JS/Python) uses for an unbounded `getData`. The
+/// binding layers pass `None` for unbounded and never hardcode this themselves.
+pub const ALL_ITEMS_LIMIT: usize = 999_999_999_999;
 
 /// Filesystem-backed dataset client.
 ///
@@ -78,8 +84,13 @@ impl FileSystemDatasetClient {
                 })?
         } else {
             // alias determines directory name just like name does
-            let dir_name = name.as_deref().or(alias.as_deref()).unwrap_or(DEFAULT_NAME);
-            storage_dir.join(STORAGE_SUBDIR).join(dir_name)
+            let base = storage_dir.join(STORAGE_SUBDIR);
+            match name.as_deref().or(alias.as_deref()) {
+                // A user-supplied name/alias must map to a single direct child.
+                Some(dir_name) => validate_subdirectory(&base, dir_name)?,
+                // The default name is a trusted constant, no validation needed.
+                None => base.join(DEFAULT_NAME),
+            }
         };
 
         let metadata_path = path.join(METADATA_FILENAME);
@@ -187,10 +198,15 @@ impl FileSystemDatasetClient {
     }
 
     /// Get a paginated list of dataset items.
+    /// Read a page of dataset items.
+    ///
+    /// `limit` is `None` for "all remaining items" (from `offset` onward); the
+    /// binding layers pass their optional limit straight through rather than
+    /// inventing a sentinel.
     pub async fn get_data(
         &self,
         offset: usize,
-        limit: usize,
+        limit: Option<usize>,
         desc: bool,
         skip_empty: bool,
     ) -> Result<DatasetItemsListPage> {
@@ -229,8 +245,10 @@ impl FileSystemDatasetClient {
             items.reverse();
         }
 
+        // `None` means "all items from offset onward".
+        let effective_limit = limit.unwrap_or(ALL_ITEMS_LIMIT);
         let start = offset.min(total);
-        let end = (offset + limit).min(total);
+        let end = offset.saturating_add(effective_limit).min(total);
         let page_items: Vec<Value> = items[start..end].to_vec();
 
         // Update accessed_at
@@ -244,7 +262,7 @@ impl FileSystemDatasetClient {
         Ok(DatasetItemsListPage {
             count: page_items.len(),
             offset,
-            limit,
+            limit: effective_limit,
             total,
             desc,
             items: page_items,
@@ -274,7 +292,9 @@ impl FileSystemDatasetClient {
             None => page_size,
         };
 
-        let page = self.get_data(offset, fetch_limit, desc, skip_empty).await?;
+        let page = self
+            .get_data(offset, Some(fetch_limit), desc, skip_empty)
+            .await?;
 
         let returned = page.items.len();
         let has_more =
@@ -490,21 +510,27 @@ mod tests {
         }
 
         // Get first 2 items
-        let page = client.get_data(0, 2, false, false).await.unwrap();
+        let page = client.get_data(0, Some(2), false, false).await.unwrap();
         assert_eq!(page.count, 2);
         assert_eq!(page.total, 5);
         assert_eq!(page.items[0]["index"], 1);
         assert_eq!(page.items[1]["index"], 2);
 
         // Get items 3-4 (offset=2, limit=2)
-        let page = client.get_data(2, 2, false, false).await.unwrap();
+        let page = client.get_data(2, Some(2), false, false).await.unwrap();
         assert_eq!(page.count, 2);
         assert_eq!(page.items[0]["index"], 3);
 
         // Descending order
-        let page = client.get_data(0, 5, true, false).await.unwrap();
+        let page = client.get_data(0, Some(5), true, false).await.unwrap();
         assert_eq!(page.items[0]["index"], 5);
         assert_eq!(page.items[4]["index"], 1);
+
+        // No limit (None) returns everything from the offset, and reports the
+        // ALL_ITEMS_LIMIT sentinel back in the page.
+        let page = client.get_data(0, None, false, false).await.unwrap();
+        assert_eq!(page.count, 5);
+        assert_eq!(page.limit, ALL_ITEMS_LIMIT);
     }
 
     #[tokio::test]
@@ -526,7 +552,7 @@ mod tests {
 
         // Reversed order is [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]; offset=2 limit=5
         // should yield the slice [2..7] of that, i.e. [7, 6, 5, 4, 3].
-        let page = client.get_data(2, 5, true, false).await.unwrap();
+        let page = client.get_data(2, Some(5), true, false).await.unwrap();
         assert_eq!(page.count, 5);
         assert_eq!(page.total, 10);
         assert_eq!(page.offset, 2);
@@ -658,6 +684,28 @@ mod tests {
             "reopening alias storage by ID should still have name=None"
         );
         assert_eq!(client3.get_metadata().await.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_open_rejects_path_traversal_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        for evil in ["../escape", "../../etc", "nested/inside", "/absolute"] {
+            let result =
+                FileSystemDatasetClient::open(None, Some(evil.to_string()), None, storage_dir)
+                    .await;
+            assert!(
+                result.is_err(),
+                "open should reject traversal name {evil:?}"
+            );
+        }
+
+        // Same protection for alias.
+        let result =
+            FileSystemDatasetClient::open(None, None, Some("../escape".to_string()), storage_dir)
+                .await;
+        assert!(result.is_err(), "open should reject traversal alias");
     }
 
     #[tokio::test]

@@ -10,8 +10,8 @@ use crate::clock::{system_clock, ClockRef};
 use crate::models::{AddRequestsResponse, ProcessedRequest, RequestQueueMetadata};
 use crate::utils::{
     atomic_write, crypto_random_object_id, find_storage_by_id, json_dumps, json_dumps_value,
-    sha256_prefix, unique_key_to_request_id, validate_exclusive_args, Result, StorageError,
-    METADATA_FILENAME,
+    sha256_prefix, unique_key_to_request_id, validate_exclusive_args, validate_subdirectory,
+    Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "request_queues";
@@ -148,8 +148,13 @@ impl FileSystemRequestQueueClient {
                     StorageError::NotFound(format!("Request queue with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name.as_deref().or(alias.as_deref()).unwrap_or(DEFAULT_NAME);
-            storage_dir.join(STORAGE_SUBDIR).join(dir_name)
+            let base = storage_dir.join(STORAGE_SUBDIR);
+            match name.as_deref().or(alias.as_deref()) {
+                // A user-supplied name/alias must map to a single direct child.
+                Some(dir_name) => validate_subdirectory(&base, dir_name)?,
+                // The default name is a trusted constant, no validation needed.
+                None => base.join(DEFAULT_NAME),
+            }
         };
 
         let metadata_path = path.join(METADATA_FILENAME);
@@ -402,7 +407,7 @@ impl FileSystemRequestQueueClient {
         }
 
         let content = fs::read_to_string(&file_path).await?;
-        let request: Value = serde_json::from_str(&content)?;
+        let mut request: Value = serde_json::from_str(&content)?;
 
         {
             let mut inner = self.inner.lock().await;
@@ -411,6 +416,7 @@ impl FileSystemRequestQueueClient {
             atomic_write(&self.path.join(METADATA_FILENAME), json.as_bytes()).await?;
         }
 
+        Self::strip_queue_internals(&mut request);
         Ok(Some(request))
     }
 
@@ -489,6 +495,12 @@ impl FileSystemRequestQueueClient {
                     let meta_json = json_dumps_value(&inner.metadata)?;
                     atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
 
+                    // Strip the queue-owned lock field before handing the
+                    // request to the caller; we persisted the locked orderNo to
+                    // disk above. The caller hands the request back to
+                    // mark_request_as_handled/reclaim_request, which re-derive
+                    // these fields from uniqueKey, so the round-trip is safe.
+                    Self::strip_queue_internals(&mut request);
                     return Ok(Some(request));
                 }
             }
@@ -786,6 +798,16 @@ impl FileSystemRequestQueueClient {
             })
     }
 
+    /// Remove queue-owned bookkeeping fields from a request before returning it
+    /// to the caller. `orderNo` is the lock/ordering state and is purely
+    /// internal; it lives on disk but must never leak to consumers. (`id` is
+    /// kept — it is a stable, caller-meaningful request identifier.)
+    fn strip_queue_internals(request: &mut Value) {
+        if let Value::Object(ref mut map) = request {
+            map.remove("orderNo");
+        }
+    }
+
     fn read_order_no(request: &Value) -> Option<i64> {
         match request.get("orderNo") {
             Some(Value::Number(n)) => n.as_i64(),
@@ -998,6 +1020,16 @@ mod tests {
         })
     }
 
+    /// Read the raw persisted request file straight off disk, bypassing the
+    /// client API. Used by tests that assert on the *on-disk* format (e.g. the
+    /// queue-owned `orderNo`/`id` fields that the client strips before
+    /// returning requests to callers).
+    fn read_persisted_request(client: &FileSystemRequestQueueClient, unique_key: &str) -> Value {
+        let path = client.get_request_path(unique_key);
+        let content = std::fs::read_to_string(path).expect("request file should exist on disk");
+        serde_json::from_str(&content).expect("request file should be valid JSON")
+    }
+
     #[tokio::test]
     async fn test_add_and_fetch_request() {
         let temp_dir = TempDir::new().unwrap();
@@ -1018,6 +1050,41 @@ mod tests {
 
         // Locked now — nothing else fetchable.
         assert!(client.fetch_next_request().await.unwrap().is_none());
+    }
+
+    /// fetch_next_request must not leak the queue-owned `orderNo` lock field to
+    /// the caller, but the lock must still be persisted to disk (so peers skip
+    /// it), and the stripped request must still round-trip through
+    /// mark_request_as_handled.
+    #[tokio::test]
+    async fn test_fetch_next_request_strips_order_no() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("leaky")], false)
+            .await
+            .unwrap();
+
+        let fetched = client.fetch_next_request().await.unwrap().unwrap();
+        assert!(
+            fetched.get("orderNo").is_none(),
+            "fetched request must not expose internal orderNo"
+        );
+
+        // The lock is still on disk (future-dated, so the request is locked).
+        let persisted = read_persisted_request(&client, "leaky");
+        assert!(
+            persisted.get("orderNo").and_then(|v| v.as_i64()).is_some(),
+            "the lock must be persisted to disk even though it's stripped on return"
+        );
+
+        // The stripped request round-trips back into mark_request_as_handled.
+        let result = client.mark_request_as_handled(fetched).await.unwrap();
+        assert!(result.is_some());
+        assert!(client.is_finished().await);
     }
 
     /// Stray non-JSON files (and malformed JSON) dropped into the queue directory must be
@@ -1814,9 +1881,17 @@ mod tests {
             .unwrap();
 
         // The persisted file must carry id + orderNo (the on-disk lock format).
-        let stored = client.get_request("req1").await.unwrap().unwrap();
+        // Read the raw file, not via get_request — the client strips orderNo
+        // from requests it returns to callers.
+        let stored = read_persisted_request(&client, "req1");
         assert!(stored.get("id").and_then(|v| v.as_str()).is_some());
         assert!(stored.get("orderNo").and_then(|v| v.as_i64()).is_some());
+
+        // get_request, by contrast, must NOT leak the internal orderNo lock
+        // field to the caller (id is kept).
+        let returned = client.get_request("req1").await.unwrap().unwrap();
+        assert!(returned.get("orderNo").is_none());
+        assert!(returned.get("id").and_then(|v| v.as_str()).is_some());
     }
 
     /// Adding a request that already carries a `handledAt` must store it as
@@ -1869,7 +1944,8 @@ mod tests {
         );
 
         // The persisted file must carry orderNo: null so re-readers agree.
-        let stored = client.get_request("done").await.unwrap().unwrap();
+        // Read the raw file, since get_request strips orderNo on return.
+        let stored = read_persisted_request(&client, "done");
         assert!(
             stored.get("orderNo").map(|v| v.is_null()).unwrap_or(false),
             "handled-on-add request must persist with orderNo: null"

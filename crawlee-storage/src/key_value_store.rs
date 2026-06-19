@@ -11,7 +11,8 @@ use crate::models::{
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps,
-    json_dumps_value, validate_exclusive_args, Result, StorageError, METADATA_FILENAME,
+    json_dumps_value, validate_exclusive_args, validate_subdirectory, Result, StorageError,
+    METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -73,8 +74,13 @@ impl FileSystemKeyValueStoreClient {
                     StorageError::NotFound(format!("Key-value store with id '{id_val}' not found"))
                 })?
         } else {
-            let dir_name = name.as_deref().or(alias.as_deref()).unwrap_or(DEFAULT_NAME);
-            storage_dir.join(STORAGE_SUBDIR).join(dir_name)
+            let base = storage_dir.join(STORAGE_SUBDIR);
+            match name.as_deref().or(alias.as_deref()) {
+                // A user-supplied name/alias must map to a single direct child.
+                Some(dir_name) => validate_subdirectory(&base, dir_name)?,
+                // The default name is a trusted constant, no validation needed.
+                None => base.join(DEFAULT_NAME),
+            }
         };
 
         let metadata_path = path.join(METADATA_FILENAME);

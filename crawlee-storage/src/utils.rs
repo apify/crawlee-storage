@@ -177,6 +177,62 @@ pub fn validate_exclusive_args(
     Ok(())
 }
 
+/// Resolve a storage subdirectory inside a base directory, rejecting anything
+/// that does not map to a single direct child of `base_dir`.
+///
+/// Joins `subdirectory` onto `base_dir` and verifies the result is a direct
+/// child of `base_dir`, so a storage name or alias always maps to one
+/// subdirectory under the storage directory rather than a nested path (e.g.
+/// `nested/inside`) or somewhere else entirely (e.g. a value containing `..`
+/// or an absolute path).
+///
+/// Normalization is purely lexical (no filesystem access): symlinks are not
+/// followed and the check is deterministic. Mirrors the Python
+/// `validate_subdirectory` helper.
+pub fn validate_subdirectory(base_dir: &Path, subdirectory: &str) -> Result<std::path::PathBuf> {
+    let target = normalize_lexically(&base_dir.join(subdirectory));
+    let base = normalize_lexically(base_dir);
+
+    // The target must be a direct child of the base directory: its parent,
+    // after lexical normalization, must equal the normalized base. This rejects
+    // path separators, parent references ("..") and absolute paths.
+    if target.parent() != Some(base.as_path()) {
+        return Err(StorageError::InvalidArgs(format!(
+            "Invalid storage name or alias \"{subdirectory}\". It must map to a single \
+             subdirectory under the storage directory and must not contain path separators, \
+             parent directory references (\"..\") or absolute paths."
+        )));
+    }
+
+    Ok(target)
+}
+
+/// Lexically normalize a path (no filesystem access): collapse `.`, resolve
+/// `..` against preceding normal components, and preserve a leading root.
+/// Equivalent to Python's `os.path.normpath` for our purposes.
+fn normalize_lexically(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop a preceding normal component if there is one; otherwise
+                // keep the `..` so an escaping path stays escaping (and thus
+                // gets rejected by the parent-equality check above).
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(component.as_os_str());
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Find a storage directory by scanning subdirectories for a matching metadata ID.
 /// Returns the path to the matching subdirectory if found.
 pub async fn find_storage_by_id(
@@ -218,4 +274,47 @@ pub async fn find_storage_by_id(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_subdirectory_accepts_plain_names() {
+        let base = Path::new("/data/datasets");
+        for name in ["default", "my-store", "Some_Name", "with spaces", "123"] {
+            let got = validate_subdirectory(base, name).expect("plain name should be accepted");
+            assert_eq!(got, base.join(name), "name: {name}");
+        }
+    }
+
+    #[test]
+    fn test_validate_subdirectory_rejects_traversal_and_separators() {
+        let base = Path::new("/data/datasets");
+        for evil in [
+            "..",
+            "../escape",
+            "../../etc/passwd",
+            "nested/inside",
+            "a/b",
+            "/absolute",
+            "/etc/passwd",
+            "foo/..", // normalizes back to base itself, not a child
+            "./..",   // also escapes
+        ] {
+            assert!(
+                validate_subdirectory(base, evil).is_err(),
+                "expected rejection for: {evil:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_subdirectory_collapses_harmless_curdir() {
+        // A leading "./name" normalizes to a direct child and is fine.
+        let base = Path::new("/data/key_value_stores");
+        let got = validate_subdirectory(base, "./store").expect("./store should normalize");
+        assert_eq!(got, base.join("store"));
+    }
 }

@@ -435,13 +435,13 @@ impl FileSystemDatasetClient {
         })
     }
 
-    #[pyo3(signature = (offset=0, limit=999999999999, desc=false, skip_empty=false))]
+    #[pyo3(signature = (offset=0, limit=None, desc=false, skip_empty=false))]
     #[gen_stub(override_return_type(type_repr = "DatasetItemsListPage"))]
     fn get_data<'py>(
         &self,
         py: Python<'py>,
         offset: usize,
-        limit: usize,
+        limit: Option<usize>,
         desc: bool,
         skip_empty: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
