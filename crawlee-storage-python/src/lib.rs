@@ -574,7 +574,7 @@ impl FileSystemKeyValueStoreClient {
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client.get_value_file(&key).await.map_err(storage_err)?;
+            let result = client.get_value(&key).await.map_err(storage_err)?;
             match result {
                 Some((path, meta)) => {
                     let data = tokio::fs::read(&path)
@@ -604,7 +604,7 @@ impl FileSystemKeyValueStoreClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client
-                .set_value_raw(&key, &value, ct)
+                .set_value(&key, &value, ct)
                 .await
                 .map_err(storage_err)?;
             Ok(())
