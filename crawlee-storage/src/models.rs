@@ -136,30 +136,6 @@ pub struct KeyValueStoreRecordMetadata {
     pub size: Option<usize>,
 }
 
-/// The value stored in a key-value store record.
-///
-/// This avoids base64-encoding binary data just to fit it into `serde_json::Value`.
-/// Each binding layer converts these variants to native types directly
-/// (e.g. `Binary` → Python `bytes`, Node.js `Buffer`).
-#[derive(Debug, Clone)]
-pub enum KvsValue {
-    /// `application/x-none` — the record represents a null/None value.
-    None,
-    /// `application/json` — arbitrary JSON.
-    Json(Value),
-    /// `text/*` — a UTF-8 string.
-    Text(String),
-    /// Any other content type — raw bytes, no encoding.
-    Binary(Vec<u8>),
-}
-
-pub struct KeyValueStoreRecord {
-    pub key: String,
-    pub content_type: String,
-    pub size: Option<usize>,
-    pub value: KvsValue,
-}
-
 // ─── Request Queue Metadata ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

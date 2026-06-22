@@ -1,18 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::clock::{system_clock, ClockRef};
-use crate::models::{
-    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata, KvsKeysPage, KvsValue,
-};
+use crate::models::{KeyValueStoreMetadata, KeyValueStoreRecordMetadata, KvsKeysPage};
 use crate::utils::{
-    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps,
-    json_dumps_value, validate_exclusive_args, validate_subdirectory, Result, StorageError,
-    METADATA_FILENAME,
+    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps_value,
+    validate_exclusive_args, validate_subdirectory, Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -170,98 +166,6 @@ impl FileSystemKeyValueStoreClient {
         Ok(())
     }
 
-    /// Get a record by key. Returns None if the key doesn't exist.
-    pub async fn get_value(&self, key: &str) -> Result<Option<KeyValueStoreRecord>> {
-        let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
-
-        // Always update accessed_at on read, even for missing keys
-        {
-            let mut meta = self.metadata.lock().await;
-            meta.base.accessed_at = self.clock.now();
-            let json = json_dumps_value(&*meta)?;
-            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
-        }
-
-        if !value_path.exists() || !sidecar_path.exists() {
-            return Ok(None);
-        }
-
-        // Read sidecar metadata
-        let sidecar_content = fs::read_to_string(&sidecar_path).await?;
-        let record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
-
-        // Read raw bytes once, then parse based on content type
-        let raw_bytes = fs::read(&value_path).await?;
-        let size = raw_bytes.len();
-        let value = self.parse_value(&raw_bytes, &record_meta.content_type)?;
-
-        Ok(Some(KeyValueStoreRecord {
-            key: key.to_string(),
-            content_type: record_meta.content_type,
-            size: Some(size),
-            value,
-        }))
-    }
-
-    /// Set a value for a key.
-    ///
-    /// The `value` is a [`KvsValue`]:
-    /// - `KvsValue::None` → stored with content_type `"application/x-none"`
-    /// - `KvsValue::Json(v)` → stored as pretty-printed JSON
-    /// - `KvsValue::Text(s)` → stored as UTF-8 text
-    /// - `KvsValue::Binary(bytes)` → stored as raw bytes
-    ///
-    /// If `content_type` is None, it's inferred from the value variant.
-    pub async fn set_value(
-        &self,
-        key: &str,
-        value: KvsValue,
-        content_type: Option<String>,
-    ) -> Result<()> {
-        let content_type = content_type.unwrap_or_else(|| {
-            match &value {
-                KvsValue::None => "application/x-none",
-                KvsValue::Json(_) => "application/json",
-                KvsValue::Text(_) => "text/plain",
-                KvsValue::Binary(_) => "application/octet-stream",
-            }
-            .to_string()
-        });
-
-        let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
-
-        // Serialize value to bytes
-        let data = self.serialize_value(&value)?;
-
-        // Write value file
-        atomic_write(&value_path, &data).await?;
-
-        // Write sidecar metadata
-        let record_meta = KeyValueStoreRecordMetadata {
-            key: key.to_string(),
-            content_type,
-            size: Some(data.len()),
-        };
-        let sidecar_json = json_dumps_value(&record_meta)?;
-        atomic_write(&sidecar_path, sidecar_json.as_bytes()).await?;
-
-        // Update store metadata
-        {
-            let mut meta = self.metadata.lock().await;
-            let now = self.clock.now();
-            meta.base.accessed_at = now;
-            meta.base.modified_at = now;
-            let json = json_dumps_value(&*meta)?;
-            atomic_write(&self.metadata_path(), json.as_bytes()).await?;
-        }
-
-        Ok(())
-    }
-
     /// Delete a value by key.
     pub async fn delete_value(&self, key: &str) -> Result<()> {
         let encoded = encode_key(key);
@@ -396,7 +300,11 @@ impl FileSystemKeyValueStoreClient {
     /// Returns `(value_path, record_metadata)` if the key exists, or `None` if it doesn't.
     /// This is useful for streaming reads — the binding layer can open the file
     /// and stream it directly instead of buffering the entire contents.
-    pub async fn get_value_file(
+    ///
+    /// The client is a pure byte transport: it returns the raw value bytes (via
+    /// the path) and the verbatim `content_type` from the sidecar. Parsing and
+    /// value semantics live at the `KeyValueStore` frontend.
+    pub async fn get_value(
         &self,
         key: &str,
     ) -> Result<Option<(PathBuf, KeyValueStoreRecordMetadata)>> {
@@ -424,9 +332,10 @@ impl FileSystemKeyValueStoreClient {
 
     /// Write raw bytes for a key, with sidecar metadata and atomic write.
     ///
-    /// This is the low-level write method used when the value is already
-    /// fully materialized in memory (e.g. from a `Buffer`).
-    pub async fn set_value_raw(&self, key: &str, data: &[u8], content_type: String) -> Result<()> {
+    /// The client is a pure byte transport: `data` is written verbatim and
+    /// `content_type` is stored as-is in the sidecar — no inference, no
+    /// serialization. Value semantics live at the `KeyValueStore` frontend.
+    pub async fn set_value(&self, key: &str, data: &[u8], content_type: String) -> Result<()> {
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
         let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
@@ -510,51 +419,24 @@ impl FileSystemKeyValueStoreClient {
         let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
         value_path.exists() && sidecar_path.exists()
     }
-
-    // ─── Private ────────────────────────────────────────────────────────────
-
-    fn parse_value(&self, raw_bytes: &[u8], content_type: &str) -> Result<KvsValue> {
-        if content_type == "application/x-none" {
-            return Ok(KvsValue::None);
-        }
-
-        if content_type == "application/json" {
-            let text = std::str::from_utf8(raw_bytes).map_err(|e| {
-                StorageError::InvalidArgs(format!("Invalid UTF-8 in JSON value: {e}"))
-            })?;
-            let parsed = serde_json::from_str::<Value>(text)?;
-            return Ok(KvsValue::Json(parsed));
-        }
-
-        if content_type.starts_with("text/") {
-            let text = String::from_utf8(raw_bytes.to_vec()).map_err(|e| {
-                StorageError::InvalidArgs(format!("Invalid UTF-8 in text value: {e}"))
-            })?;
-            return Ok(KvsValue::Text(text));
-        }
-
-        // Binary data — return raw bytes directly.
-        // Each binding layer converts to its native bytes type (Python bytes, Node Buffer, etc.).
-        Ok(KvsValue::Binary(raw_bytes.to_vec()))
-    }
-
-    fn serialize_value(&self, value: &KvsValue) -> Result<Vec<u8>> {
-        match value {
-            KvsValue::None => Ok(Vec::new()),
-            KvsValue::Json(v) => {
-                let json = json_dumps(v)?;
-                Ok(json.into_bytes())
-            }
-            KvsValue::Text(s) => Ok(s.as_bytes().to_vec()),
-            KvsValue::Binary(bytes) => Ok(bytes.clone()),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use tempfile::TempDir;
+
+    /// Read back the raw value bytes + content type for a key via the byte-only
+    /// `get_value` (which returns the value path + sidecar metadata).
+    async fn read_back(
+        client: &FileSystemKeyValueStoreClient,
+        key: &str,
+    ) -> Option<(Vec<u8>, String, Option<usize>)> {
+        let (path, meta) = client.get_value(key).await.unwrap()?;
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        Some((bytes, meta.content_type, meta.size))
+    }
 
     #[tokio::test]
     async fn test_on_disk_sidecar_uses_camel_case() {
@@ -568,8 +450,8 @@ mod tests {
         client
             .set_value(
                 "test-key",
-                KvsValue::Json(serde_json::json!({"x": 1})),
-                None,
+                br#"{"x":1}"#,
+                "application/json; charset=utf-8".to_string(),
             )
             .await
             .unwrap();
@@ -603,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_and_set_value() {
+    async fn test_json_bytes_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
@@ -611,28 +493,25 @@ mod tests {
             .await
             .unwrap();
 
-        // Set a JSON value
+        // The client is byte transport: the frontend already serialized this.
+        let payload = br#"{"hello":"world"}"#;
         client
             .set_value(
                 "my-key",
-                KvsValue::Json(serde_json::json!({"hello": "world"})),
-                None,
+                payload,
+                "application/json; charset=utf-8".to_string(),
             )
             .await
             .unwrap();
 
-        // Get it back
-        let record = client.get_value("my-key").await.unwrap().unwrap();
-        assert_eq!(record.key, "my-key");
-        assert_eq!(record.content_type, "application/json");
-        match &record.value {
-            KvsValue::Json(v) => assert_eq!(v, &serde_json::json!({"hello": "world"})),
-            other => panic!("Expected KvsValue::Json, got {other:?}"),
-        }
+        let (bytes, content_type, size) = read_back(&client, "my-key").await.unwrap();
+        assert_eq!(bytes, payload);
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        assert_eq!(size, Some(payload.len()));
     }
 
     #[tokio::test]
-    async fn test_set_text_value() {
+    async fn test_text_bytes_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
@@ -643,22 +522,19 @@ mod tests {
         client
             .set_value(
                 "greeting",
-                KvsValue::Text("hello".to_string()),
-                Some("text/plain".to_string()),
+                b"hello",
+                "text/plain; charset=utf-8".to_string(),
             )
             .await
             .unwrap();
 
-        let record = client.get_value("greeting").await.unwrap().unwrap();
-        assert_eq!(record.content_type, "text/plain");
-        match &record.value {
-            KvsValue::Text(s) => assert_eq!(s, "hello"),
-            other => panic!("Expected KvsValue::Text, got {other:?}"),
-        }
+        let (bytes, content_type, _) = read_back(&client, "greeting").await.unwrap();
+        assert_eq!(bytes, b"hello");
+        assert_eq!(content_type, "text/plain; charset=utf-8");
     }
 
     #[tokio::test]
-    async fn test_null_value() {
+    async fn test_null_sentinel_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
@@ -666,14 +542,80 @@ mod tests {
             .await
             .unwrap();
 
+        // Null is represented by the frontend as empty bytes + the sentinel CT.
         client
-            .set_value("empty", KvsValue::None, None)
+            .set_value("empty", b"", "application/x-none".to_string())
             .await
             .unwrap();
 
-        let record = client.get_value("empty").await.unwrap().unwrap();
-        assert_eq!(record.content_type, "application/x-none");
-        assert!(matches!(record.value, KvsValue::None));
+        let (bytes, content_type, size) = read_back(&client, "empty").await.unwrap();
+        assert!(bytes.is_empty());
+        assert_eq!(content_type, "application/x-none");
+        assert_eq!(size, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_binary_bytes_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Store binary data verbatim — no encoding, no inference.
+        let raw_bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x89, 0xFF];
+
+        client
+            .set_value(
+                "binary-key",
+                &raw_bytes,
+                "application/octet-stream".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let (bytes, content_type, size) = read_back(&client, "binary-key").await.unwrap();
+        assert_eq!(bytes, raw_bytes);
+        assert_eq!(content_type, "application/octet-stream");
+        assert_eq!(size, Some(raw_bytes.len()));
+    }
+
+    #[tokio::test]
+    async fn test_content_type_stored_verbatim() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // The client must NOT infer or rewrite the content type — even a totally
+        // arbitrary one passes through untouched.
+        client
+            .set_value(
+                "weird",
+                b"<svg/>",
+                "image/svg+xml; charset=utf-8".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let (bytes, content_type, _) = read_back(&client, "weird").await.unwrap();
+        assert_eq!(bytes, b"<svg/>");
+        assert_eq!(content_type, "image/svg+xml; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn test_get_missing_key_returns_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        assert!(client.get_value("nope").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -686,7 +628,7 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("key1", KvsValue::Json(serde_json::json!(1)), None)
+            .set_value("key1", b"1", "application/json; charset=utf-8".to_string())
             .await
             .unwrap();
 
@@ -704,18 +646,10 @@ mod tests {
             .await
             .unwrap();
 
-        client
-            .set_value("alpha", KvsValue::Json(serde_json::json!(1)), None)
-            .await
-            .unwrap();
-        client
-            .set_value("beta", KvsValue::Json(serde_json::json!(2)), None)
-            .await
-            .unwrap();
-        client
-            .set_value("gamma", KvsValue::Json(serde_json::json!(3)), None)
-            .await
-            .unwrap();
+        let ct = "application/json; charset=utf-8".to_string();
+        client.set_value("alpha", b"1", ct.clone()).await.unwrap();
+        client.set_value("beta", b"2", ct.clone()).await.unwrap();
+        client.set_value("gamma", b"3", ct.clone()).await.unwrap();
 
         // Fetch all at once (large page_size)
         let page = client.iterate_keys_page(None, None, 1000).await.unwrap();
@@ -752,39 +686,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_binary_value_roundtrip() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage_dir = temp_dir.path();
-
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
-            .await
-            .unwrap();
-
-        // Store binary data directly — no base64 encoding needed
-        let raw_bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x89, 0xFF];
-
-        client
-            .set_value(
-                "binary-key",
-                KvsValue::Binary(raw_bytes.clone()),
-                Some("application/octet-stream".to_string()),
-            )
-            .await
-            .unwrap();
-
-        // Read it back
-        let record = client.get_value("binary-key").await.unwrap().unwrap();
-        assert_eq!(record.content_type, "application/octet-stream");
-        assert_eq!(record.size, Some(raw_bytes.len()));
-
-        // The value should be raw bytes, no base64 intermediary
-        match &record.value {
-            KvsValue::Binary(bytes) => assert_eq!(bytes, &raw_bytes),
-            other => panic!("Expected KvsValue::Binary, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn test_special_characters_in_key() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
@@ -796,20 +697,14 @@ mod tests {
         client
             .set_value(
                 "path/to/key with spaces",
-                KvsValue::Text("value".to_string()),
-                None,
+                b"value",
+                "text/plain; charset=utf-8".to_string(),
             )
             .await
             .unwrap();
 
-        let record = client
-            .get_value("path/to/key with spaces")
-            .await
-            .unwrap()
-            .unwrap();
-        match &record.value {
-            KvsValue::Text(s) => assert_eq!(s, "value"),
-            other => panic!("Expected KvsValue::Text, got {other:?}"),
-        }
+        let (bytes, content_type, _) = read_back(&client, "path/to/key with spaces").await.unwrap();
+        assert_eq!(bytes, b"value");
+        assert_eq!(content_type, "text/plain; charset=utf-8");
     }
 }

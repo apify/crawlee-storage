@@ -230,7 +230,7 @@ fn generate_typed_dicts() -> String {
             &known_types,
         ),
         // KeyValueStoreRecord is a special case: it's built manually by `record_to_py()`
-        // with snake_case keys, and `value` is `KvsValue` (not serializable via serde).
+        // with camelCase keys, and `value` is the raw record bytes (`builtins.bytes`).
         TypedDictDef {
             class_name: "KeyValueStoreRecord",
             fields: vec![

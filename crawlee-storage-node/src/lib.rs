@@ -314,7 +314,7 @@ impl FileSystemKeyValueStoreClient {
     #[napi(ts_return_type = "Promise<KeyValueStoreRecord | null>")]
     pub async fn get_value(&self, key: String) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner.get_value_file(&key).await.map_err(storage_err)?;
+        let result = inner.get_value(&key).await.map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
@@ -353,10 +353,7 @@ impl FileSystemKeyValueStoreClient {
     ) -> napi::Result<()> {
         let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
         let inner = self.inner.clone();
-        inner
-            .set_value_raw(&key, &value, ct)
-            .await
-            .map_err(storage_err)
+        inner.set_value(&key, &value, ct).await.map_err(storage_err)
     }
 
     /// Internal: get file info for a record (path + metadata), used by the JS
@@ -364,7 +361,7 @@ impl FileSystemKeyValueStoreClient {
     #[napi(js_name = "_getValueFileInfo", skip_typescript)]
     pub async fn get_value_file_info(&self, key: String) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner.get_value_file(&key).await.map_err(storage_err)?;
+        let result = inner.get_value(&key).await.map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
