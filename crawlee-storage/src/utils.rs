@@ -148,16 +148,6 @@ pub fn unique_key_to_request_id(unique_key: &str) -> String {
 /// The metadata filename constant, matching Python's `METADATA_FILENAME`.
 pub const METADATA_FILENAME: &str = "__metadata__.json";
 
-/// Infer MIME type for a value being stored in a KVS.
-/// Matches Python's `infer_mime_type()` behavior.
-pub fn infer_mime_type(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "application/x-none",
-        serde_json::Value::String(_) => "text/plain",
-        _ => "application/json",
-    }
-}
-
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
 pub fn validate_exclusive_args(
