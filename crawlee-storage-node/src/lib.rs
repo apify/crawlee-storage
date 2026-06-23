@@ -428,6 +428,7 @@ impl FileSystemKeyValueStoreClient {
         exclusive_start_key: Option<String>,
         limit: Option<u32>,
         page_size: Option<u32>,
+        prefix: Option<String>,
     ) -> napi::Result<KvsKeyIterator> {
         Ok(KvsKeyIterator {
             state: Arc::new(Mutex::new(KvsKeyIteratorState {
@@ -435,6 +436,7 @@ impl FileSystemKeyValueStoreClient {
                 exclusive_start_key,
                 remaining_limit: limit.map(|l| l as usize),
                 page_size: page_size.unwrap_or(1000) as usize,
+                prefix,
                 buffer: Vec::new(),
                 buf_index: 0,
                 done: false,
@@ -460,6 +462,7 @@ struct KvsKeyIteratorState {
     exclusive_start_key: Option<String>,
     remaining_limit: Option<usize>,
     page_size: usize,
+    prefix: Option<String>,
     buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
     buf_index: usize,
     done: bool,
@@ -496,6 +499,7 @@ impl KvsKeyIterator {
                 st.exclusive_start_key.as_deref(),
                 st.remaining_limit,
                 st.page_size,
+                st.prefix.as_deref(),
             )
             .await
             .map_err(storage_err)?;
@@ -535,14 +539,15 @@ impl FileSystemRequestQueueClient {
     ///
     /// `useTestClock`: see `advanceClockForTesting` below.
     ///
-    /// `assumeSoleOwner` (default `false`): controls how locks on disk are
-    /// treated at open time. With `false` (the safe default), any future-dated
-    /// `orderNo` is respected as a potential live peer's lock — crashed peers'
-    /// locks expire naturally on the wall clock. With `true`, the caller
-    /// asserts nothing else is using this queue and any in-progress locks are
-    /// reclaimed immediately, so a request whose previous run died is
-    /// instantly re-fetchable. Set to `true` only if you know you're the sole
-    /// consumer; otherwise you risk two peers processing the same request.
+    /// `assumeSoleOwner` (default `true`): controls how locks on disk are
+    /// treated at open time. With `true` (the default, tuned for the common
+    /// single-process crawl), the caller asserts nothing else is using this
+    /// queue and any in-progress locks are reclaimed immediately, so a request
+    /// whose previous run died is instantly re-fetchable. Set to `false` when
+    /// multiple processes share the same on-disk queue concurrently: any
+    /// future-dated `orderNo` is then respected as a potential live peer's
+    /// lock, and crashed peers' locks expire naturally on the wall clock —
+    /// otherwise you risk two peers processing the same request.
     #[napi(factory)]
     pub async fn open(
         id: Option<String>,
@@ -560,7 +565,7 @@ impl FileSystemRequestQueueClient {
             alias,
             &storage_dir,
             clock,
-            assume_sole_owner.unwrap_or(false),
+            assume_sole_owner.unwrap_or(true),
         )
         .await
         .map_err(storage_err)?;

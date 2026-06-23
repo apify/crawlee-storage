@@ -310,6 +310,7 @@ struct KvsKeyIteratorState {
     exclusive_start_key: Option<String>,
     remaining_limit: Option<usize>,
     page_size: usize,
+    prefix: Option<String>,
     buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
     buf_index: usize,
     done: bool,
@@ -353,6 +354,7 @@ impl KvsKeyIterator {
                     st.exclusive_start_key.as_deref(),
                     st.remaining_limit,
                     st.page_size,
+                    st.prefix.as_deref(),
                 )
                 .await
                 .map_err(storage_err)?;
@@ -667,12 +669,13 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None))]
+    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None))]
     fn iterate_keys(
         &self,
         exclusive_start_key: Option<String>,
         limit: Option<usize>,
         page_size: Option<usize>,
+        prefix: Option<String>,
     ) -> KvsKeyIterator {
         KvsKeyIterator {
             state: Arc::new(Mutex::new(KvsKeyIteratorState {
@@ -680,6 +683,7 @@ impl FileSystemKeyValueStoreClient {
                 exclusive_start_key,
                 remaining_limit: limit,
                 page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+                prefix,
                 buffer: Vec::new(),
                 buf_index: 0,
                 done: false,
@@ -728,17 +732,18 @@ impl FileSystemRequestQueueClient {
     ///
     /// ``use_test_clock``: see ``advance_clock_for_testing`` below.
     ///
-    /// ``assume_sole_owner`` (default ``False``): controls how locks on disk
-    /// are treated at open time. With ``False`` (the safe default), any
-    /// future-dated ``orderNo`` is respected as a potential live peer's lock —
-    /// crashed peers' locks expire naturally on the wall clock. With
-    /// ``True``, the caller asserts nothing else is using this queue and any
-    /// in-progress locks are reclaimed immediately, so a request whose
-    /// previous run died is instantly re-fetchable. Set to ``True`` only if
-    /// you know you're the sole consumer; otherwise you risk two peers
-    /// processing the same request.
+    /// ``assume_sole_owner`` (default ``True``): controls how locks on disk
+    /// are treated at open time. With ``True`` (the default, tuned for the
+    /// common single-process crawl), the caller asserts nothing else is using
+    /// this queue and any in-progress locks are reclaimed immediately, so a
+    /// request whose previous run died is instantly re-fetchable. Set to
+    /// ``False`` when multiple processes share the same on-disk queue
+    /// concurrently: any future-dated ``orderNo`` is then respected as a
+    /// potential live peer's lock, and crashed peers' locks expire naturally
+    /// on the wall clock — otherwise you risk two peers processing the same
+    /// request.
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, assume_sole_owner=false))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, assume_sole_owner=true))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,

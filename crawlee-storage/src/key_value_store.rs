@@ -205,6 +205,7 @@ impl FileSystemKeyValueStoreClient {
         exclusive_start_key: Option<&str>,
         limit: Option<usize>,
         page_size: usize,
+        prefix: Option<&str>,
     ) -> Result<KvsKeysPage> {
         // Fetch one extra beyond the page to detect whether more keys exist.
         let fetch_limit = match limit {
@@ -213,7 +214,7 @@ impl FileSystemKeyValueStoreClient {
         };
 
         let results = self
-            .list_keys_raw(exclusive_start_key, Some(fetch_limit + 1))
+            .list_keys_raw(exclusive_start_key, Some(fetch_limit + 1), prefix)
             .await?;
 
         let has_more =
@@ -224,11 +225,15 @@ impl FileSystemKeyValueStoreClient {
         Ok(KvsKeysPage { items, has_more })
     }
 
-    /// Internal helper: list keys with cursor and limit, returning a flat Vec.
+    /// Internal helper: list keys with cursor, limit and optional prefix,
+    /// returning a flat Vec. Keys are filtered by `prefix` (on the decoded key,
+    /// not the encoded filename) before the cursor and limit are applied, so the
+    /// page's `limit`/`has_more` accounting only ever counts matching keys.
     async fn list_keys_raw(
         &self,
         exclusive_start_key: Option<&str>,
         limit: Option<usize>,
+        prefix: Option<&str>,
     ) -> Result<Vec<KeyValueStoreRecordMetadata>> {
         let mut results = Vec::new();
         let metadata_suffix = format!(".{METADATA_FILENAME}");
@@ -260,6 +265,13 @@ impl FileSystemKeyValueStoreClient {
             let content = fs::read_to_string(&sidecar_path).await?;
             match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
                 Ok(mut record_meta) => {
+                    // Apply prefix filter (on the decoded key)
+                    if let Some(prefix) = prefix {
+                        if !record_meta.key.starts_with(prefix) {
+                            continue;
+                        }
+                    }
+
                     // Apply cursor filter
                     if let Some(start_key) = exclusive_start_key {
                         if record_meta.key.as_str() <= start_key {
@@ -612,7 +624,10 @@ mod tests {
         assert_eq!(meta.size, Some(payload.len()));
 
         // The list/iterate path backfills too.
-        let page = client.iterate_keys_page(None, None, 1000).await.unwrap();
+        let page = client
+            .iterate_keys_page(None, None, 1000, None)
+            .await
+            .unwrap();
         let entry = page.items.iter().find(|m| m.key == key).unwrap();
         assert_eq!(entry.size, Some(payload.len()));
     }
@@ -715,24 +730,30 @@ mod tests {
         client.set_value("gamma", b"3", ct.clone()).await.unwrap();
 
         // Fetch all at once (large page_size)
-        let page = client.iterate_keys_page(None, None, 1000).await.unwrap();
+        let page = client
+            .iterate_keys_page(None, None, 1000, None)
+            .await
+            .unwrap();
         assert_eq!(page.items.len(), 3);
         assert!(!page.has_more);
 
         // With limit
-        let page = client.iterate_keys_page(None, Some(2), 1000).await.unwrap();
+        let page = client
+            .iterate_keys_page(None, Some(2), 1000, None)
+            .await
+            .unwrap();
         assert_eq!(page.items.len(), 2);
         assert!(!page.has_more);
 
         // Paginate with page_size=2
-        let page1 = client.iterate_keys_page(None, None, 2).await.unwrap();
+        let page1 = client.iterate_keys_page(None, None, 2, None).await.unwrap();
         assert_eq!(page1.items.len(), 2);
         assert!(page1.has_more);
 
         // Second page using cursor from last key
         let last_key = &page1.items.last().unwrap().key;
         let page2 = client
-            .iterate_keys_page(Some(last_key), None, 2)
+            .iterate_keys_page(Some(last_key), None, 2, None)
             .await
             .unwrap();
         assert_eq!(page2.items.len(), 1);
@@ -740,12 +761,76 @@ mod tests {
 
         // Cursor-based: exclusive_start_key
         let page = client
-            .iterate_keys_page(Some("alpha"), None, 1000)
+            .iterate_keys_page(Some("alpha"), None, 1000, None)
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].key, "beta");
         assert_eq!(page.items[1].key, "gamma");
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_page_with_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        for key in ["foo:1", "foo:2", "foo:3", "bar:1", "baz"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // Prefix filters to matching keys only, in lexical order.
+        let page = client
+            .iterate_keys_page(None, None, 1000, Some("foo:"))
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(!page.has_more);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:1", "foo:2", "foo:3"]
+        );
+
+        // Prefix + limit: has_more reflects the *filtered* set, not the whole store.
+        let page = client
+            .iterate_keys_page(None, Some(2), 1000, Some("foo:"))
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].key, "foo:1");
+        assert_eq!(page.items[1].key, "foo:2");
+
+        // Prefix + page_size smaller than the match count sets has_more.
+        let page1 = client
+            .iterate_keys_page(None, None, 2, Some("foo:"))
+            .await
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert!(page1.has_more);
+
+        // Prefix + cursor: continue after the last key of page1, still prefix-scoped.
+        let last_key = &page1.items.last().unwrap().key;
+        let page2 = client
+            .iterate_keys_page(Some(last_key), None, 1000, Some("foo:"))
+            .await
+            .unwrap();
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].key, "foo:3");
+
+        // A prefix matching nothing yields an empty page.
+        let page = client
+            .iterate_keys_page(None, None, 1000, Some("nope"))
+            .await
+            .unwrap();
+        assert!(page.items.is_empty());
+        assert!(!page.has_more);
     }
 
     #[tokio::test]

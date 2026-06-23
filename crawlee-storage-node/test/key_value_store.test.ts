@@ -136,6 +136,23 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(keys.length).toBe(2);
     });
 
+    it('should iterate keys filtered by prefix', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('foo:1', Buffer.from('1'));
+        await client.setValue('foo:2', Buffer.from('2'));
+        await client.setValue('bar:1', Buffer.from('3'));
+
+        // prefix is the 4th positional arg (exclusiveStartKey, limit, pageSize, prefix).
+        const iterator = await client.iterateKeys(null, null, 1000, 'foo:');
+        const keys: string[] = [];
+        for await (const entry of iterator) {
+            keys.push(entry.key);
+        }
+
+        expect(keys).toEqual(['foo:1', 'foo:2']);
+    });
+
     it('should get public URL', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 

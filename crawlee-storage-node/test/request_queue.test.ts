@@ -393,12 +393,15 @@ describe('FileSystemRequestQueueClient', () => {
             );
             await clientA.fetchNextRequest(); // locks it on disk
 
+            // Multi-process scenario: B must NOT assume sole ownership, so it
+            // respects A's on-disk lock instead of reclaiming it at open time.
             const clientB = await FileSystemRequestQueueClient.open(
                 null,
                 null,
                 null,
                 storageDir,
                 true,
+                false,
             );
 
             // B has its own clock at offset 0; the lock is in the future on disk.
