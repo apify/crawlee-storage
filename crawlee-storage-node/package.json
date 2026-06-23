@@ -26,8 +26,10 @@
     },
     "scripts": {
         "artifacts": "napi artifacts --output-dir ../artifacts --npm-dir npm",
-        "build": "napi build --platform --release --esm --no-const-enum && oxfmt",
-        "build:debug": "napi build --platform --esm --no-const-enum && oxfmt",
+        "build": "napi build --platform --release --esm --no-const-enum",
+        "build:debug": "napi build --platform --esm --no-const-enum",
+        "postbuild": "oxfmt",
+        "postbuild:debug": "oxfmt",
         "prepublishOnly": "napi prepublish -t npm --no-gh-release",
         "copy-version": "napi version",
         "test": "vitest run",
