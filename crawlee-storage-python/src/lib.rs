@@ -310,6 +310,7 @@ struct KvsKeyIteratorState {
     exclusive_start_key: Option<String>,
     remaining_limit: Option<usize>,
     page_size: usize,
+    prefix: Option<String>,
     buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
     buf_index: usize,
     done: bool,
@@ -353,6 +354,7 @@ impl KvsKeyIterator {
                     st.exclusive_start_key.as_deref(),
                     st.remaining_limit,
                     st.page_size,
+                    st.prefix.as_deref(),
                 )
                 .await
                 .map_err(storage_err)?;
@@ -667,12 +669,13 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None))]
+    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None))]
     fn iterate_keys(
         &self,
         exclusive_start_key: Option<String>,
         limit: Option<usize>,
         page_size: Option<usize>,
+        prefix: Option<String>,
     ) -> KvsKeyIterator {
         KvsKeyIterator {
             state: Arc::new(Mutex::new(KvsKeyIteratorState {
@@ -680,6 +683,7 @@ impl FileSystemKeyValueStoreClient {
                 exclusive_start_key,
                 remaining_limit: limit,
                 page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+                prefix,
                 buffer: Vec::new(),
                 buf_index: 0,
                 done: false,

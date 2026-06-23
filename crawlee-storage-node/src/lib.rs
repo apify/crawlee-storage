@@ -428,6 +428,7 @@ impl FileSystemKeyValueStoreClient {
         exclusive_start_key: Option<String>,
         limit: Option<u32>,
         page_size: Option<u32>,
+        prefix: Option<String>,
     ) -> napi::Result<KvsKeyIterator> {
         Ok(KvsKeyIterator {
             state: Arc::new(Mutex::new(KvsKeyIteratorState {
@@ -435,6 +436,7 @@ impl FileSystemKeyValueStoreClient {
                 exclusive_start_key,
                 remaining_limit: limit.map(|l| l as usize),
                 page_size: page_size.unwrap_or(1000) as usize,
+                prefix,
                 buffer: Vec::new(),
                 buf_index: 0,
                 done: false,
@@ -460,6 +462,7 @@ struct KvsKeyIteratorState {
     exclusive_start_key: Option<String>,
     remaining_limit: Option<usize>,
     page_size: usize,
+    prefix: Option<String>,
     buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
     buf_index: usize,
     done: bool,
@@ -496,6 +499,7 @@ impl KvsKeyIterator {
                 st.exclusive_start_key.as_deref(),
                 st.remaining_limit,
                 st.page_size,
+                st.prefix.as_deref(),
             )
             .await
             .map_err(storage_err)?;

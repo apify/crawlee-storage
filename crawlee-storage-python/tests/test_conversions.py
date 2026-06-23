@@ -106,3 +106,18 @@ async def test_advance_clock_for_testing_rejects_non_timedelta(storage_dir: str)
     client = await FileSystemDatasetClient.open(storage_dir=storage_dir, use_test_clock=True)
     with pytest.raises(TypeError):
         client.advance_clock_for_testing(1000)  # type: ignore[arg-type]
+
+
+async def test_iterate_keys_accepts_prefix(storage_dir: str) -> None:
+    """`iterate_keys` accepts a `prefix` kwarg and filters on the decoded key."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    await client.set_value("foo:1", b"1", "text/plain")
+    await client.set_value("foo:2", b"2", "text/plain")
+    await client.set_value("bar:1", b"3", "text/plain")
+
+    keys = [record["key"] async for record in client.iterate_keys(prefix="foo:")]
+    assert keys == ["foo:1", "foo:2"]
+
+    # No prefix still returns everything.
+    all_keys = sorted([record["key"] async for record in client.iterate_keys()])
+    assert all_keys == ["bar:1", "foo:1", "foo:2"]

@@ -138,6 +138,7 @@ export declare class FileSystemKeyValueStoreClient {
         exclusiveStartKey?: string | undefined | null,
         limit?: number | undefined | null,
         pageSize?: number | undefined | null,
+        prefix?: string | undefined | null,
     ): Promise<KvsKeyIterator>;
     getPublicUrl(key: string): Promise<string>;
     recordExists(key: string): Promise<boolean>;
