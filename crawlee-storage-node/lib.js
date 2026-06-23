@@ -2,41 +2,7 @@ import { createReadStream, createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { Readable, Writable } from 'stream';
 
-import {
-    DatasetItemIterator,
-    FileSystemDatasetClient,
-    FileSystemKeyValueStoreClient,
-    FileSystemRequestQueueClient,
-    KvsKeyIterator,
-} from './index.js';
-
-// The core library stores datetimes as ISO-8601 strings (the on-disk format),
-// so they cross the FFI boundary as strings. Convert the standard metadata
-// datetime fields to native JS `Date`s before handing the object to callers.
-const METADATA_DATE_FIELDS = ['accessedAt', 'createdAt', 'modifiedAt'];
-
-function convertMetadataDates(meta) {
-    if (meta) {
-        for (const field of METADATA_DATE_FIELDS) {
-            if (typeof meta[field] === 'string') {
-                meta[field] = new Date(meta[field]);
-            }
-        }
-    }
-    return meta;
-}
-
-// Wrap getMetadata on each client to coerce datetime strings into `Date`s.
-for (const Client of [
-    FileSystemDatasetClient,
-    FileSystemKeyValueStoreClient,
-    FileSystemRequestQueueClient,
-]) {
-    const origGetMetadata = Client.prototype.getMetadata;
-    Client.prototype.getMetadata = async function (...args) {
-        return convertMetadataDates(await origGetMetadata.apply(this, args));
-    };
-}
+import { DatasetItemIterator, FileSystemKeyValueStoreClient, KvsKeyIterator } from './index.js';
 
 // Add Symbol.asyncIterator to DatasetItemIterator so users can write:
 //   for await (const item of client.iterateItems()) { ... }

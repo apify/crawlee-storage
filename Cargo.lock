@@ -170,6 +170,7 @@ dependencies = [
 name = "crawlee-storage-python"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "crawlee-storage",
  "pyo3",
  "pyo3-async-runtimes",
@@ -635,6 +636,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb7848c221fb7bb789e02f01875287ebb1e078b92a6566a34de01ef8806e7c2b"
 dependencies = [
  "bitflags",
+ "chrono",
  "ctor",
  "futures",
  "futures-core",
@@ -913,6 +915,7 @@ version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf85e27e86080aafd5a22eae58a162e133a589551542b3e5cee4beb27e54f8e1"
 dependencies = [
+ "chrono",
  "libc",
  "once_cell",
  "portable-atomic",

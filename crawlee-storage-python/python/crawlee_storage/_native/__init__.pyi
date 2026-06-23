@@ -2,6 +2,7 @@
 # ruff: noqa: E501, F401, F403, F405
 
 import builtins
+import datetime
 import pathlib
 import typing
 
@@ -24,36 +25,36 @@ __all__ = [
 
 class DatasetMetadata(typing.TypedDict):
     id: builtins.str
-    name: typing.Optional[builtins.str]
-    accessedAt: builtins.str
-    createdAt: builtins.str
-    modifiedAt: builtins.str
+    name: builtins.str | None
+    accessedAt: datetime.datetime
+    createdAt: datetime.datetime
+    modifiedAt: datetime.datetime
     itemCount: builtins.int
 
 class KeyValueStoreMetadata(typing.TypedDict):
     id: builtins.str
-    name: typing.Optional[builtins.str]
-    accessedAt: builtins.str
-    createdAt: builtins.str
-    modifiedAt: builtins.str
+    name: builtins.str | None
+    accessedAt: datetime.datetime
+    createdAt: datetime.datetime
+    modifiedAt: datetime.datetime
 
 class KeyValueStoreRecordMetadata(typing.TypedDict):
     key: builtins.str
     contentType: builtins.str
-    size: typing.Optional[builtins.int]
+    size: builtins.int | None
 
 class KeyValueStoreRecord(typing.TypedDict):
     key: builtins.str
     contentType: builtins.str
-    size: typing.Optional[builtins.int]
+    size: builtins.int | None
     value: builtins.bytes
 
 class RequestQueueMetadata(typing.TypedDict):
     id: builtins.str
-    name: typing.Optional[builtins.str]
-    accessedAt: builtins.str
-    createdAt: builtins.str
-    modifiedAt: builtins.str
+    name: builtins.str | None
+    accessedAt: datetime.datetime
+    createdAt: datetime.datetime
+    modifiedAt: datetime.datetime
     hadMultipleClients: builtins.bool
     handledRequestCount: builtins.int
     pendingRequestCount: builtins.int
@@ -76,7 +77,7 @@ class ProcessedRequest(typing.TypedDict):
 class UnprocessedRequest(typing.TypedDict):
     uniqueKey: builtins.str
     url: builtins.str
-    method: typing.Optional[builtins.str]
+    method: builtins.str | None
 
 class AddRequestsResponse(typing.TypedDict):
     processedRequests: builtins.list[ProcessedRequest]
@@ -101,17 +102,16 @@ class FileSystemDatasetClient:
         """
     @staticmethod
     async def open(
-        id: typing.Optional[builtins.str] = None,
-        name: typing.Optional[builtins.str] = None,
-        alias: typing.Optional[builtins.str] = None,
+        id: builtins.str | None = None,
+        name: builtins.str | None = None,
+        alias: builtins.str | None = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
     ) -> FileSystemDatasetClient: ...
-    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+    def advance_clock_for_testing(self, duration: datetime.timedelta) -> None:
         r"""
-        Advance the client's clock by ``millis`` milliseconds. Only usable when
-        the client was opened with ``use_test_clock=True``; raises ``ValueError``
-        otherwise.
+        Advance the client's clock by ``duration``. Only usable when the client
+        was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
         """
     async def get_metadata(self) -> DatasetMetadata: ...
     async def drop_storage(self) -> None: ...
@@ -120,17 +120,17 @@ class FileSystemDatasetClient:
     async def get_data(
         self,
         offset: builtins.int = 0,
-        limit: typing.Optional[builtins.int] = None,
+        limit: builtins.int | None = None,
         desc: builtins.bool = False,
         skip_empty: builtins.bool = False,
     ) -> DatasetItemsListPage: ...
     def iterate_items(
         self,
         offset: builtins.int = 0,
-        limit: typing.Optional[builtins.int] = None,
+        limit: builtins.int | None = None,
         desc: builtins.bool = False,
         skip_empty: builtins.bool = False,
-        page_size: typing.Optional[builtins.int] = None,
+        page_size: builtins.int | None = None,
     ) -> DatasetItemIterator: ...
 
 @typing.final
@@ -147,31 +147,30 @@ class FileSystemKeyValueStoreClient:
         """
     @staticmethod
     async def open(
-        id: typing.Optional[builtins.str] = None,
-        name: typing.Optional[builtins.str] = None,
-        alias: typing.Optional[builtins.str] = None,
+        id: builtins.str | None = None,
+        name: builtins.str | None = None,
+        alias: builtins.str | None = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
     ) -> FileSystemKeyValueStoreClient: ...
-    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+    def advance_clock_for_testing(self, duration: datetime.timedelta) -> None:
         r"""
-        Advance the client's clock by ``millis`` milliseconds. Only usable when
-        the client was opened with ``use_test_clock=True``; raises ``ValueError``
-        otherwise.
+        Advance the client's clock by ``duration``. Only usable when the client
+        was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
         """
     async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
-    async def get_value(self, key: builtins.str) -> typing.Optional[KeyValueStoreRecord]: ...
+    async def get_value(self, key: builtins.str) -> KeyValueStoreRecord | None: ...
     async def set_value(
-        self, key: builtins.str, value: builtins.bytes, content_type: typing.Optional[builtins.str] = None
+        self, key: builtins.str, value: builtins.bytes, content_type: builtins.str | None = None
     ) -> None: ...
     async def delete_value(self, key: builtins.str) -> None: ...
     def iterate_keys(
         self,
-        exclusive_start_key: typing.Optional[builtins.str] = None,
-        limit: typing.Optional[builtins.int] = None,
-        page_size: typing.Optional[builtins.int] = None,
+        exclusive_start_key: builtins.str | None = None,
+        limit: builtins.int | None = None,
+        page_size: builtins.int | None = None,
     ) -> KvsKeyIterator: ...
     async def get_public_url(self, key: builtins.str) -> builtins.str: ...
     async def record_exists(self, key: builtins.str) -> builtins.bool: ...
@@ -190,9 +189,9 @@ class FileSystemRequestQueueClient:
         """
     @staticmethod
     async def open(
-        id: typing.Optional[builtins.str] = None,
-        name: typing.Optional[builtins.str] = None,
-        alias: typing.Optional[builtins.str] = None,
+        id: builtins.str | None = None,
+        name: builtins.str | None = None,
+        alias: builtins.str | None = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
         assume_sole_owner: builtins.bool = False,
@@ -212,11 +211,10 @@ class FileSystemRequestQueueClient:
         you know you're the sole consumer; otherwise you risk two peers
         processing the same request.
         """
-    def advance_clock_for_testing(self, millis: builtins.int) -> None:
+    def advance_clock_for_testing(self, duration: datetime.timedelta) -> None:
         r"""
-        Advance the client's clock by ``millis`` milliseconds. Only usable when
-        the client was opened with ``use_test_clock=True``; raises ``ValueError``
-        otherwise.
+        Advance the client's clock by ``duration``. Only usable when the client
+        was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
 
         This is the hook that lets Python tests using ``freezegun`` or
         similar frameworks exercise lock-expiry behavior — frozen Python
@@ -227,15 +225,15 @@ class FileSystemRequestQueueClient:
     async def drop_storage(self) -> None: ...
     async def purge(self) -> None: ...
     async def add_batch_of_requests(self, requests: list, forefront: builtins.bool = False) -> AddRequestsResponse: ...
-    async def get_request(self, unique_key: builtins.str) -> typing.Optional[dict[str, typing.Any]]: ...
-    async def fetch_next_request(self) -> typing.Optional[dict[str, typing.Any]]: ...
-    async def mark_request_as_handled(self, request: typing.Any) -> typing.Optional[ProcessedRequest]: ...
+    async def get_request(self, unique_key: builtins.str) -> dict[str, typing.Any] | None: ...
+    async def fetch_next_request(self) -> dict[str, typing.Any] | None: ...
+    async def mark_request_as_handled(self, request: typing.Any) -> ProcessedRequest | None: ...
     async def reclaim_request(
         self, request: typing.Any, forefront: builtins.bool = False
-    ) -> typing.Optional[ProcessedRequest]: ...
+    ) -> ProcessedRequest | None: ...
     async def is_empty(self) -> builtins.bool: ...
     async def is_finished(self) -> builtins.bool: ...
-    async def set_expected_request_processing_time(self, secs: builtins.float) -> None: ...
+    async def set_expected_request_processing_time(self, duration: datetime.timedelta) -> None: ...
     async def persist_state(self) -> None: ...
 
 @typing.final

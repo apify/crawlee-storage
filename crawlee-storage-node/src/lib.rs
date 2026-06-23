@@ -1,3 +1,5 @@
+mod models;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,6 +8,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+use models::{DatasetMetadata, KeyValueStoreMetadata, RequestQueueMetadata};
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     napi::Error::from_reason(e.to_string())
@@ -101,10 +105,10 @@ impl FileSystemDatasetClient {
         self.inner.metadata_path().to_string_lossy().to_string()
     }
 
-    #[napi(ts_return_type = "Promise<DatasetMetadata>")]
-    pub async fn get_metadata(&self) -> napi::Result<Value> {
+    #[napi]
+    pub async fn get_metadata(&self) -> napi::Result<DatasetMetadata> {
         let meta = self.inner.get_metadata().await;
-        to_js(&meta)
+        Ok(DatasetMetadata::from(&meta))
     }
 
     #[napi]
@@ -294,10 +298,10 @@ impl FileSystemKeyValueStoreClient {
         self.inner.metadata_path().to_string_lossy().to_string()
     }
 
-    #[napi(ts_return_type = "Promise<KeyValueStoreMetadata>")]
-    pub async fn get_metadata(&self) -> napi::Result<Value> {
+    #[napi]
+    pub async fn get_metadata(&self) -> napi::Result<KeyValueStoreMetadata> {
         let meta = self.inner.get_metadata().await;
-        to_js(&meta)
+        Ok(KeyValueStoreMetadata::from(&meta))
     }
 
     #[napi]
@@ -586,10 +590,10 @@ impl FileSystemRequestQueueClient {
         self.inner.metadata_path().to_string_lossy().to_string()
     }
 
-    #[napi(ts_return_type = "Promise<RequestQueueMetadata>")]
-    pub async fn get_metadata(&self) -> napi::Result<Value> {
+    #[napi]
+    pub async fn get_metadata(&self) -> napi::Result<RequestQueueMetadata> {
         let meta = self.inner.get_metadata().await;
-        to_js(&meta)
+        Ok(RequestQueueMetadata::from(&meta))
     }
 
     #[napi]
