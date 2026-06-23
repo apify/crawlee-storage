@@ -101,3 +101,47 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Run tests
         run: cargo test -p crawlee-storage
+
+  node_tests:
+    name: Node.js tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crawlee-storage-node
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm ci
+      - name: Build native bindings
+        run: npm run build:debug
+      - name: Run vitest
+        run: npm test
+
+  python_tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crawlee-storage-python
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: uv sync
+      - name: Build and install native bindings
+        run: uv run maturin develop
+      - name: Run pytest
+        run: uv run pytest

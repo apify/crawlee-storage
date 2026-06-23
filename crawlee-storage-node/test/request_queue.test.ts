@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, existsSync } from 'fs';
-import { rm } from 'fs/promises';
+import { readFile, rm } from 'fs/promises';
+import { createHash } from 'crypto';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -214,15 +215,25 @@ describe('FileSystemRequestQueueClient', () => {
     it('should persist orderNo and id inside the request file', async () => {
         const client = await FileSystemRequestQueueClient.open(null, null, null, storageDir);
 
+        const meta = await client.getMetadata();
         await client.addBatchOfRequests(
             [{ uniqueKey: 'req1', url: 'https://example.com/1', method: 'GET' }],
             false,
         );
 
-        const stored = await client.getRequest('req1');
-        expect(stored).not.toBeNull();
-        expect(typeof stored!.id).toBe('string');
-        expect(typeof stored!.orderNo).toBe('number');
+        // Read the raw on-disk file: the client deliberately strips `orderNo`
+        // (its internal lock field) from requests it hands back via getRequest.
+        const fileName = createHash('sha256').update('req1').digest('hex').slice(0, 15) + '.json';
+        const filePath = join(storageDir, 'request_queues', meta.name ?? 'default', fileName);
+        const stored = JSON.parse(await readFile(filePath, 'utf-8'));
+        expect(typeof stored.id).toBe('string');
+        expect(typeof stored.orderNo).toBe('number');
+
+        // getRequest must not leak orderNo to callers, but must keep id.
+        const returned = await client.getRequest('req1');
+        expect(returned).not.toBeNull();
+        expect(typeof returned!.id).toBe('string');
+        expect(returned!.orderNo).toBeUndefined();
     });
 
     it('should purge all requests', async () => {
