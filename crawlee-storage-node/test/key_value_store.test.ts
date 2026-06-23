@@ -189,6 +189,15 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect((await aliased.getMetadata()).name).toBeNull();
     });
 
+    it('should return metadata datetimes as native Dates', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+        const meta = await client.getMetadata();
+        expect(meta.createdAt).toBeInstanceOf(Date);
+        expect(meta.modifiedAt).toBeInstanceOf(Date);
+        expect(meta.accessedAt).toBeInstanceOf(Date);
+        expect(Number.isNaN(meta.createdAt.getTime())).toBe(false);
+    });
+
     // ─── Streaming tests ─────────────────────────────────────────────────
 
     it('should stream a value via getValueStream', async () => {

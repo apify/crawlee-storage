@@ -1,9 +1,9 @@
 export interface DatasetMetadata {
     id: string;
     name: string | null;
-    accessedAt: string;
-    createdAt: string;
-    modifiedAt: string;
+    accessedAt: Date;
+    createdAt: Date;
+    modifiedAt: Date;
     itemCount: number;
 }
 
@@ -19,9 +19,9 @@ export interface DatasetItemsListPage {
 export interface KeyValueStoreMetadata {
     id: string;
     name: string | null;
-    accessedAt: string;
-    createdAt: string;
-    modifiedAt: string;
+    accessedAt: Date;
+    createdAt: Date;
+    modifiedAt: Date;
 }
 
 export interface KeyValueStoreRecord {
@@ -47,9 +47,9 @@ export interface KeyValueStoreRecordMetadata {
 export interface RequestQueueMetadata {
     id: string;
     name: string | null;
-    accessedAt: string;
-    createdAt: string;
-    modifiedAt: string;
+    accessedAt: Date;
+    createdAt: Date;
+    modifiedAt: Date;
     hadMultipleClients: boolean;
     handledRequestCount: number;
     pendingRequestCount: number;

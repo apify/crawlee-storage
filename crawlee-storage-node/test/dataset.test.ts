@@ -185,6 +185,9 @@ describe('FileSystemDatasetClient', () => {
         );
         const meta = await client.getMetadata();
         expect(meta.id).toBeTruthy();
+        expect(meta.createdAt).toBeInstanceOf(Date);
+        expect(meta.modifiedAt).toBeInstanceOf(Date);
+        expect(meta.accessedAt).toBeInstanceOf(Date);
         await client.dropStorage();
     });
 });
