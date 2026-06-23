@@ -306,9 +306,10 @@ describe('FileSystemRequestQueueClient', () => {
 
         const meta = await client.getMetadata();
         expect(meta.id).toBeTruthy();
-        expect(meta.createdAt).toBeTruthy();
-        expect(meta.modifiedAt).toBeTruthy();
-        expect(meta.accessedAt).toBeTruthy();
+        expect(meta.createdAt).toBeInstanceOf(Date);
+        expect(meta.modifiedAt).toBeInstanceOf(Date);
+        expect(meta.accessedAt).toBeInstanceOf(Date);
+        expect(Number.isNaN(meta.createdAt.getTime())).toBe(false);
         expect(meta.hadMultipleClients).toBe(false);
         expect(meta.handledRequestCount).toBe(0);
         expect(meta.pendingRequestCount).toBe(0);
