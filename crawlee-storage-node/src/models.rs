@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use napi_derive::napi;
 
-#[napi(object, use_nullable = true)]
+#[napi(object)]
 pub struct DatasetMetadata {
     pub id: String,
     pub name: Option<String>,
@@ -34,7 +34,7 @@ impl From<&crawlee_storage::models::DatasetMetadata> for DatasetMetadata {
     }
 }
 
-#[napi(object, use_nullable = true)]
+#[napi(object)]
 pub struct KeyValueStoreMetadata {
     pub id: String,
     pub name: Option<String>,
@@ -55,7 +55,7 @@ impl From<&crawlee_storage::models::KeyValueStoreMetadata> for KeyValueStoreMeta
     }
 }
 
-#[napi(object, use_nullable = true)]
+#[napi(object)]
 pub struct RequestQueueMetadata {
     pub id: String,
     pub name: Option<String>,

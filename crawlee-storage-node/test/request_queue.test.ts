@@ -332,7 +332,7 @@ describe('FileSystemRequestQueueClient', () => {
         expect((await named.getMetadata()).name).toBe('my-queue');
 
         const aliased = await FileSystemRequestQueueClient.open(null, null, 'my-alias', storageDir);
-        expect((await aliased.getMetadata()).name).toBeNull();
+        expect((await aliased.getMetadata()).name).toBeUndefined();
     });
 
     // ─── Test clock injection ──────────────────────────────────────────────

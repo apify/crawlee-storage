@@ -259,13 +259,31 @@ impl FileSystemKeyValueStoreClient {
         for sidecar_path in sidecar_paths {
             let content = fs::read_to_string(&sidecar_path).await?;
             match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
-                Ok(record_meta) => {
+                Ok(mut record_meta) => {
                     // Apply cursor filter
                     if let Some(start_key) = exclusive_start_key {
                         if record_meta.key.as_str() <= start_key {
                             continue;
                         }
                     }
+
+                    // Backfill `size` for foreign/legacy sidecars that omit it
+                    // (this library always writes it, but crawlee-JS / older
+                    // Python clients may not) by stating the value file. The
+                    // value file lives at the sidecar path minus the
+                    // `.{METADATA_FILENAME}` suffix.
+                    if record_meta.size.is_none() {
+                        let value_path = sidecar_path
+                            .to_string_lossy()
+                            .strip_suffix(&metadata_suffix)
+                            .map(PathBuf::from);
+                        if let Some(value_path) = value_path {
+                            if let Ok(file_meta) = fs::metadata(&value_path).await {
+                                record_meta.size = Some(file_meta.len() as usize);
+                            }
+                        }
+                    }
+
                     results.push(record_meta);
 
                     // Apply limit
@@ -325,7 +343,16 @@ impl FileSystemKeyValueStoreClient {
         }
 
         let sidecar_content = fs::read_to_string(&sidecar_path).await?;
-        let record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
+        let mut record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
+
+        // Backfill `size` for foreign/legacy sidecars that omit it (this
+        // library always writes it, but crawlee-JS / older Python clients may
+        // not) by stating the value file.
+        if record_meta.size.is_none() {
+            if let Ok(file_meta) = fs::metadata(&value_path).await {
+                record_meta.size = Some(file_meta.len() as usize);
+            }
+        }
 
         Ok(Some((value_path, record_meta)))
     }
@@ -552,6 +579,42 @@ mod tests {
         assert!(bytes.is_empty());
         assert_eq!(content_type, "application/x-none");
         assert_eq!(size, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_size_backfilled_for_legacy_sidecar_without_size() {
+        // crawlee-JS MemoryStorage and older Python FileSystemStorageClient
+        // wrote sidecars that omit `size`. On read, the client must backfill it
+        // from the actual value-file length rather than surfacing `None`.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Hand-write a value file + a sidecar that has no `size` field.
+        let key = "legacy-key";
+        let payload = b"twelve bytes";
+        let encoded = encode_key(key);
+        let value_path = client.path().join(&encoded);
+        let sidecar_path = client.path().join(format!("{encoded}.{METADATA_FILENAME}"));
+        tokio::fs::write(&value_path, payload).await.unwrap();
+        tokio::fs::write(
+            &sidecar_path,
+            br#"{"key":"legacy-key","contentType":"text/plain"}"#,
+        )
+        .await
+        .unwrap();
+
+        // get_value backfills from the file length.
+        let (_, meta) = client.get_value(key).await.unwrap().unwrap();
+        assert_eq!(meta.size, Some(payload.len()));
+
+        // The list/iterate path backfills too.
+        let page = client.iterate_keys_page(None, None, 1000).await.unwrap();
+        let entry = page.items.iter().find(|m| m.key == key).unwrap();
+        assert_eq!(entry.size, Some(payload.len()));
     }
 
     #[tokio::test]

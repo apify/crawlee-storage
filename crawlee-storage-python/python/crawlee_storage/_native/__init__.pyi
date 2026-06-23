@@ -41,12 +41,12 @@ class KeyValueStoreMetadata(typing.TypedDict):
 class KeyValueStoreRecordMetadata(typing.TypedDict):
     key: builtins.str
     contentType: builtins.str
-    size: builtins.int | None
+    size: builtins.int
 
 class KeyValueStoreRecord(typing.TypedDict):
     key: builtins.str
     contentType: builtins.str
-    size: builtins.int | None
+    size: builtins.int
     value: builtins.bytes
 
 class RequestQueueMetadata(typing.TypedDict):
