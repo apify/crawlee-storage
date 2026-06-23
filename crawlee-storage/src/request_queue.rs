@@ -2050,4 +2050,181 @@ mod tests {
         assert_eq!(meta.handled_request_count, 0);
         assert_eq!(meta.pending_request_count, 1);
     }
+
+    /// The write path (`mark_request_as_handled` / `reclaim_request`) must derive
+    /// lock/ordering state from disk, never from an `orderNo` the caller hands
+    /// back on the request object. A consumer can only ever construct such a
+    /// value by accident (the read paths strip `orderNo` — see
+    /// `test_fetch_next_request_strips_order_no`), but the bindings accept an
+    /// opaque object, so a stale or hostile `orderNo` must be ignored. This pins
+    /// that invariant so it can't silently regress.
+    #[tokio::test]
+    async fn test_write_path_ignores_caller_supplied_order_no() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Two requests so we can poison one and still observe the queue.
+        client
+            .add_batch_of_requests(vec![req("reclaimed"), req("handled")], false)
+            .await
+            .unwrap();
+
+        // --- reclaim_request ignores a bogus caller orderNo ---
+        let mut to_reclaim = client.fetch_next_request().await.unwrap().unwrap();
+        // Poison the in-hand object with a far-future lock. If the write path
+        // honored this, the request would look locked-until-year-~3.3M and be
+        // unfetchable; reclaim must instead reset it to a fetchable `±now`.
+        if let Value::Object(ref mut map) = to_reclaim {
+            map.insert("orderNo".to_string(), Value::Number(i64::MAX.into()));
+        }
+        let unique_key = to_reclaim["uniqueKey"].as_str().unwrap().to_string();
+        client
+            .reclaim_request(to_reclaim, false)
+            .await
+            .unwrap()
+            .expect("reclaim of a known request returns Some");
+
+        // The persisted orderNo must be the library's computed value (≈ now, in
+        // the past relative to any future lock), NOT the i64::MAX we supplied.
+        let persisted = read_persisted_request(&client, &unique_key);
+        let persisted_order = persisted
+            .get("orderNo")
+            .and_then(|v| v.as_i64())
+            .expect("reclaimed request keeps a numeric orderNo on disk");
+        assert_ne!(
+            persisted_order,
+            i64::MAX,
+            "reclaim must not persist the caller-supplied orderNo"
+        );
+        let now = client.clock().now().timestamp_millis();
+        assert!(
+            !FileSystemRequestQueueClient::is_locked_order(persisted_order, now),
+            "a reclaimed request must be immediately fetchable, not locked far in the future"
+        );
+
+        // --- mark_request_as_handled ignores a bogus caller orderNo ---
+        // Fetch the other request and poison it the same way.
+        let mut to_handle = client.fetch_next_request().await.unwrap().unwrap();
+        if let Value::Object(ref mut map) = to_handle {
+            map.insert("orderNo".to_string(), Value::Number(i64::MAX.into()));
+        }
+        let handled_key = to_handle["uniqueKey"].as_str().unwrap().to_string();
+        client
+            .mark_request_as_handled(to_handle)
+            .await
+            .unwrap()
+            .expect("marking a known request handled returns Some");
+
+        // Handled means orderNo == null on disk, regardless of what we passed in.
+        let persisted = read_persisted_request(&client, &handled_key);
+        assert!(
+            persisted
+                .get("orderNo")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            "a handled request must have a null orderNo on disk, not the caller-supplied value"
+        );
+    }
+
+    /// `get_request` is a read-only peek: it must NOT lock the request. After a
+    /// `get_request`, a subsequent `fetch_next_request` must still return that
+    /// same request (it was never reserved). Mirrors the deleted crawlee-js
+    /// `get_request does not mark in progress` test.
+    #[tokio::test]
+    async fn test_get_request_does_not_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("peek-me")], false)
+            .await
+            .unwrap();
+
+        // Peek at the request.
+        let peeked = client.get_request("peek-me").await.unwrap().unwrap();
+        assert_eq!(peeked["uniqueKey"], "peek-me");
+
+        // The queue must still consider it fetchable (peeking did not lock it).
+        assert!(
+            !client.is_empty().await,
+            "get_request must not lock the request — the queue is still non-empty/fetchable"
+        );
+
+        // And fetch_next_request must hand back the very same request.
+        let fetched = client.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(fetched["uniqueKey"], "peek-me");
+    }
+
+    /// `persist_state` is documented as a retained no-op (all queue state lives
+    /// in the request files, which are written eagerly on every mutation). This
+    /// pins that contract: calling it changes nothing observable and never errors,
+    /// so the bindings can keep invoking it without surprises.
+    #[tokio::test]
+    async fn test_persist_state_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemRequestQueueClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("a"), req("b")], false)
+            .await
+            .unwrap();
+        // Fetch one (locking it) so there's some non-trivial in-progress state.
+        let _ = client.fetch_next_request().await.unwrap().unwrap();
+
+        let before = client.get_metadata().await;
+
+        // The no-op must not error and must not mutate counts.
+        client.persist_state().await;
+
+        let after = client.get_metadata().await;
+        assert_eq!(before.total_request_count, after.total_request_count);
+        assert_eq!(before.pending_request_count, after.pending_request_count);
+        assert_eq!(before.handled_request_count, after.handled_request_count);
+    }
+
+    /// A mutation must update the on-disk `__metadata__.json` immediately (atomic
+    /// write), not just the in-memory snapshot returned by `get_metadata`. This
+    /// reads the metadata file straight off disk to guard against an atomic-write
+    /// regression and to pin the on-disk count shape. Mirrors the deleted
+    /// crawlee-js / crawlee-python `metadata file updates` tests.
+    #[tokio::test]
+    async fn test_metadata_file_updated_on_disk_after_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let client =
+            FileSystemRequestQueueClient::open(None, Some("q".to_string()), None, temp_dir.path())
+                .await
+                .unwrap();
+
+        client
+            .add_batch_of_requests(vec![req("one")], false)
+            .await
+            .unwrap();
+
+        // Read the metadata file directly from disk (bypassing get_metadata).
+        let read_disk = || {
+            let raw = std::fs::read_to_string(client.metadata_path())
+                .expect("metadata file should exist on disk");
+            serde_json::from_str::<Value>(&raw).expect("metadata file should be valid JSON")
+        };
+
+        let meta = read_disk();
+        assert_eq!(meta["totalRequestCount"], 1);
+        assert_eq!(meta["pendingRequestCount"], 1);
+        assert_eq!(meta["handledRequestCount"], 0);
+
+        // Handle it and confirm the on-disk counts move.
+        let request = client.fetch_next_request().await.unwrap().unwrap();
+        client.mark_request_as_handled(request).await.unwrap();
+
+        let meta = read_disk();
+        assert_eq!(meta["totalRequestCount"], 1);
+        assert_eq!(meta["pendingRequestCount"], 0);
+        assert_eq!(meta["handledRequestCount"], 1);
+    }
 }

@@ -770,4 +770,148 @@ mod tests {
         assert_eq!(bytes, b"value");
         assert_eq!(content_type, "text/plain; charset=utf-8");
     }
+
+    /// A large opaque value must round-trip byte-for-byte through the
+    /// `atomic_write` + FFI byte path without truncation, corruption, or OOM, and
+    /// its `size` must be backfilled to the real length. Mirrors the deleted
+    /// crawlee-js `no-crash-on-big-buffers` test, but pinned at the library level
+    /// where the write path now lives. (1 MiB keeps the test fast; the original
+    /// JS bug was a stack overflow on large buffers, which this byte path avoids
+    /// entirely.)
+    #[tokio::test]
+    async fn test_large_value_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // 1 MiB of non-trivial (non-zero, position-dependent) bytes so a partial
+        // write or off-by-some truncation would be caught.
+        let size = 1024 * 1024;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+        client
+            .set_value("big.bin", &payload, "application/octet-stream".to_string())
+            .await
+            .unwrap();
+
+        let (bytes, content_type, persisted_size) = read_back(&client, "big.bin").await.unwrap();
+        assert_eq!(
+            bytes.len(),
+            size,
+            "round-tripped value must keep its length"
+        );
+        assert_eq!(bytes, payload, "round-tripped value must be byte-identical");
+        assert_eq!(content_type, "application/octet-stream");
+        assert_eq!(
+            persisted_size,
+            Some(size),
+            "size must reflect the real length"
+        );
+    }
+
+    /// Records written to a KVS must survive closing and reopening the same
+    /// on-disk store by name. The dataset and request-queue clients already have
+    /// reopen coverage; this closes the KVS gap. Mirrors the deleted crawlee-js /
+    /// crawlee-python `data persistence across reopens` tests.
+    #[tokio::test]
+    async fn test_reopen_preserves_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        {
+            let client = FileSystemKeyValueStoreClient::open(
+                None,
+                Some("kvs".to_string()),
+                None,
+                storage_dir,
+            )
+            .await
+            .unwrap();
+
+            client
+                .set_value(
+                    "greeting",
+                    b"hello",
+                    "text/plain; charset=utf-8".to_string(),
+                )
+                .await
+                .unwrap();
+            client
+                .set_value("payload", br#"{"x":1}"#, "application/json".to_string())
+                .await
+                .unwrap();
+        }
+
+        // Reopen the same store by name, emulating a fresh process.
+        let reopened =
+            FileSystemKeyValueStoreClient::open(None, Some("kvs".to_string()), None, storage_dir)
+                .await
+                .unwrap();
+
+        let (bytes, content_type, _) = read_back(&reopened, "greeting").await.unwrap();
+        assert_eq!(bytes, b"hello");
+        assert_eq!(content_type, "text/plain; charset=utf-8");
+
+        let (bytes, content_type, _) = read_back(&reopened, "payload").await.unwrap();
+        assert_eq!(bytes, br#"{"x":1}"#);
+        assert_eq!(content_type, "application/json");
+
+        // A key that was never written must still be absent.
+        assert!(reopened.get_value("missing").await.unwrap().is_none());
+    }
+
+    /// `open()` must tolerate the datetime formats that other writers emit in
+    /// `__metadata__.json`: the JS-style `Z` suffix (e.g. `...123Z`) and a
+    /// varying number of fractional-second digits. AGENTS.md lists this as an
+    /// explicit compatibility constraint; this guards the `deserialize_datetime`
+    /// fallbacks against regression.
+    #[tokio::test]
+    async fn test_open_tolerates_z_suffix_and_varying_fractions() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        // Hand-write a metadata file as a JS MemoryStorage writer would: `Z`
+        // suffix, millisecond (3-digit) precision.
+        let kvs_dir = storage_dir.join("key_value_stores").join("legacy-kvs");
+        fs::create_dir_all(&kvs_dir).await.unwrap();
+        let legacy_meta = r#"{
+  "id": "kvsid123",
+  "name": "legacy-kvs",
+  "accessedAt": "2024-01-15T10:30:00.123Z",
+  "createdAt": "2024-01-15T10:30:00Z",
+  "modifiedAt": "2024-01-15T10:30:00.123456+00:00"
+}"#;
+        fs::write(kvs_dir.join(METADATA_FILENAME), legacy_meta)
+            .await
+            .unwrap();
+
+        let client = FileSystemKeyValueStoreClient::open(
+            None,
+            Some("legacy-kvs".to_string()),
+            None,
+            storage_dir,
+        )
+        .await
+        .unwrap();
+
+        let meta = client.get_metadata().await;
+        assert_eq!(meta.base.id, "kvsid123");
+
+        // All three timestamps must parse to the same 2024-01-15T10:30:00 UTC
+        // instant (modulo sub-second precision), proving each format variant was
+        // accepted rather than silently defaulted.
+        use chrono::{TimeZone, Utc};
+        let expected_secs = Utc
+            .with_ymd_and_hms(2024, 1, 15, 10, 30, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(meta.base.created_at.timestamp(), expected_secs);
+        assert_eq!(meta.base.accessed_at.timestamp(), expected_secs);
+        assert_eq!(meta.base.modified_at.timestamp(), expected_secs);
+        // The `.123Z` fractional part must survive too.
+        assert_eq!(meta.base.accessed_at.timestamp_subsec_millis(), 123);
+    }
 }
