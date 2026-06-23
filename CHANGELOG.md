@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - Fake clock support for testing ([#41](https://github.com/apify/crawlee-storage/pull/41)) ([0b9a28f](https://github.com/apify/crawlee-storage/commit/0b9a28ffd3df21a92ade9a6e597a9aeac2e2a4bf)) by [@janbuchar](https://github.com/janbuchar)
+- Return native Date from JS bindings ([#49](https://github.com/apify/crawlee-storage/pull/49)) ([6c66ebf](https://github.com/apify/crawlee-storage/commit/6c66ebf4623f622f4f96d76543fa9524afbcbce9)) by [@janbuchar](https://github.com/janbuchar)
 
 ### 🐛 Bug Fixes
 
