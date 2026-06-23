@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
+use crawlee_storage::models;
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
 };
@@ -142,13 +144,60 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
     }
 }
 
-/// Convert a serde_json metadata struct to a Python dict.
-/// Keys are camelCase (matching the on-disk format). The Python Pydantic models
-/// accept both camelCase aliases and snake_case field names via
-/// `validate_by_name=True, validate_by_alias=True`.
-fn metadata_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyAny>> {
+/// Convert a serde-serializable struct to a Python dict.
+///
+/// Used for response payloads that contain no datetime fields
+/// (`DatasetItemsListPage`, `ProcessedRequest`, `AddRequestsResponse`,
+/// `KeyValueStoreRecordMetadata`). Datetimes wouldn't survive this route as
+/// `datetime.datetime` — they'd come out as ISO strings — so the metadata
+/// types use the dedicated builders below.
+///
+/// Keys are camelCase (matching the on-disk format).
+fn serde_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyAny>> {
     let val = serde_json::to_value(meta).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     value_to_py(py, &val)
+}
+
+/// Set the three shared base-metadata fields on a Python dict: `id`, `name`,
+/// `accessedAt`, `createdAt`, `modifiedAt`. The datetime fields cross the FFI
+/// as native `datetime.datetime` (timezone-aware UTC) thanks to PyO3's
+/// `chrono` feature.
+fn set_base_metadata_fields(
+    dict: &Bound<'_, PyDict>,
+    base: &models::StorageMetadata,
+) -> PyResult<()> {
+    dict.set_item("id", &base.id)?;
+    dict.set_item("name", &base.name)?;
+    dict.set_item("accessedAt", base.accessed_at)?;
+    dict.set_item("createdAt", base.created_at)?;
+    dict.set_item("modifiedAt", base.modified_at)?;
+    Ok(())
+}
+
+fn dataset_metadata_to_py(py: Python<'_>, meta: &models::DatasetMetadata) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    let dict = PyDict::new(py);
+    set_base_metadata_fields(&dict, &meta.base)?;
+    dict.set_item("itemCount", meta.item_count)?;
+    Ok(dict.into_pyobject(py)?.into_any().unbind())
+}
+
+fn kvs_metadata_to_py(py: Python<'_>, meta: &models::KeyValueStoreMetadata) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    let dict = PyDict::new(py);
+    set_base_metadata_fields(&dict, &meta.base)?;
+    Ok(dict.into_pyobject(py)?.into_any().unbind())
+}
+
+fn rq_metadata_to_py(py: Python<'_>, meta: &models::RequestQueueMetadata) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    let dict = PyDict::new(py);
+    set_base_metadata_fields(&dict, &meta.base)?;
+    dict.set_item("hadMultipleClients", meta.had_multiple_clients)?;
+    dict.set_item("handledRequestCount", meta.handled_request_count)?;
+    dict.set_item("pendingRequestCount", meta.pending_request_count)?;
+    dict.set_item("totalRequestCount", meta.total_request_count)?;
+    Ok(dict.into_pyobject(py)?.into_any().unbind())
 }
 
 /// Convert a KVS file record (raw bytes) to a Python dict with `bytes` value.
@@ -289,7 +338,7 @@ impl KvsKeyIterator {
             if st.buf_index < st.buffer.len() {
                 let meta = st.buffer[st.buf_index].clone();
                 st.buf_index += 1;
-                return Python::attach(|py| metadata_to_py(py, &meta));
+                return Python::attach(|py| serde_to_py(py, &meta));
             }
 
             // If we've exhausted everything, signal StopAsyncIteration.
@@ -327,7 +376,7 @@ impl KvsKeyIterator {
             st.buffer = page.items;
             st.buf_index = 1;
             let meta = st.buffer[0].clone();
-            Python::attach(|py| metadata_to_py(py, &meta))
+            Python::attach(|py| serde_to_py(py, &meta))
         })
     }
 }
@@ -374,12 +423,11 @@ impl FileSystemDatasetClient {
         })
     }
 
-    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
-    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
-    /// otherwise.
+    /// Advance the client's clock by ``duration``. Only usable when the client
+    /// was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
     #[gen_stub(override_return_type(type_repr = "None"))]
-    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, millis)
+    fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, duration.num_milliseconds())
     }
 
     /// Path to the dataset directory.
@@ -399,7 +447,7 @@ impl FileSystemDatasetClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| metadata_to_py(py, &meta))
+            Python::attach(|py| dataset_metadata_to_py(py, &meta))
         })
     }
 
@@ -451,7 +499,7 @@ impl FileSystemDatasetClient {
                 .get_data(offset, limit, desc, skip_empty)
                 .await
                 .map_err(storage_err)?;
-            Python::attach(|py| metadata_to_py(py, &page))
+            Python::attach(|py| serde_to_py(py, &page))
         })
     }
 
@@ -523,12 +571,11 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
-    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
-    /// otherwise.
+    /// Advance the client's clock by ``duration``. Only usable when the client
+    /// was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
     #[gen_stub(override_return_type(type_repr = "None"))]
-    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, millis)
+    fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, duration.num_milliseconds())
     }
 
     /// Path to the key-value store directory.
@@ -548,7 +595,7 @@ impl FileSystemKeyValueStoreClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| metadata_to_py(py, &meta))
+            Python::attach(|py| kvs_metadata_to_py(py, &meta))
         })
     }
 
@@ -570,7 +617,7 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[KeyValueStoreRecord]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -723,17 +770,16 @@ impl FileSystemRequestQueueClient {
         })
     }
 
-    /// Advance the client's clock by ``millis`` milliseconds. Only usable when
-    /// the client was opened with ``use_test_clock=True``; raises ``ValueError``
-    /// otherwise.
+    /// Advance the client's clock by ``duration``. Only usable when the client
+    /// was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
     ///
     /// This is the hook that lets Python tests using ``freezegun`` or
     /// similar frameworks exercise lock-expiry behavior — frozen Python
     /// clocks don't reach into native code, so the test must drive the
     /// Rust-side clock explicitly via this method.
     #[gen_stub(override_return_type(type_repr = "None"))]
-    fn advance_clock_for_testing(&self, millis: i64) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, millis)
+    fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
+        advance_test_clock(&self.test_clock, duration.num_milliseconds())
     }
 
     /// Path to the request queue directory.
@@ -753,7 +799,7 @@ impl FileSystemRequestQueueClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| metadata_to_py(py, &meta))
+            Python::attach(|py| rq_metadata_to_py(py, &meta))
         })
     }
 
@@ -793,11 +839,11 @@ impl FileSystemRequestQueueClient {
                 .add_batch_of_requests(req_values, forefront)
                 .await
                 .map_err(storage_err)?;
-            Python::attach(|py| metadata_to_py(py, &response))
+            Python::attach(|py| serde_to_py(py, &response))
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any] | None"))]
     fn get_request<'py>(
         &self,
         py: Python<'py>,
@@ -813,7 +859,7 @@ impl FileSystemRequestQueueClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[dict[str, typing.Any]]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any] | None"))]
     fn fetch_next_request<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -825,7 +871,7 @@ impl FileSystemRequestQueueClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[ProcessedRequest]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "ProcessedRequest | None"))]
     fn mark_request_as_handled<'py>(
         &self,
         py: Python<'py>,
@@ -839,14 +885,14 @@ impl FileSystemRequestQueueClient {
                 .await
                 .map_err(storage_err)?;
             Python::attach(|py| match result {
-                Some(r) => metadata_to_py(py, &r),
+                Some(r) => serde_to_py(py, &r),
                 None => Ok(py.None()),
             })
         })
     }
 
     #[pyo3(signature = (request, forefront=false))]
-    #[gen_stub(override_return_type(type_repr = "typing.Optional[ProcessedRequest]", imports = ("typing")))]
+    #[gen_stub(override_return_type(type_repr = "ProcessedRequest | None"))]
     fn reclaim_request<'py>(
         &self,
         py: Python<'py>,
@@ -861,7 +907,7 @@ impl FileSystemRequestQueueClient {
                 .await
                 .map_err(storage_err)?;
             Python::attach(|py| match result {
-                Some(r) => metadata_to_py(py, &r),
+                Some(r) => serde_to_py(py, &r),
                 None => Ok(py.None()),
             })
         })
@@ -886,8 +932,14 @@ impl FileSystemRequestQueueClient {
     fn set_expected_request_processing_time<'py>(
         &self,
         py: Python<'py>,
-        secs: f64,
+        duration: Duration,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        // Convert to fractional seconds. `num_microseconds` returns Some unless
+        // the duration overflows ~292,000 years — fall back to ms if it does.
+        let secs = duration
+            .num_microseconds()
+            .map(|us| us as f64 / 1_000_000.0)
+            .unwrap_or_else(|| duration.num_milliseconds() as f64 / 1_000.0);
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client.set_expected_request_processing_time(secs).await;

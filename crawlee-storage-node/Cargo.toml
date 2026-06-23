@@ -13,6 +13,7 @@ chrono = "0.4"
 crawlee-storage = { path = "../crawlee-storage" }
 napi = { version = "3", default-features = false, features = [
     "async",
+    "chrono_date",
     "serde-json",
     "napi4",
     "napi5",

@@ -29,11 +29,22 @@ cargo test -p crawlee-storage -- test_name
 # Run tests with output shown
 cargo test -p crawlee-storage -- --nocapture
 
-# Build Python bindings (requires maturin)
-cd crawlee-storage-python && maturin develop --release
+# Build Python bindings (requires maturin; in the venv)
+cd crawlee-storage-python && uv sync && uv run maturin develop --release
 
 # Build Python bindings in debug mode (faster compile)
-cd crawlee-storage-python && maturin develop
+cd crawlee-storage-python && uv run maturin develop
+
+# Regenerate Python type stubs (.pyi). Run after changing any binding signature
+# or any FIELD_OVERRIDES entry in src/bin/stub_gen.rs. The post-processor also
+# requires `ruff` on PATH to keep stub formatting stable across regenerations.
+cd crawlee-storage-python && cargo run --bin stub_gen
+
+# Run Python tests
+cd crawlee-storage-python && uv run pytest
+
+# Lint / format Python
+cd crawlee-storage-python && uvx ruff check && uvx ruff format --check
 
 # Build Node.js bindings (requires @napi-rs/cli)
 cd crawlee-storage-node && npm install && npm run build
@@ -75,16 +86,27 @@ crawlee-storage/              Core Rust library (no FFI dependencies)
 │   └── request_queue.rs      FileSystemRequestQueueClient
 
 crawlee-storage-python/       PyO3/maturin Python bindings
-├── src/lib.rs                PyO3 module and wrapper classes
-├── python/crawlee_storage/   Pure Python package (re-exports from native module)
-└── pyproject.toml            maturin build config
+├── src/
+│   ├── lib.rs                PyO3 module and wrapper classes
+│   └── bin/stub_gen.rs       Generates and post-processes `.pyi` type stubs
+├── python/crawlee_storage/
+│   ├── __init__.py           Re-exports from the native module
+│   ├── __init__.pyi          Top-level type stubs (auto-generated)
+│   └── _native/__init__.pyi  Stubs for the compiled native module (auto-generated)
+├── tests/                    Pytest suite (pytest-asyncio)
+├── pyproject.toml            maturin build + ruff + pytest config
+└── uv.lock                   uv-managed dev environment
 
 crawlee-storage-node/         napi-rs Node.js bindings
-├── src/lib.rs                napi-rs module (napi v3)
+├── src/
+│   ├── lib.rs                napi-rs module (napi v3)
+│   └── models.rs             #[napi(object)] mirror structs for metadata
 ├── build.rs                  napi-build setup
-├── dts-header.d.ts           Custom TypeScript interfaces (prepended to auto-generated index.d.ts)
+├── dts-header.d.ts           Hand-written TypeScript interfaces prepended to index.d.ts
 ├── index.js                  Auto-generated native module loader (by napi-rs CLI)
 ├── index.d.ts                Auto-generated TypeScript declarations (by napi-rs CLI)
+├── lib.js                    Thin JS wrapper layer (iterator + KVS-streaming helpers)
+├── lib.d.ts                  TypeScript declarations for lib.js
 ├── .oxlintrc.json            Oxlint config (type-aware linting)
 ├── .oxfmtrc.json             Oxfmt config (formatting)
 ├── tsconfig.json             TypeScript config (for test compilation)
@@ -108,9 +130,9 @@ Callers that *know* nothing else is using the on-disk queue (the typical single-
 
 Tests that need to drive lock expiry without real sleeps should use a `TestClock` (see [clock injection](#clock-injection-for-testing)).
 
-**Clock injection for testing**: Every client takes an optional `Arc<dyn Clock>` (see `crawlee-storage/src/clock.rs`). The default is `SystemClock` (wraps `Utc::now`). `TestClock` carries a settable `AtomicI64` offset, advanceable via `.advance(millis)`. The bindings expose this as `useTestClock: true` on `open()` plus an `advanceClockForTesting(millis)` method on each client — necessary because JS fake timers (`vi.useFakeTimers()`) and Python equivalents don't reach into native code, so the Rust-side clock has to be driven explicitly.
+**Clock injection for testing**: Every client takes an optional `Arc<dyn Clock>` (see `crawlee-storage/src/clock.rs`). The default is `SystemClock` (wraps `Utc::now`). `TestClock` carries a settable `AtomicI64` offset, advanceable via `.advance(millis)`. The bindings expose this as `useTestClock: true` on `open()` plus an `advanceClockForTesting` method on each client — Node takes a `number` of milliseconds, Python takes a `datetime.timedelta`. The hook is necessary because JS fake timers (`vi.useFakeTimers()`) and Python equivalents don't reach into native code, so the Rust-side clock has to be driven explicitly.
 
-**KVS value model**: KVS record values use the `KvsValue` enum (`None`, `Json(Value)`, `Text(String)`, `Binary(Vec<u8>)`) instead of `serde_json::Value`. This avoids base64-encoding binary data at the core level — each binding layer converts `KvsValue` variants directly to native types (e.g. `Binary` → Python `bytes`, Node.js `Buffer`).
+**KVS value model**: KVS record values are opaque raw byte sequences (`&[u8]`) on the way in and on the way out. The core never parses or serializes record contents — it persists exactly the bytes it's given alongside a `contentType` sidecar. Each binding exposes these as the language's native byte container (Python `bytes`, Node.js `Buffer`); callers handle (de)serialization themselves.
 
 ### Filesystem Layout
 
@@ -136,7 +158,7 @@ Tests that need to drive lock expiry without real sleeps should use a `TestClock
 These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on-disk format:
 
 - **JSON formatting**: Pretty-printed, 2-space indent, non-ASCII preserved (`ensure_ascii=False` equivalent). Use `serde_json::ser::PrettyFormatter::with_indent(b"  ")`.
-- **Metadata field names**: camelCase in JSON (e.g., `itemCount`, `accessedAt`, `contentType`), matching JS conventions. Rust struct fields stay snake_case with `#[serde(rename_all = "camelCase")]`. All multi-word fields also have `#[serde(alias = "snake_case")]` so legacy files written by the old Python `FileSystemStorageClient` can still be loaded.
+- **Metadata field names**: camelCase in JSON (e.g., `itemCount`, `accessedAt`, `contentType`), matching JS conventions. Rust struct fields stay snake_case with per-field `#[serde(rename = "camelCase")]` annotations. Multi-word fields also carry `#[serde(alias = "snake_case")]` so legacy files written by the old Python `FileSystemStorageClient` can still be loaded.
 - **Datetime format**: Written as `2024-01-15T10:30:00.123456+00:00` — 6 fractional digits (microsecond precision), `+00:00` suffix for UTC. Deserialization also accepts JS-style `Z` suffix (e.g., `2024-01-15T10:30:00.123Z`).
 - **Directory names**: snake_case (`datasets`, `key_value_stores`, `request_queues`) — unchanged, matching both JS and Python.
 - **KVS key encoding**: `percent_encoding::utf8_percent_encode(key, NON_ALPHANUMERIC)` — equivalent to Python's `urllib.parse.quote(key, safe='')`.
@@ -144,28 +166,34 @@ These must be preserved for compatibility with the JS Crawlee `MemoryStorage` on
 - **Atomic writes**: Write to temp file in same directory, then `rename()`.
 - **`application/x-none` sentinel**: KVS uses this custom MIME type for `None`/null values (empty file on disk).
 - **`serde_json` `preserve_order` feature**: Enabled to maintain JSON key insertion order (matching Python dict ordering).
-- **Python bindings return camelCase**: The Python bindings pass camelCase dicts directly to Python. The Pydantic models in crawlee-python accept both camelCase (via alias) and snake_case (via field name) thanks to `validate_by_name=True, validate_by_alias=True`.
+- **Binding boundary translation**: Both bindings hand callers **camelCase keys** (matching the on-disk JSON), but datetime fields are converted to language-native types at the FFI boundary. The Node binding returns `Date`; the Python binding returns timezone-aware `datetime.datetime` (UTC). The Python bindings' callers may still pass dicts to Pydantic models that accept both camelCase aliases and snake_case field names via `validate_by_name=True, validate_by_alias=True`.
 
 ### Python Bindings
 
-- Uses **PyO3 0.28** with **pyo3-async-runtimes** (tokio feature) for native Python coroutines.
+- Uses **PyO3 0.28** with **pyo3-async-runtimes** (tokio feature) for native Python coroutines. The `pyo3` `chrono` feature is enabled so `chrono::DateTime<Utc>` ↔ tz-aware `datetime.datetime` and `chrono::Duration` ↔ `datetime.timedelta` cross the FFI as native Python types.
 - Each Rust client is wrapped in `Arc` so it can be cloned into async blocks (standard pattern for pyo3 async methods).
-- JSON data crosses the FFI boundary as Python dicts/lists, converted to/from `serde_json::Value` via `value_to_py` / `py_to_value` helper functions.
-- KVS values are `bytes`-only in the Python bindings. `setValue` accepts `bytes` (PyO3 `Vec<u8>`) directly, and `getValue` returns raw file bytes as Python `bytes`. The caller is responsible for serialization/deserialization.
+- JSON request bodies and dataset items cross the FFI as Python dicts/lists, converted to/from `serde_json::Value` via `value_to_py` / `py_to_value` helper functions. Non-date payloads (`DatasetItemsListPage`, `ProcessedRequest`, `AddRequestsResponse`, `KeyValueStoreRecordMetadata`) go through `serde_to_py` (i.e. via `serde_json::Value`).
+- **Metadata is built directly, not via serde**: `dataset_metadata_to_py`, `kvs_metadata_to_py`, and `rq_metadata_to_py` construct the result dict field-by-field so the datetime fields (`accessedAt`, `createdAt`, `modifiedAt`) cross the FFI as native `datetime.datetime`. They share `set_base_metadata_fields` for the common base fields.
+- `set_expected_request_processing_time` takes `chrono::Duration` (i.e. `datetime.timedelta`) — passing a number raises `TypeError`. The corresponding Node API still uses `number` of seconds since JS has no built-in duration type.
+- KVS values are `bytes`-only in the Python bindings. `set_value` accepts `bytes` (PyO3 `Vec<u8>`) directly, and `get_value` returns raw file bytes as Python `bytes`. The caller is responsible for serialization/deserialization.
 - The compiled native module is `crawlee_storage._native`, re-exported by `crawlee_storage/__init__.py`.
+- **Type stubs** (`.pyi`) are generated by `cargo run --bin stub_gen` (see `src/bin/stub_gen.rs`). The generator post-processes the output of `pyo3-stub-gen` to: (a) emit `TypedDict` definitions for response payloads (which `pyo3-stub-gen` can't infer from `serde_json::Value`), (b) re-mark `future_into_py`-based methods as `async def`, (c) rewrite all `typing.Optional[X]` to PEP 604 `X | None`, and (d) inject `import datetime` if the TypedDicts need it. Per-field type overrides live in `FIELD_OVERRIDES` — extend it for new `Option<T>` fields whose dummies serialize to `null`, or for fields whose serialized type doesn't match the FFI type (e.g. datetimes).
+- Tests live in `tests/`, use `pytest-asyncio` (`asyncio_mode = "auto"`), and run via `uv run pytest`.
 
 ### Node.js Bindings
 
-- Uses **napi-rs v3** (`napi = "3"`, `napi-derive = "3"`) with `async`, `serde-json`, `napi4`, `napi5`, `web_stream`, and `tokio_rt` features.
+- Uses **napi-rs v3** (`napi = "3"`, `napi-derive = "3"`) with `async`, `chrono_date`, `serde-json`, `napi4`, `napi5`, `web_stream`, and `tokio_rt` features. The `chrono_date` feature makes `chrono::DateTime<Utc>` cross the FFI as a native JS `Date`.
 - `build.rs` calls `napi_build::setup()` — standard napi-rs build script.
 - `index.js` and `index.d.ts` are **auto-generated** by `napi build` (via `@napi-rs/cli`). Do not edit them manually.
-- `dts-header.d.ts` contains hand-written TypeScript interfaces (`DatasetMetadata`, `KeyValueStoreRecord`, etc.) that are prepended to the auto-generated `index.d.ts`. This is configured via `"dtsHeaderFile"` in `package.json`'s `napi` section.
-- `#[napi(ts_return_type = "...")]` and `#[napi(ts_args_type = "...")]` annotations on Rust methods override auto-generated types to reference the header interfaces instead of `any`.
-- **camelCase convention**: The core Rust library serializes with snake_case (for Python compatibility). The Node binding layer converts all object keys from snake_case to camelCase via `to_camel_case_keys()` before returning to JS. The `dts-header.d.ts` interfaces use camelCase field names accordingly.
+- `dts-header.d.ts` contains hand-written TypeScript interfaces (`DatasetItemsListPage`, `KeyValueStoreRecord`, `ProcessedRequest`, etc.) prepended to `index.d.ts` via `"dtsHeaderFile"` in `package.json`'s `napi` section. Note that the metadata interfaces (`DatasetMetadata`, `KeyValueStoreMetadata`, `RequestQueueMetadata`) are **not** in the header — they're auto-generated from `#[napi(object, use_nullable = true)]` mirror structs in `src/models.rs`.
+- **Metadata mirror structs**: `src/models.rs` defines `#[napi(object)]` structs that mirror the core library's metadata types but with `chrono::DateTime<Utc>` fields and `From<&core::Type>` impls. The three `get_metadata` methods return these typed structs, so napi-rs auto-generates honest TypeScript interfaces (`accessedAt: Date`, etc.) — no `dts-header` overrides needed. `use_nullable = true` keeps `Option<T>` serializing to `T | null` rather than `T | undefined`.
+- `#[napi(ts_return_type = "...")]` and `#[napi(ts_args_type = "...")]` annotations override auto-generated types where the binding still hands back `serde_json::Value` (request payloads, dataset items, response wrappers); these reference the header interfaces.
+- **camelCase convention**: napi-rs auto-camelCases `snake_case` field names on `#[napi(object)]` structs when generating the d.ts and the JS object keys. The core Rust library uses per-field `#[serde(rename = "camelCase")]` so on-disk JSON also matches.
 - Each Rust client is wrapped in `Arc` so it can be cloned into async blocks.
-- JSON data crosses the FFI boundary as `serde_json::Value` ↔ JS objects (via napi's `serde-json` feature).
-- KVS values are `Buffer`-only in the Node bindings. `setValue` accepts `napi::bindgen_prelude::Buffer` directly, and `getValue` returns raw file bytes as a JSON array that the JS wrapper in `lib.js` converts to a `Buffer` before returning to the caller.
+- Non-metadata JSON data crosses the FFI as `serde_json::Value` ↔ JS objects (via napi's `serde-json` feature).
+- KVS values are `Buffer`-only in the Node bindings. `setValue` accepts `napi::bindgen_prelude::Buffer` directly. `getValue` currently returns the bytes as a JSON array of numbers (built in Rust), and the thin JS wrapper in `lib.js` re-wraps it as a `Buffer` before returning to the caller.
 - KVS streaming is supported: `getValueStream` returns a Web `ReadableStream<Uint8Array>` (created via `fs.createReadStream` + `Readable.toWeb` in the JS wrapper), and `setValueStream` pipes a `ReadableStream` directly to a temp file on disk (via `Writable.toWeb`), then calls a Rust method to atomically finalize it. No in-memory buffering.
+- `lib.js` is the canonical entry point — it imports everything from `./index.js`, attaches `Symbol.asyncIterator` to the iterator classes, wraps `getValue` to convert the byte-array to `Buffer`, and adds `getValueStream`/`setValueStream`. `package.json` `"main"` points at `lib.js`.
 - Tests are TypeScript (`.test.ts`) using Vitest, importing directly from `../index.js`.
 - Linting uses `oxlint` with type-aware rules (via `tsgolint`). Formatting uses `oxfmt`.
 
@@ -190,12 +218,16 @@ Core library (`crawlee-storage`):
 - `rand` — random ID generation
 
 Python bindings (`crawlee-storage-python`):
-- `pyo3` — Python FFI
+- `pyo3` (with `chrono` feature) — Python FFI plus `DateTime`/`Duration` ↔ `datetime` bridging
 - `pyo3-async-runtimes` — native async Python coroutines via tokio
+- `pyo3-stub-gen` — `.pyi` stub generation (driven by `src/bin/stub_gen.rs`)
+- `chrono` — datetime / duration types crossing the FFI
+- `pytest` + `pytest-asyncio` (dev) — test suite
 
 Node.js bindings (`crawlee-storage-node`):
-- `napi` / `napi-derive` — Node.js FFI
+- `napi` / `napi-derive` (with `chrono_date` feature) — Node.js FFI plus `DateTime<Utc>` → JS `Date`
 - `napi-build` — build script for napi-rs
+- `chrono` — datetime types crossing the FFI
 - `oxlint` / `oxlint-tsgolint` — linting (with type-aware rules)
 - `oxfmt` — formatting
 - `vitest` — test framework

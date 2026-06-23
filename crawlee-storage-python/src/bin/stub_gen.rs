@@ -65,11 +65,11 @@ fn json_value_to_py_type(
         }
         Value::String(_) => "builtins.str".to_string(),
         Value::Null => {
-            // A null value with `optional` means `Optional[???]`. Since we don't know
-            // the inner type from null alone, we use `typing.Any` for pure-null fields.
-            // But in practice, optional fields have `#[serde(default)]` and we handle
-            // them via the `optional` flag from the caller.
-            return "typing.Optional[typing.Any]".to_string();
+            // A null value with `optional` means `T | None`. Since we don't know
+            // the inner type from null alone, we fall back to `typing.Any`.
+            // In practice, fields where we do know `T` are covered by
+            // `FIELD_OVERRIDES` below.
+            return "typing.Any | None".to_string();
         }
         Value::Array(arr) => {
             if let Some(first) = arr.first() {
@@ -92,40 +92,45 @@ fn json_value_to_py_type(
     };
 
     if optional {
-        format!("typing.Optional[{base}]")
+        format!("{base} | None")
     } else {
         base
     }
 }
 
-/// Fields whose serialized value is `null` for a dummy instance but should be typed as
-/// `Optional[T]` rather than bare `None`. Maps `(struct_name, field_name)` → Python type.
+/// Per-field type overrides used when the dummy-instance JSON serialization
+/// doesn't carry enough information to derive the right Python type. Maps
+/// `(struct_name, field_name)` → Python type annotation.
 ///
-/// This is needed because serde serializes `Option::None` as JSON `null`, and we can't
-/// recover the inner type from that alone. We only need overrides for `Option<T>` fields
-/// where `T` is not `Any`.
-const OPTIONAL_OVERRIDES: &[(&str, &str, &str)] = &[
-    ("DatasetMetadata", "name", "typing.Optional[builtins.str]"),
-    (
-        "KeyValueStoreMetadata",
-        "name",
-        "typing.Optional[builtins.str]",
-    ),
-    (
-        "RequestQueueMetadata",
-        "name",
-        "typing.Optional[builtins.str]",
-    ),
-    (
-        "KeyValueStoreRecordMetadata",
-        "size",
-        "typing.Optional[builtins.int]",
-    ),
-    (
-        "UnprocessedRequest",
-        "method",
-        "typing.Optional[builtins.str]",
-    ),
+/// Two situations need overrides:
+///
+/// 1. **`Option<T>` fields**: serde renders `None` as JSON `null`, which loses
+///    the inner type `T`. The auto-deriver can only produce `Any | None` for
+///    these — list them here to recover `T`.
+///
+/// 2. **`DateTime<Utc>` fields**: the core library serializes datetimes as
+///    ISO-8601 strings (the on-disk format), but the binding layer converts
+///    them to native `datetime.datetime` via PyO3's `chrono` feature
+///    (see `set_base_metadata_fields` in `src/lib.rs`). So the dummy looks
+///    like a string but the real value is a `datetime`.
+const FIELD_OVERRIDES: &[(&str, &str, &str)] = &[
+    // Option<String> fields whose dummy serializes to `null`.
+    ("DatasetMetadata", "name", "builtins.str | None"),
+    ("KeyValueStoreMetadata", "name", "builtins.str | None"),
+    ("RequestQueueMetadata", "name", "builtins.str | None"),
+    ("KeyValueStoreRecordMetadata", "size", "builtins.int | None"),
+    ("UnprocessedRequest", "method", "builtins.str | None"),
+    // Datetime fields: ISO strings on disk, but the binding layer hands Python
+    // native tz-aware `datetime.datetime`s.
+    ("DatasetMetadata", "accessedAt", "datetime.datetime"),
+    ("DatasetMetadata", "createdAt", "datetime.datetime"),
+    ("DatasetMetadata", "modifiedAt", "datetime.datetime"),
+    ("KeyValueStoreMetadata", "accessedAt", "datetime.datetime"),
+    ("KeyValueStoreMetadata", "createdAt", "datetime.datetime"),
+    ("KeyValueStoreMetadata", "modifiedAt", "datetime.datetime"),
+    ("RequestQueueMetadata", "accessedAt", "datetime.datetime"),
+    ("RequestQueueMetadata", "createdAt", "datetime.datetime"),
+    ("RequestQueueMetadata", "modifiedAt", "datetime.datetime"),
 ];
 
 /// Build a `TypedDictDef` by serializing a dummy instance of `T` and inspecting the JSON keys.
@@ -141,7 +146,7 @@ fn typed_dict_from_serde<T: Serialize>(
         .iter()
         .map(|(key, val)| {
             // Check for explicit override first.
-            let py_type = OPTIONAL_OVERRIDES
+            let py_type = FIELD_OVERRIDES
                 .iter()
                 .find(|(s, f, _)| *s == class_name && *f == key)
                 .map(|(_, _, ty)| (*ty).to_string())
@@ -244,7 +249,7 @@ fn generate_typed_dicts() -> String {
                 },
                 TypedDictField {
                     name: "size".into(),
-                    py_type: "typing.Optional[builtins.int]".into(),
+                    py_type: "builtins.int | None".into(),
                 },
                 TypedDictField {
                     name: "value".into(),
@@ -286,10 +291,58 @@ fn typed_dict_names() -> Vec<&'static str> {
 
 // ─── Stub file post-processing ──────────────────────────────────────────────
 
+/// Rewrite `typing.Optional[X]` → `X | None` (PEP 604) in a single line.
+/// Handles nested brackets correctly. Conservative: only rewrites
+/// `typing.Optional[...]`, ignores bare `Optional[...]`.
+fn rewrite_optional_to_pep604(line: &str) -> String {
+    const NEEDLE: &str = "typing.Optional[";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(idx) = rest.find(NEEDLE) {
+        out.push_str(&rest[..idx]);
+        let after_open = &rest[idx + NEEDLE.len()..];
+        // Walk the inner contents, tracking bracket depth, to find the matching `]`.
+        let mut depth = 1usize;
+        let mut end = None;
+        for (i, c) in after_open.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(end_idx) => {
+                let inner = &after_open[..end_idx];
+                // Recursively rewrite inner (could contain more Optionals).
+                let inner_rewritten = rewrite_optional_to_pep604(inner);
+                out.push_str(&inner_rewritten);
+                out.push_str(" | None");
+                rest = &after_open[end_idx + 1..];
+            }
+            None => {
+                // Malformed — bail out, keep the rest as-is.
+                out.push_str(&rest[idx..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Post-process a generated `.pyi` stub file:
 /// 1. Inject `TypedDict` definitions after the imports.
 /// 2. Append TypedDict names to `__all__`.
 /// 3. Mark methods as `async def` where appropriate.
+/// 4. Ensure `import datetime` is present (TypedDicts reference it).
+/// 5. Rewrite `typing.Optional[X]` → `X | None` (PEP 604).
 ///
 /// pyo3_stub_gen cannot detect async methods that use
 /// `pyo3_async_runtimes::tokio::future_into_py` (they appear as sync `fn` in Rust),
@@ -301,11 +354,26 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
     let lines: Vec<&str> = content.lines().collect();
     let names = typed_dict_names();
 
+    // Ensure `import datetime` is present — the metadata TypedDicts reference
+    // `datetime.datetime`. pyo3_stub_gen only adds it when a method signature
+    // references it directly, so if `set_expected_request_processing_time`
+    // ever loses its timedelta arg, we'd still need it for the TypedDicts.
+    let has_datetime_import = lines.iter().any(|l| l.trim() == "import datetime");
+
     // Find the insertion point: after imports and __all__, before the first class.
     let insert_before = lines
         .iter()
         .position(|line| line.starts_with("@typing.final") || line.starts_with("class "))
         .unwrap_or(lines.len());
+
+    // Find the last `import` line — that's where we'll splice in `import datetime`
+    // if it's missing.
+    let last_import_idx = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("import ") || l.starts_with("from "))
+        .map(|(i, _)| i)
+        .next_back();
 
     // Track whether we're inside the __all__ block so we can append TypedDict names.
     let mut in_all_block = false;
@@ -329,6 +397,7 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         }
 
         let trimmed = line.trim_start();
+        let rewritten = rewrite_optional_to_pep604(line);
 
         if let Some(after_def) = trimmed.strip_prefix("def ") {
             // Extract method name: "foo(" -> "foo"
@@ -345,43 +414,81 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
                 || (is_dunder && !ASYNC_DUNDERS.contains(&method_name))
                 || is_property;
 
+            // We also need to strip "Optional" from the trimmed line to find
+            // method name, but it's been done already above.
+            let rewritten_trimmed = rewritten.trim_start();
+            let rewritten_after_def = rewritten_trimmed.strip_prefix("def ").unwrap_or(after_def);
+
             if !is_sync {
                 // Replace "def " with "async def " preserving indentation
-                let indent = &line[..line.len() - trimmed.len()];
+                let indent = &rewritten[..rewritten.len() - rewritten_trimmed.len()];
                 output.push_str(indent);
                 output.push_str("async def ");
-                output.push_str(after_def);
+                output.push_str(rewritten_after_def);
                 output.push('\n');
                 continue;
             }
         }
 
-        output.push_str(line);
+        output.push_str(&rewritten);
         output.push('\n');
+
+        // After the last existing import, splice in `import datetime` if missing.
+        if !has_datetime_import && last_import_idx == Some(i) {
+            output.push_str("import datetime\n");
+        }
     }
 
     std::fs::write(path, output)?;
     Ok(())
 }
 
-/// Run `ruff format` over the generated stub files so they match the project's
-/// formatting conventions (line-length, signature wrapping, etc.).
+/// Run `ruff format` (and `ruff check --fix --select I` for import ordering)
+/// over the generated stub files so they match the project's formatting
+/// conventions (line-length, signature wrapping, sorted imports, etc.).
 ///
-/// The generator emits unformatted output (collapsed single-line signatures), so
-/// without this step every regeneration produces noisy cosmetic diffs.
+/// The generator emits unformatted output (collapsed single-line signatures
+/// and the occasional unsorted import block), so without these steps every
+/// regeneration produces noisy cosmetic diffs and `ruff check` then trips on
+/// the result during CI.
 ///
-/// This is best-effort: if `ruff` is not on `PATH` we emit a warning rather than
-/// failing the whole generation, since the stubs are otherwise valid.
+/// Both steps are best-effort: if `ruff` is not on `PATH` we emit a warning
+/// rather than failing the whole generation, since the stubs are otherwise
+/// valid.
 fn format_stubs(paths: &[&std::path::Path]) {
     let existing: Vec<&std::path::Path> = paths.iter().copied().filter(|p| p.exists()).collect();
     if existing.is_empty() {
         return;
     }
 
-    let mut cmd = std::process::Command::new("ruff");
-    cmd.arg("format").args(&existing);
+    // 1. Sort/fix imports first — `ruff check --fix --select I` rearranges them
+    //    without touching anything else.
+    let mut sort_imports = std::process::Command::new("ruff");
+    sort_imports
+        .arg("check")
+        .arg("--fix")
+        .arg("--select")
+        .arg("I")
+        .args(&existing);
+    match sort_imports.status() {
+        Ok(status) if status.success() => {
+            eprintln!("Sorted imports in stubs with `ruff check --fix --select I`");
+        }
+        Ok(status) => {
+            eprintln!("Warning: `ruff check --fix` exited with status {status}");
+        }
+        Err(err) => {
+            eprintln!("Warning: could not run `ruff check --fix` ({err}); imports left unsorted");
+            return;
+        }
+    }
 
-    match cmd.status() {
+    // 2. Then format. Doing it in this order avoids `ruff format` collapsing
+    //    blank separators between import groups that `ruff check` would then
+    //    flag as I001.
+    let mut fmt = std::process::Command::new("ruff");
+    fmt.arg("format").args(&existing);
+    match fmt.status() {
         Ok(status) if status.success() => {
             eprintln!("Formatted stubs with `ruff format`");
         }
