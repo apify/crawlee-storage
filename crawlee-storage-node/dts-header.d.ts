@@ -15,21 +15,21 @@ export interface DatasetItemsListPage {
 export interface KeyValueStoreRecord {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
     value: Buffer;
 }
 
 export interface KeyValueStoreStreamRecord {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
     stream: ReadableStream<Uint8Array>;
 }
 
 export interface KeyValueStoreRecordMetadata {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
 }
 
 export interface ProcessedRequest {
@@ -42,7 +42,7 @@ export interface ProcessedRequest {
 export interface UnprocessedRequest {
     uniqueKey: string;
     url: string;
-    method?: string | null;
+    method?: string;
 }
 
 export interface AddRequestsResponse {

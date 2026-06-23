@@ -106,7 +106,7 @@ describe('FileSystemDatasetClient', () => {
 
         // Open via alias — metadata.name should be null
         const aliased = await FileSystemDatasetClient.open(null, null, 'my-alias', storageDir);
-        expect((await aliased.getMetadata()).name).toBeNull();
+        expect((await aliased.getMetadata()).name).toBeUndefined();
 
         // But the directory should exist
         expect(existsSync(join(storageDir, 'datasets', 'my-alias'))).toBe(true);

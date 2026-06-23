@@ -15,21 +15,21 @@ export interface DatasetItemsListPage {
 export interface KeyValueStoreRecord {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
     value: Buffer;
 }
 
 export interface KeyValueStoreStreamRecord {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
     stream: ReadableStream<Uint8Array>;
 }
 
 export interface KeyValueStoreRecordMetadata {
     key: string;
     contentType: string;
-    size: number | null;
+    size: number;
 }
 
 export interface ProcessedRequest {
@@ -42,7 +42,7 @@ export interface ProcessedRequest {
 export interface UnprocessedRequest {
     uniqueKey: string;
     url: string;
-    method?: string | null;
+    method?: string;
 }
 
 export interface AddRequestsResponse {
@@ -204,7 +204,7 @@ export declare class KvsKeyIterator {
 
 export interface DatasetMetadata {
     id: string;
-    name: string | null;
+    name?: string;
     accessedAt: Date;
     createdAt: Date;
     modifiedAt: Date;
@@ -213,7 +213,7 @@ export interface DatasetMetadata {
 
 export interface KeyValueStoreMetadata {
     id: string;
-    name: string | null;
+    name?: string;
     accessedAt: Date;
     createdAt: Date;
     modifiedAt: Date;
@@ -221,7 +221,7 @@ export interface KeyValueStoreMetadata {
 
 export interface RequestQueueMetadata {
     id: string;
-    name: string | null;
+    name?: string;
     accessedAt: Date;
     createdAt: Date;
     modifiedAt: Date;

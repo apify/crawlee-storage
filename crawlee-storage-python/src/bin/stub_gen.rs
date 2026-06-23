@@ -118,7 +118,9 @@ const FIELD_OVERRIDES: &[(&str, &str, &str)] = &[
     ("DatasetMetadata", "name", "builtins.str | None"),
     ("KeyValueStoreMetadata", "name", "builtins.str | None"),
     ("RequestQueueMetadata", "name", "builtins.str | None"),
-    ("KeyValueStoreRecordMetadata", "size", "builtins.int | None"),
+    // `size` is always present on read: the core backfills it from the value
+    // file for any (legacy/foreign) sidecar that omits it.
+    ("KeyValueStoreRecordMetadata", "size", "builtins.int"),
     ("UnprocessedRequest", "method", "builtins.str | None"),
     // Datetime fields: ISO strings on disk, but the binding layer hands Python
     // native tz-aware `datetime.datetime`s.
@@ -249,7 +251,7 @@ fn generate_typed_dicts() -> String {
                 },
                 TypedDictField {
                     name: "size".into(),
-                    py_type: "builtins.int | None".into(),
+                    py_type: "builtins.int".into(),
                 },
                 TypedDictField {
                     name: "value".into(),

@@ -186,7 +186,7 @@ describe('FileSystemKeyValueStoreClient', () => {
             'my-alias',
             storageDir,
         );
-        expect((await aliased.getMetadata()).name).toBeNull();
+        expect((await aliased.getMetadata()).name).toBeUndefined();
     });
 
     it('should return metadata datetimes as native Dates', async () => {

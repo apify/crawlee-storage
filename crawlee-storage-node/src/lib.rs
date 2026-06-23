@@ -333,11 +333,12 @@ impl FileSystemKeyValueStoreClient {
                 let mut map = serde_json::Map::new();
                 map.insert("key".to_string(), Value::String(key));
                 map.insert("contentType".to_string(), Value::String(meta.content_type));
+                // The core backfills `size` from the value file for any sidecar
+                // that lacks it, so it is always present on read; fall back to
+                // the actual byte count we just read just in case.
                 map.insert(
                     "size".to_string(),
-                    meta.size
-                        .map(|s| Value::Number(s.into()))
-                        .unwrap_or(Value::Null),
+                    Value::Number(meta.size.unwrap_or(raw_bytes.len()).into()),
                 );
                 map.insert("value".to_string(), Value::Array(byte_arr));
 
@@ -372,11 +373,11 @@ impl FileSystemKeyValueStoreClient {
                 let mut map = serde_json::Map::new();
                 map.insert("key".to_string(), Value::String(key));
                 map.insert("contentType".to_string(), Value::String(meta.content_type));
+                // The core backfills `size` from the value file for any sidecar
+                // that lacks it, so it is always present on read.
                 map.insert(
                     "size".to_string(),
-                    meta.size
-                        .map(|s| Value::Number(s.into()))
-                        .unwrap_or(Value::Null),
+                    Value::Number(meta.size.unwrap_or(0).into()),
                 );
                 map.insert(
                     "filePath".to_string(),
