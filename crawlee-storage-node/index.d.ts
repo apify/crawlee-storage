@@ -150,14 +150,15 @@ export declare class FileSystemRequestQueueClient {
      *
      * `useTestClock`: see `advanceClockForTesting` below.
      *
-     * `assumeSoleOwner` (default `false`): controls how locks on disk are
-     * treated at open time. With `false` (the safe default), any future-dated
-     * `orderNo` is respected as a potential live peer's lock — crashed peers'
-     * locks expire naturally on the wall clock. With `true`, the caller
-     * asserts nothing else is using this queue and any in-progress locks are
-     * reclaimed immediately, so a request whose previous run died is
-     * instantly re-fetchable. Set to `true` only if you know you're the sole
-     * consumer; otherwise you risk two peers processing the same request.
+     * `assumeSoleOwner` (default `true`): controls how locks on disk are
+     * treated at open time. With `true` (the default, tuned for the common
+     * single-process crawl), the caller asserts nothing else is using this
+     * queue and any in-progress locks are reclaimed immediately, so a request
+     * whose previous run died is instantly re-fetchable. Set to `false` when
+     * multiple processes share the same on-disk queue concurrently: any
+     * future-dated `orderNo` is then respected as a potential live peer's
+     * lock, and crashed peers' locks expire naturally on the wall clock —
+     * otherwise you risk two peers processing the same request.
      */
     static open(
         id?: string | undefined | null,

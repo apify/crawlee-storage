@@ -121,3 +121,23 @@ async def test_iterate_keys_accepts_prefix(storage_dir: str) -> None:
     # No prefix still returns everything.
     all_keys = sorted([record["key"] async for record in client.iterate_keys()])
     assert all_keys == ["bar:1", "foo:1", "foo:2"]
+
+
+async def test_rq_open_assumes_sole_owner_by_default(storage_dir: str) -> None:
+    """The RQ `open` default is now `assume_sole_owner=True`: a request left
+    in-progress (locked) at crash time is immediately re-fetchable on reopen,
+    without waiting out the lock window."""
+    client = await FileSystemRequestQueueClient.open(storage_dir=storage_dir, name="recover")
+    await client.add_batch_of_requests(
+        [{"uniqueKey": "k", "url": "https://example.com/k", "method": "GET"}],
+        forefront=False,
+    )
+    # Lock it on disk (simulating in-flight work), then "crash" by dropping the handle.
+    assert await client.fetch_next_request() is not None
+    rq_id = (await client.get_metadata())["id"]
+
+    # Reopen with the default. The previously-locked request must be fetchable again.
+    reopened = await FileSystemRequestQueueClient.open(storage_dir=storage_dir, id=rq_id)
+    refetched = await reopened.fetch_next_request()
+    assert refetched is not None
+    assert refetched["uniqueKey"] == "k"
