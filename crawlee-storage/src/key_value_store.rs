@@ -134,8 +134,24 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Delete all value files but keep store metadata.
-    pub async fn purge(&self) -> Result<()> {
+    ///
+    /// Any key listed in `keep` is spared: both its value file and its metadata
+    /// sidecar are left on disk. Matching is by exact key (encoded to its on-disk
+    /// filename via [`encode_key`]) — no extension globbing or stem matching. A
+    /// caller wanting to preserve, say, both `INPUT` and `INPUT.json` must pass
+    /// both as separate keys. The store-level `__metadata__.json` is always kept.
+    pub async fn purge(&self, keep: &[String]) -> Result<()> {
         let mut meta = self.metadata.lock().await;
+
+        // Build the set of filenames to spare: the store metadata plus, for each
+        // kept key, its value file and its per-record sidecar.
+        let mut keep_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        keep_files.insert(METADATA_FILENAME.to_string());
+        for key in keep {
+            let encoded = encode_key(key);
+            keep_files.insert(format!("{encoded}.{METADATA_FILENAME}"));
+            keep_files.insert(encoded);
+        }
 
         match fs::read_dir(&self.path).await {
             Ok(mut entries) => {
@@ -143,7 +159,7 @@ impl FileSystemKeyValueStoreClient {
                     let path = entry.path();
                     if path.is_file() {
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name != METADATA_FILENAME {
+                            if !keep_files.contains(name) {
                                 let _ = fs::remove_file(&path).await;
                             }
                         }
@@ -713,6 +729,68 @@ mod tests {
         assert!(client.record_exists("key1").await);
         client.delete_value("key1").await.unwrap();
         assert!(!client.record_exists("key1").await);
+    }
+
+    #[tokio::test]
+    async fn test_purge_with_keep_list() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        client.set_value("INPUT", b"in", ct.clone()).await.unwrap();
+        client.set_value("other", b"x", ct.clone()).await.unwrap();
+
+        // A bare value file (no sidecar) placed out-of-band, NOT in the keep list.
+        let bare_path = client.path().join("INPUT.json");
+        tokio::fs::write(&bare_path, b"bare").await.unwrap();
+
+        // Keep exactly the "INPUT" key — by exact key, with no extension magic.
+        client.purge(&["INPUT".to_string()]).await.unwrap();
+
+        // The kept record (value + sidecar) survives.
+        assert!(client.record_exists("INPUT").await);
+        // The non-kept tracked record is gone (value + sidecar).
+        assert!(!client.record_exists("other").await);
+        // The bare INPUT.json is gone: "INPUT" the key encodes to filename "INPUT",
+        // not "INPUT.json", so it is NOT spared. No stem/extension matching.
+        assert!(!bare_path.exists());
+        // Store metadata is always kept.
+        assert!(client.metadata_path().exists());
+    }
+
+    #[tokio::test]
+    async fn test_purge_empty_keep_list_clears_everything() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        client.set_value("a", b"1", ct.clone()).await.unwrap();
+        client.set_value("b", b"2", ct.clone()).await.unwrap();
+        // A bare file too.
+        tokio::fs::write(client.path().join("INPUT.json"), b"bare")
+            .await
+            .unwrap();
+
+        client.purge(&[]).await.unwrap();
+
+        assert!(!client.record_exists("a").await);
+        assert!(!client.record_exists("b").await);
+        assert!(!client.path().join("INPUT.json").exists());
+        // Only the store metadata remains.
+        let mut remaining = Vec::new();
+        let mut entries = fs::read_dir(client.path()).await.unwrap();
+        while let Some(e) = entries.next_entry().await.unwrap() {
+            remaining.push(e.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(remaining, vec![METADATA_FILENAME.to_string()]);
     }
 
     #[tokio::test]

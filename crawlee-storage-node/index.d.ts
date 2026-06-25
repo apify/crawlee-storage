@@ -128,7 +128,13 @@ export declare class FileSystemKeyValueStoreClient {
     get pathToMetadata(): string;
     getMetadata(): Promise<KeyValueStoreMetadata>;
     dropStorage(): Promise<void>;
-    purge(): Promise<void>;
+    /**
+     * Delete all records except those whose keys are listed in `keep`.
+     *
+     * Matching is by exact key (no extension globbing): to spare both `INPUT`
+     * and `INPUT.json`, pass both. The store metadata is always kept.
+     */
+    purge(keep?: Array<string> | undefined | null): Promise<void>;
     /** Get a record by key. Returns the raw value bytes as a Buffer. */
     getValue(key: string): Promise<KeyValueStoreRecord | null>;
     /** Set a value from a Buffer. */

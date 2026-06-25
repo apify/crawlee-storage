@@ -610,15 +610,6 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[gen_stub(override_return_type(type_repr = "None"))]
-    fn purge<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.purge().await.map_err(storage_err)?;
-            Ok(())
-        })
-    }
-
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
@@ -660,11 +651,16 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
+    /// Delete all records except those whose keys are listed in `keep`.
+    ///
+    /// Matching is by exact key (no extension globbing): to spare both `INPUT`
+    /// and `INPUT.json`, pass both. The store metadata is always kept.
     #[gen_stub(override_return_type(type_repr = "None"))]
-    fn delete_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    #[pyo3(signature = (keep=vec![]))]
+    fn purge<'py>(&self, py: Python<'py>, keep: Vec<String>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.delete_value(&key).await.map_err(storage_err)?;
+            client.purge(&keep).await.map_err(storage_err)?;
             Ok(())
         })
     }

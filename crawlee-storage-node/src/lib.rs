@@ -309,9 +309,16 @@ impl FileSystemKeyValueStoreClient {
         self.inner.drop_storage().await.map_err(storage_err)
     }
 
+    /// Delete all records except those whose keys are listed in `keep`.
+    ///
+    /// Matching is by exact key (no extension globbing): to spare both `INPUT`
+    /// and `INPUT.json`, pass both. The store metadata is always kept.
     #[napi]
-    pub async fn purge(&self) -> napi::Result<()> {
-        self.inner.purge().await.map_err(storage_err)
+    pub async fn purge(&self, keep: Option<Vec<String>>) -> napi::Result<()> {
+        self.inner
+            .purge(&keep.unwrap_or_default())
+            .await
+            .map_err(storage_err)
     }
 
     /// Get a record by key. Returns the raw value bytes as a Buffer.

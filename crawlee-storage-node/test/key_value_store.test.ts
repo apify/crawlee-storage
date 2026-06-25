@@ -174,6 +174,18 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(existsSync(client.pathToMetadata)).toBe(true);
     });
 
+    it('should keep listed keys when purging with a keep list', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('INPUT', Buffer.from('in'));
+        await client.setValue('other', Buffer.from('x'));
+
+        await client.purge(['INPUT']);
+        expect(await client.recordExists('INPUT')).toBe(true);
+        expect(await client.recordExists('other')).toBe(false);
+        expect(existsSync(client.pathToMetadata)).toBe(true);
+    });
+
     it('should drop storage entirely', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 

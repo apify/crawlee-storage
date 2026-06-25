@@ -160,12 +160,17 @@ class FileSystemKeyValueStoreClient:
         """
     async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
-    async def purge(self) -> None: ...
     async def get_value(self, key: builtins.str) -> KeyValueStoreRecord | None: ...
     async def set_value(
         self, key: builtins.str, value: builtins.bytes, content_type: builtins.str | None = None
     ) -> None: ...
-    async def delete_value(self, key: builtins.str) -> None: ...
+    async def purge(self, keep: typing.Sequence[builtins.str] = []) -> None:
+        r"""
+        Delete all records except those whose keys are listed in `keep`.
+
+        Matching is by exact key (no extension globbing): to spare both `INPUT`
+        and `INPUT.json`, pass both. The store metadata is always kept.
+        """
     def iterate_keys(
         self,
         exclusive_start_key: builtins.str | None = None,
