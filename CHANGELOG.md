@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Fix node tests and run more checks in CI ([#51](https://github.com/apify/crawlee-storage/pull/51)) ([5e32037](https://github.com/apify/crawlee-storage/commit/5e320370e38deb38c4fb8da9bf4e504d86911232)) by [@janbuchar](https://github.com/janbuchar)
 - **ci:** Fix postbuild npm script ([#52](https://github.com/apify/crawlee-storage/pull/52)) ([46447b7](https://github.com/apify/crawlee-storage/commit/46447b752aa139514cf6fcf254def1932a7d1dc7)) by [@janbuchar](https://github.com/janbuchar)
 - Reduce the amount of nullable fields in the public API ([#53](https://github.com/apify/crawlee-storage/pull/53)) ([96742e1](https://github.com/apify/crawlee-storage/commit/96742e1e627cb1bfca213728abf74d70cb33d81d)) by [@janbuchar](https://github.com/janbuchar)
+- Improve handling of bare KeyValueStore records ([#58](https://github.com/apify/crawlee-storage/pull/58)) ([73be116](https://github.com/apify/crawlee-storage/commit/73be1160e1640754aa86a7afdb034aa41fb34344)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
