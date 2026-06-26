@@ -158,7 +158,9 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         const url = await client.getPublicUrl('my-key');
         expect(url).toMatch(/^file:\/\//);
-        expect(url).toContain('my%2Dkey');
+        // Hyphen is in the unreserved set (quote(safe='') keeps `. - _ ~`), so it
+        // is preserved verbatim rather than encoded to %2D.
+        expect(url).toContain('my-key');
     });
 
     it('should purge all values but keep metadata', async () => {
@@ -184,6 +186,28 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.recordExists('INPUT')).toBe(true);
         expect(await client.recordExists('other')).toBe(false);
         expect(existsSync(client.pathToMetadata)).toBe(true);
+    });
+
+    it('should read a sidecar-less file only when requireRecordMetadata is false', async () => {
+        const { writeFile } = await import('fs/promises');
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        // Hand-place a bare value file (no metadata sidecar), like a CLI-written INPUT.json.
+        const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
+
+        // Default (strict): invisible.
+        expect(await client.getValue('INPUT.json')).toBeNull();
+        expect(await client.recordExists('INPUT.json')).toBe(false);
+
+        // Opt-in: served with generic content type, no extension inference.
+        const record = await client.getValue('INPUT.json', false);
+        expect(record).not.toBeNull();
+        expect(record!.key).toBe('INPUT.json');
+        expect(record!.contentType).toBe('application/octet-stream');
+        expect(Buffer.isBuffer(record!.value)).toBe(true);
+        expect(record!.value.equals(payload)).toBe(true);
+        expect(await client.recordExists('INPUT.json', false)).toBe(true);
     });
 
     it('should drop storage entirely', async () => {

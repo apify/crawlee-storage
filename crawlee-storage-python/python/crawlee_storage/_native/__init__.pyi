@@ -160,7 +160,17 @@ class FileSystemKeyValueStoreClient:
         """
     async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
-    async def get_value(self, key: builtins.str) -> KeyValueStoreRecord | None: ...
+    async def get_value(
+        self, key: builtins.str, require_record_metadata: builtins.bool = True
+    ) -> KeyValueStoreRecord | None:
+        r"""
+        Get a record by key.
+
+        When `require_record_metadata` is `False`, a value file without a metadata
+        sidecar is also returned (with a generic `application/octet-stream` content
+        type and no type inference) — used to read out-of-band files such as a
+        CLI-written `INPUT.json`. Defaults to `True` (sidecar required).
+        """
     async def set_value(
         self, key: builtins.str, value: builtins.bytes, content_type: builtins.str | None = None
     ) -> None: ...
@@ -179,7 +189,14 @@ class FileSystemKeyValueStoreClient:
         prefix: builtins.str | None = None,
     ) -> KvsKeyIterator: ...
     async def get_public_url(self, key: builtins.str) -> builtins.str: ...
-    async def record_exists(self, key: builtins.str) -> builtins.bool: ...
+    async def record_exists(self, key: builtins.str, require_record_metadata: builtins.bool = True) -> builtins.bool:
+        r"""
+        Check whether a record exists for `key`.
+
+        When `require_record_metadata` is `False`, a value file with no metadata
+        sidecar also counts as existing (matching the relaxed `get_value` lookup).
+        Defaults to `True` (sidecar required).
+        """
 
 @typing.final
 class FileSystemRequestQueueClient:

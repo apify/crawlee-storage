@@ -610,11 +610,26 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
+    /// Get a record by key.
+    ///
+    /// When `require_record_metadata` is `False`, a value file without a metadata
+    /// sidecar is also returned (with a generic `application/octet-stream` content
+    /// type and no type inference) — used to read out-of-band files such as a
+    /// CLI-written `INPUT.json`. Defaults to `True` (sidecar required).
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
-    fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    #[pyo3(signature = (key, require_record_metadata=true))]
+    fn get_value<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        require_record_metadata: bool,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client.get_value(&key).await.map_err(storage_err)?;
+            let result = client
+                .get_value(&key, require_record_metadata)
+                .await
+                .map_err(storage_err)?;
             match result {
                 Some((path, meta)) => {
                     let data = tokio::fs::read(&path)
@@ -699,15 +714,22 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
+    /// Check whether a record exists for `key`.
+    ///
+    /// When `require_record_metadata` is `False`, a value file with no metadata
+    /// sidecar also counts as existing (matching the relaxed `get_value` lookup).
+    /// Defaults to `True` (sidecar required).
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
+    #[pyo3(signature = (key, require_record_metadata=true))]
     fn record_exists<'py>(
         &self,
         py: Python<'py>,
         key: String,
+        require_record_metadata: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(client.record_exists(&key).await)
+            Ok(client.record_exists(&key, require_record_metadata).await)
         })
     }
 }

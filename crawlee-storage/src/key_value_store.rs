@@ -350,9 +350,19 @@ impl FileSystemKeyValueStoreClient {
     /// The client is a pure byte transport: it returns the raw value bytes (via
     /// the path) and the verbatim `content_type` from the sidecar. Parsing and
     /// value semantics live at the `KeyValueStore` frontend.
+    ///
+    /// When `require_record_metadata` is `true` (the normal case), a record is
+    /// only returned if it has a metadata sidecar; a value file without one is
+    /// treated as absent. When `false`, a value file with no sidecar is still
+    /// returned, with synthesized metadata: `content_type` is the generic
+    /// `application/octet-stream` sentinel (the client never infers a type from
+    /// the file extension — that foreign-file convention lives at the frontend)
+    /// and `size` is the value-file length. This is the escape hatch for reading
+    /// out-of-band files (e.g. a CLI-written `INPUT.json` that has no sidecar).
     pub async fn get_value(
         &self,
         key: &str,
+        require_record_metadata: bool,
     ) -> Result<Option<(PathBuf, KeyValueStoreRecordMetadata)>> {
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
@@ -366,21 +376,43 @@ impl FileSystemKeyValueStoreClient {
             atomic_write(&self.metadata_path(), json.as_bytes()).await?;
         }
 
-        if !value_path.exists() || !sidecar_path.exists() {
+        // The value file is always required.
+        if !value_path.exists() {
             return Ok(None);
         }
 
-        let sidecar_content = fs::read_to_string(&sidecar_path).await?;
-        let mut record_meta: KeyValueStoreRecordMetadata = serde_json::from_str(&sidecar_content)?;
+        if sidecar_path.exists() {
+            let sidecar_content = fs::read_to_string(&sidecar_path).await?;
+            let mut record_meta: KeyValueStoreRecordMetadata =
+                serde_json::from_str(&sidecar_content)?;
 
-        // Backfill `size` for foreign/legacy sidecars that omit it (this
-        // library always writes it, but crawlee-JS / older Python clients may
-        // not) by stating the value file.
-        if record_meta.size.is_none() {
-            if let Ok(file_meta) = fs::metadata(&value_path).await {
-                record_meta.size = Some(file_meta.len() as usize);
+            // Backfill `size` for foreign/legacy sidecars that omit it (this
+            // library always writes it, but crawlee-JS / older Python clients may
+            // not) by stating the value file.
+            if record_meta.size.is_none() {
+                if let Ok(file_meta) = fs::metadata(&value_path).await {
+                    record_meta.size = Some(file_meta.len() as usize);
+                }
             }
+
+            return Ok(Some((value_path, record_meta)));
         }
+
+        // No sidecar. By default that means "not a record"; with the opt-in flag
+        // we still serve the bytes, synthesizing dumb metadata (no type inference).
+        if require_record_metadata {
+            return Ok(None);
+        }
+
+        let size = fs::metadata(&value_path)
+            .await
+            .ok()
+            .map(|file_meta| file_meta.len() as usize);
+        let record_meta = KeyValueStoreRecordMetadata {
+            key: key.to_string(),
+            content_type: "application/octet-stream".to_string(),
+            size,
+        };
 
         Ok(Some((value_path, record_meta)))
     }
@@ -468,11 +500,22 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Check if a record exists for a key.
-    pub async fn record_exists(&self, key: &str) -> bool {
+    ///
+    /// When `require_record_metadata` is `true`, both the value file and its
+    /// metadata sidecar must exist. When `false`, a value file alone counts —
+    /// matching the relaxed [`get_value`](Self::get_value) lookup for reading
+    /// out-of-band files that have no sidecar.
+    pub async fn record_exists(&self, key: &str, require_record_metadata: bool) -> bool {
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
+        if !value_path.exists() {
+            return false;
+        }
+        if !require_record_metadata {
+            return true;
+        }
         let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
-        value_path.exists() && sidecar_path.exists()
+        sidecar_path.exists()
     }
 }
 
@@ -488,7 +531,7 @@ mod tests {
         client: &FileSystemKeyValueStoreClient,
         key: &str,
     ) -> Option<(Vec<u8>, String, Option<usize>)> {
-        let (path, meta) = client.get_value(key).await.unwrap()?;
+        let (path, meta) = client.get_value(key, true).await.unwrap()?;
         let bytes = tokio::fs::read(&path).await.unwrap();
         Some((bytes, meta.content_type, meta.size))
     }
@@ -636,7 +679,7 @@ mod tests {
         .unwrap();
 
         // get_value backfills from the file length.
-        let (_, meta) = client.get_value(key).await.unwrap().unwrap();
+        let (_, meta) = client.get_value(key, true).await.unwrap().unwrap();
         assert_eq!(meta.size, Some(payload.len()));
 
         // The list/iterate path backfills too.
@@ -709,7 +752,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(client.get_value("nope").await.unwrap().is_none());
+        assert!(client.get_value("nope", true).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -726,9 +769,78 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(client.record_exists("key1").await);
+        assert!(client.record_exists("key1", true).await);
         client.delete_value("key1").await.unwrap();
-        assert!(!client.record_exists("key1").await);
+        assert!(!client.record_exists("key1", true).await);
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_less_read_requires_opt_in() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Hand-place a value file with NO sidecar (e.g. a CLI-written INPUT.json).
+        // The on-disk name is the LITERAL "INPUT.json" — encode_key preserves the
+        // dot (it matches quote(safe='')), so addressing key "INPUT.json" lands on
+        // exactly this file. This is what makes the bare-INPUT probe work.
+        let payload = br#"{"foo":"bar"}"#;
+        assert_eq!(encode_key("INPUT.json"), "INPUT.json");
+        let value_path = client.path().join("INPUT.json");
+        tokio::fs::write(&value_path, payload).await.unwrap();
+
+        // Default (strict): a value file without a sidecar is "not a record".
+        assert!(client
+            .get_value("INPUT.json", true)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!client.record_exists("INPUT.json", true).await);
+
+        // Opt-in: the bytes are served with synthesized, non-inferred metadata.
+        let (path, meta) = client
+            .get_value("INPUT.json", false)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(bytes, payload);
+        assert_eq!(meta.key, "INPUT.json");
+        // No extension-based MIME inference — the generic sentinel only.
+        assert_eq!(meta.content_type, "application/octet-stream");
+        assert_eq!(meta.size, Some(payload.len()));
+
+        assert!(client.record_exists("INPUT.json", false).await);
+
+        // A genuinely missing file is still absent under either flag.
+        assert!(client.get_value("nope", false).await.unwrap().is_none());
+        assert!(!client.record_exists("nope", false).await);
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_present_ignores_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // A properly-written record (value + sidecar) reads identically under
+        // both flag values — the flag only affects the missing-sidecar branch.
+        client
+            .set_value("tracked", b"hi", "text/plain; charset=utf-8".to_string())
+            .await
+            .unwrap();
+
+        for require in [true, false] {
+            let (_, meta) = client.get_value("tracked", require).await.unwrap().unwrap();
+            assert_eq!(meta.content_type, "text/plain; charset=utf-8");
+            assert!(client.record_exists("tracked", require).await);
+        }
     }
 
     #[tokio::test]
@@ -752,9 +864,9 @@ mod tests {
         client.purge(&["INPUT".to_string()]).await.unwrap();
 
         // The kept record (value + sidecar) survives.
-        assert!(client.record_exists("INPUT").await);
+        assert!(client.record_exists("INPUT", true).await);
         // The non-kept tracked record is gone (value + sidecar).
-        assert!(!client.record_exists("other").await);
+        assert!(!client.record_exists("other", true).await);
         // The bare INPUT.json is gone: "INPUT" the key encodes to filename "INPUT",
         // not "INPUT.json", so it is NOT spared. No stem/extension matching.
         assert!(!bare_path.exists());
@@ -781,8 +893,8 @@ mod tests {
 
         client.purge(&[]).await.unwrap();
 
-        assert!(!client.record_exists("a").await);
-        assert!(!client.record_exists("b").await);
+        assert!(!client.record_exists("a", true).await);
+        assert!(!client.record_exists("b", true).await);
         assert!(!client.path().join("INPUT.json").exists());
         // Only the store metadata remains.
         let mut remaining = Vec::new();
@@ -1023,7 +1135,7 @@ mod tests {
         assert_eq!(content_type, "application/json");
 
         // A key that was never written must still be absent.
-        assert!(reopened.get_value("missing").await.unwrap().is_none());
+        assert!(reopened.get_value("missing", true).await.unwrap().is_none());
     }
 
     /// `open()` must tolerate the datetime formats that other writers emit in

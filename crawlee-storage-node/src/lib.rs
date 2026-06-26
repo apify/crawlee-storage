@@ -322,10 +322,22 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Get a record by key. Returns the raw value bytes as a Buffer.
+    ///
+    /// When `requireRecordMetadata` is `false`, a value file without a metadata
+    /// sidecar is also returned (with a generic `application/octet-stream`
+    /// content type and no type inference) — used to read out-of-band files such
+    /// as a CLI-written `INPUT.json`. Defaults to `true` (sidecar required).
     #[napi(ts_return_type = "Promise<KeyValueStoreRecord | null>")]
-    pub async fn get_value(&self, key: String) -> napi::Result<Option<Value>> {
+    pub async fn get_value(
+        &self,
+        key: String,
+        require_record_metadata: Option<bool>,
+    ) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner.get_value(&key).await.map_err(storage_err)?;
+        let result = inner
+            .get_value(&key, require_record_metadata.unwrap_or(true))
+            .await
+            .map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
@@ -371,9 +383,16 @@ impl FileSystemKeyValueStoreClient {
     /// Internal: get file info for a record (path + metadata), used by the JS
     /// wrapper to create a ReadableStream without buffering the entire file.
     #[napi(js_name = "_getValueFileInfo", skip_typescript)]
-    pub async fn get_value_file_info(&self, key: String) -> napi::Result<Option<Value>> {
+    pub async fn get_value_file_info(
+        &self,
+        key: String,
+        require_record_metadata: Option<bool>,
+    ) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner.get_value(&key).await.map_err(storage_err)?;
+        let result = inner
+            .get_value(&key, require_record_metadata.unwrap_or(true))
+            .await
+            .map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
@@ -456,9 +475,16 @@ impl FileSystemKeyValueStoreClient {
         self.inner.get_public_url(&key).await
     }
 
+    /// Check whether a record exists for `key`.
+    ///
+    /// When `requireRecordMetadata` is `false`, a value file with no metadata
+    /// sidecar also counts as existing (matching the relaxed `getValue` lookup).
+    /// Defaults to `true` (sidecar required).
     #[napi]
-    pub async fn record_exists(&self, key: String) -> bool {
-        self.inner.record_exists(&key).await
+    pub async fn record_exists(&self, key: String, require_record_metadata: Option<bool>) -> bool {
+        self.inner
+            .record_exists(&key, require_record_metadata.unwrap_or(true))
+            .await
     }
 }
 
