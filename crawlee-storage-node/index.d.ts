@@ -63,8 +63,17 @@ export interface KvsKeyIterator {
 }
 
 export interface FileSystemKeyValueStoreClient {
-    /** Get a value as a ReadableStream of bytes. Returns null if the key doesn't exist. */
-    getValueStream(key: string): Promise<KeyValueStoreStreamRecord | null>;
+    /**
+     * Get a value as a ReadableStream of bytes. Returns null if the key doesn't exist.
+     *
+     * When `requireRecordMetadata` is `false`, a value file without a metadata
+     * sidecar is also streamable (used to read out-of-band files such as a
+     * CLI-written `INPUT.json`). Defaults to `true` (sidecar required).
+     */
+    getValueStream(
+        key: string,
+        requireRecordMetadata?: boolean,
+    ): Promise<KeyValueStoreStreamRecord | null>;
     /** Set a value from a ReadableStream. Consumes the entire stream and writes atomically. */
     setValueStream(
         key: string,
@@ -128,9 +137,25 @@ export declare class FileSystemKeyValueStoreClient {
     get pathToMetadata(): string;
     getMetadata(): Promise<KeyValueStoreMetadata>;
     dropStorage(): Promise<void>;
-    purge(): Promise<void>;
-    /** Get a record by key. Returns the raw value bytes as a Buffer. */
-    getValue(key: string): Promise<KeyValueStoreRecord | null>;
+    /**
+     * Delete all records except those whose keys are listed in `keep`.
+     *
+     * Matching is by exact key (no extension globbing): to spare both `INPUT`
+     * and `INPUT.json`, pass both. The store metadata is always kept.
+     */
+    purge(keep?: Array<string> | undefined | null): Promise<void>;
+    /**
+     * Get a record by key. Returns the raw value bytes as a Buffer.
+     *
+     * When `requireRecordMetadata` is `false`, a value file without a metadata
+     * sidecar is also returned (with a generic `application/octet-stream`
+     * content type and no type inference) — used to read out-of-band files such
+     * as a CLI-written `INPUT.json`. Defaults to `true` (sidecar required).
+     */
+    getValue(
+        key: string,
+        requireRecordMetadata?: boolean | undefined | null,
+    ): Promise<KeyValueStoreRecord | null>;
     /** Set a value from a Buffer. */
     setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
@@ -141,7 +166,14 @@ export declare class FileSystemKeyValueStoreClient {
         prefix?: string | undefined | null,
     ): Promise<KvsKeyIterator>;
     getPublicUrl(key: string): Promise<string>;
-    recordExists(key: string): Promise<boolean>;
+    /**
+     * Check whether a record exists for `key`.
+     *
+     * When `requireRecordMetadata` is `false`, a value file with no metadata
+     * sidecar also counts as existing (matching the relaxed `getValue` lookup).
+     * Defaults to `true` (sidecar required).
+     */
+    recordExists(key: string, requireRecordMetadata?: boolean | undefined | null): Promise<boolean>;
 }
 
 export declare class FileSystemRequestQueueClient {

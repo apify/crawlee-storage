@@ -94,10 +94,28 @@ pub async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// URL-encode a key for filesystem safety.
-/// Equivalent to Python's `urllib.parse.quote(key, safe='')`.
+///
+/// Equivalent to Python's `urllib.parse.quote(key, safe='')`. CPython's
+/// `quote` keeps an "always safe" set of unreserved characters unescaped —
+/// the ASCII alphanumerics plus `_`, `.`, `-`, and `~` — and `safe=''` only
+/// drops the *extra* safe chars (the default `/`), never the always-safe set.
+///
+/// We therefore start from `NON_ALPHANUMERIC` and remove those four so they
+/// pass through verbatim. This keeps keys like `INPUT.json` as the literal
+/// filename `INPUT.json` — which is what out-of-band writers (e.g. the Apify
+/// CLI) produce, so a relaxed `get_value` can find them. Plain
+/// `NON_ALPHANUMERIC` would over-encode the dot (`.` → `%2E`) and break that.
 pub fn encode_key(key: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    utf8_percent_encode(key, NON_ALPHANUMERIC).to_string()
+    use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+
+    // `quote(key, safe='')` leaves the unreserved set `_.-~` unescaped.
+    const ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'-')
+        .remove(b'~');
+
+    utf8_percent_encode(key, ENCODE_SET).to_string()
 }
 
 /// URL-decode a filesystem-safe key back to its original form.
@@ -269,6 +287,24 @@ pub async fn find_storage_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_encode_key_matches_quote_safe_empty() {
+        // The unreserved set `_ . - ~` is preserved verbatim (matching CPython's
+        // urllib.parse.quote(key, safe='') and crawlee-python). Everything else
+        // non-alphanumeric is percent-encoded.
+        assert_eq!(encode_key("INPUT.json"), "INPUT.json");
+        assert_eq!(encode_key("my-key"), "my-key");
+        assert_eq!(encode_key("a_b.c-d~e"), "a_b.c-d~e");
+        assert_eq!(encode_key("plain123"), "plain123");
+        // Reserved / unsafe chars still get encoded.
+        assert_eq!(encode_key("a/b"), "a%2Fb");
+        assert_eq!(encode_key("a b"), "a%20b");
+        assert_eq!(encode_key("a:b"), "a%3Ab");
+        // Round-trips through decode (and legacy %2E-style encodings still decode).
+        assert_eq!(decode_key(&encode_key("INPUT.json")), "INPUT.json");
+        assert_eq!(decode_key("INPUT%2Ejson"), "INPUT.json");
+    }
 
     #[test]
     fn test_validate_subdirectory_accepts_plain_names() {
