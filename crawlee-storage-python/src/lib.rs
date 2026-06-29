@@ -141,6 +141,11 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
         StorageError::Json(e) => PyValueError::new_err(e.to_string()),
         StorageError::InvalidArgs(msg) => PyValueError::new_err(msg),
         StorageError::NotFound(msg) => PyFileNotFoundError::new_err(msg),
+        // The Display already renders the exact crawlee contract message
+        // ("exclusiveStartKey \"<KEY>\" was not found ..."); surface it as a
+        // ValueError so the Python consumer can drop its preflight existence
+        // guard and rely on the raise.
+        StorageError::ExclusiveStartKeyNotFound(_) => PyValueError::new_err(e.to_string()),
     }
 }
 
@@ -757,7 +762,11 @@ impl FileSystemKeyValueStoreClient {
         }
     }
 
-    #[gen_stub(override_return_type(type_repr = "builtins.str"))]
+    /// Build a `file://` URL for `key`, or `None` if no value file exists for it
+    /// (matching the crawlee `str | None` contract). For the bare-file
+    /// (`INPUT` -> `INPUT.json`) case the caller resolves the on-disk key via
+    /// `resolve_existing_key` first and passes that key here.
+    #[gen_stub(override_return_type(type_repr = "builtins.str | None"))]
     fn get_public_url<'py>(
         &self,
         py: Python<'py>,

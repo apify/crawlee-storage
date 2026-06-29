@@ -170,6 +170,42 @@ async def test_resolve_existing_key_returns_matched_key(storage_dir: str) -> Non
     assert await client.resolve_existing_key("nope", extensions) is None
 
 
+async def test_iterate_keys_valid_cursor_paginates(storage_dir: str) -> None:
+    """A valid, existing `exclusive_start_key` still paginates correctly."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    await client.set_value("alpha", b"1", "text/plain")
+    await client.set_value("beta", b"2", "text/plain")
+    await client.set_value("gamma", b"3", "text/plain")
+
+    keys = [record["key"] async for record in client.iterate_keys(exclusive_start_key="beta")]
+    assert keys == ["gamma"]
+
+
+async def test_iterate_keys_unknown_cursor_raises(storage_dir: str) -> None:
+    """A nonexistent `exclusive_start_key` raises ValueError with the crawlee
+    contract message (so the consumer can drop its preflight existence guard)."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    await client.set_value("alpha", b"1", "text/plain")
+
+    with pytest.raises(ValueError, match='exclusiveStartKey "nope" was not found in the key-value store'):
+        # The error surfaces when the first page is fetched.
+        _ = [record async for record in client.iterate_keys(exclusive_start_key="nope")]
+
+
+async def test_get_public_url_is_existence_aware(storage_dir: str) -> None:
+    """`get_public_url` returns a file:// URL for an existing key and None for a
+    missing one (matching the crawlee `str | None` contract)."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+
+    assert await client.get_public_url("missing") is None
+
+    await client.set_value("my-key", b"v", "text/plain")
+    url = await client.get_public_url("my-key")
+    assert url is not None
+    assert url.startswith("file://")
+    assert "my-key" in url
+
+
 async def test_rq_open_assumes_sole_owner_by_default(storage_dir: str) -> None:
     """The RQ `open` default is now `assume_sole_owner=True`: a request left
     in-progress (locked) at crash time is immediately re-fetchable on reopen,

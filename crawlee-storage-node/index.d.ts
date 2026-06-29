@@ -175,7 +175,12 @@ export declare class FileSystemKeyValueStoreClient {
         pageSize?: number | undefined | null,
         prefix?: string | undefined | null,
     ): Promise<KvsKeyIterator>;
-    getPublicUrl(key: string): Promise<string>;
+    /**
+     * Build a `file://` URL for `key`, or `null` if no value file exists for
+     * it. Stats the encoded path; does not probe bare-file extensions, so the
+     * caller resolves the on-disk key via `resolveExistingKey` first if needed.
+     */
+    getPublicUrl(key: string): Promise<string | null>;
     /**
      * Check whether a tracked record (value file + metadata sidecar) exists for
      * `key`. To also match out-of-band files with no sidecar, use
