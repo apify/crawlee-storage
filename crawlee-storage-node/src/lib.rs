@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crawlee_storage::clock::{ClockRef, TestClock};
+use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
@@ -170,39 +171,29 @@ impl FileSystemDatasetClient {
         skip_empty: Option<bool>,
         page_size: Option<u32>,
     ) -> napi::Result<DatasetItemIterator> {
+        let source = DatasetItemSource::new(
+            self.inner.clone(),
+            offset.unwrap_or(0) as usize,
+            page_size.unwrap_or(1000) as usize,
+            desc.unwrap_or(false),
+            skip_empty.unwrap_or(false),
+        );
         Ok(DatasetItemIterator {
-            state: Arc::new(Mutex::new(DatasetItemIteratorState {
-                client: self.inner.clone(),
-                offset: offset.unwrap_or(0) as usize,
-                remaining_limit: limit.map(|l| l as usize),
-                desc: desc.unwrap_or(false),
-                skip_empty: skip_empty.unwrap_or(false),
-                page_size: page_size.unwrap_or(1000) as usize,
-                buffer: Vec::new(),
-                buf_index: 0,
-                done: false,
-            })),
+            cursor: Arc::new(Mutex::new(PageCursor::new(
+                source,
+                limit.map(|l| l as usize),
+            ))),
         })
     }
 }
 
 // ─── Dataset Item Iterator ──────────────────────────────────────────────────
 
-struct DatasetItemIteratorState {
-    client: Arc<crawlee_storage::dataset::FileSystemDatasetClient>,
-    offset: usize,
-    remaining_limit: Option<usize>,
-    desc: bool,
-    skip_empty: bool,
-    page_size: usize,
-    buffer: Vec<Value>,
-    buf_index: usize,
-    done: bool,
-}
-
 #[napi]
 pub struct DatasetItemIterator {
-    state: Arc<Mutex<DatasetItemIteratorState>>,
+    // The shared core cursor owns the page-buffering state machine; this
+    // wrapper only translates exhaustion into `null` for JS.
+    cursor: Arc<Mutex<PageCursor<DatasetItemSource>>>,
 }
 
 #[napi]
@@ -210,52 +201,7 @@ impl DatasetItemIterator {
     /// Fetch the next item. Returns null when iteration is exhausted.
     #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
     pub async fn next(&self) -> napi::Result<Option<Value>> {
-        let mut st = self.state.lock().await;
-
-        // If we still have buffered items, return the next one.
-        if st.buf_index < st.buffer.len() {
-            let item = st.buffer[st.buf_index].clone();
-            st.buf_index += 1;
-            return Ok(Some(item));
-        }
-
-        // If we've exhausted everything, signal done.
-        if st.done {
-            return Ok(None);
-        }
-
-        // Fetch the next page.
-        let page = st
-            .client
-            .iterate_items_page(
-                st.offset,
-                st.remaining_limit,
-                st.page_size,
-                st.desc,
-                st.skip_empty,
-            )
-            .await
-            .map_err(storage_err)?;
-
-        let page_len = page.items.len();
-        if page_len == 0 {
-            st.done = true;
-            return Ok(None);
-        }
-
-        // Update state for the next page fetch.
-        st.offset += page_len;
-        if let Some(ref mut rem) = st.remaining_limit {
-            *rem = rem.saturating_sub(page_len);
-        }
-        if !page.has_more {
-            st.done = true;
-        }
-
-        // Buffer the page and return the first item.
-        st.buffer = page.items;
-        st.buf_index = 1;
-        Ok(Some(st.buffer[0].clone()))
+        self.cursor.lock().await.next().await.map_err(storage_err)
     }
 }
 
@@ -472,17 +418,17 @@ impl FileSystemKeyValueStoreClient {
         page_size: Option<u32>,
         prefix: Option<String>,
     ) -> napi::Result<KvsKeyIterator> {
+        let source = KvsKeySource::new(
+            self.inner.clone(),
+            exclusive_start_key,
+            page_size.unwrap_or(1000) as usize,
+            prefix,
+        );
         Ok(KvsKeyIterator {
-            state: Arc::new(Mutex::new(KvsKeyIteratorState {
-                client: self.inner.clone(),
-                exclusive_start_key,
-                remaining_limit: limit.map(|l| l as usize),
-                page_size: page_size.unwrap_or(1000) as usize,
-                prefix,
-                buffer: Vec::new(),
-                buf_index: 0,
-                done: false,
-            })),
+            cursor: Arc::new(Mutex::new(PageCursor::new(
+                source,
+                limit.map(|l| l as usize),
+            ))),
         })
     }
 
@@ -505,20 +451,9 @@ impl FileSystemKeyValueStoreClient {
 
 // ─── KVS Key Iterator ──────────────────────────────────────────────────────
 
-struct KvsKeyIteratorState {
-    client: Arc<crawlee_storage::key_value_store::FileSystemKeyValueStoreClient>,
-    exclusive_start_key: Option<String>,
-    remaining_limit: Option<usize>,
-    page_size: usize,
-    prefix: Option<String>,
-    buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
-    buf_index: usize,
-    done: bool,
-}
-
 #[napi]
 pub struct KvsKeyIterator {
-    state: Arc<Mutex<KvsKeyIteratorState>>,
+    cursor: Arc<Mutex<PageCursor<KvsKeySource>>>,
 }
 
 #[napi]
@@ -526,51 +461,10 @@ impl KvsKeyIterator {
     /// Fetch the next key metadata entry. Returns null when iteration is exhausted.
     #[napi(ts_return_type = "Promise<KeyValueStoreRecordMetadata | null>")]
     pub async fn next(&self) -> napi::Result<Option<Value>> {
-        let mut st = self.state.lock().await;
-
-        // If we still have buffered items, return the next one.
-        if st.buf_index < st.buffer.len() {
-            let val = to_js(&st.buffer[st.buf_index])?;
-            st.buf_index += 1;
-            return Ok(Some(val));
+        match self.cursor.lock().await.next().await.map_err(storage_err)? {
+            Some(meta) => Ok(Some(to_js(&meta)?)),
+            None => Ok(None),
         }
-
-        // If we've exhausted everything, signal done.
-        if st.done {
-            return Ok(None);
-        }
-
-        // Fetch the next page.
-        let page = st
-            .client
-            .iterate_keys_page(
-                st.exclusive_start_key.as_deref(),
-                st.remaining_limit,
-                st.page_size,
-                st.prefix.as_deref(),
-            )
-            .await
-            .map_err(storage_err)?;
-
-        let page_len = page.items.len();
-        if page_len == 0 {
-            st.done = true;
-            return Ok(None);
-        }
-
-        // Update cursor to the last key in this page.
-        st.exclusive_start_key = Some(page.items.last().unwrap().key.clone());
-        if let Some(ref mut rem) = st.remaining_limit {
-            *rem = rem.saturating_sub(page_len);
-        }
-        if !page.has_more {
-            st.done = true;
-        }
-
-        // Buffer the page and return the first item.
-        st.buffer = page.items;
-        st.buf_index = 1;
-        Ok(Some(to_js(&st.buffer[0])?))
     }
 }
 
