@@ -327,23 +327,16 @@ impl FileSystemKeyValueStoreClient {
             .map_err(storage_err)
     }
 
-    /// Get a record by key. Returns the raw value bytes as a Buffer.
+    /// Get a tracked record (value file + metadata sidecar) by key. Returns the
+    /// raw value bytes as a Buffer, or `null` if there is no such tracked record.
     ///
-    /// When `requireRecordMetadata` is `false`, a value file without a metadata
-    /// sidecar is also returned (with a generic `application/octet-stream`
-    /// content type and no type inference) — used to read out-of-band files such
-    /// as a CLI-written `INPUT.json`. Defaults to `true` (sidecar required).
+    /// To read out-of-band files that have no metadata sidecar (e.g. a
+    /// CLI-written `INPUT.json`), use `resolveValue`, which probes the
+    /// conventional bare-file extensions.
     #[napi]
-    pub async fn get_value(
-        &self,
-        key: String,
-        require_record_metadata: Option<bool>,
-    ) -> napi::Result<Option<KeyValueStoreRecord>> {
+    pub async fn get_value(&self, key: String) -> napi::Result<Option<KeyValueStoreRecord>> {
         let inner = self.inner.clone();
-        let result = inner
-            .get_value(&key, require_record_metadata.unwrap_or(true))
-            .await
-            .map_err(storage_err)?;
+        let result = inner.get_value(&key, true).await.map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
@@ -366,6 +359,66 @@ impl FileSystemKeyValueStoreClient {
         }
     }
 
+    /// Resolve a key to a record, transparently falling back to out-of-band
+    /// ("bare") value files that have no metadata sidecar.
+    ///
+    /// Tries the tracked record for the literal `key` first (its content type
+    /// comes verbatim from the sidecar), then probes each `bareFallbacks` entry
+    /// as a bare `key + extension` file, reporting the declared content type on
+    /// a match. The first match wins; the returned record is always keyed by
+    /// the requested `key`. Returns `null` if nothing resolves.
+    ///
+    /// Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
+    /// instead of hand-rolling the extension probing in JS.
+    #[napi]
+    pub async fn resolve_value(
+        &self,
+        key: String,
+        bare_fallbacks: Vec<models::BareFallback>,
+    ) -> napi::Result<Option<KeyValueStoreRecord>> {
+        let fallbacks: Vec<(&str, &str)> = bare_fallbacks
+            .iter()
+            .map(|f| (f.extension.as_str(), f.content_type.as_str()))
+            .collect();
+        let inner = self.inner.clone();
+        let result = inner
+            .resolve_value(&key, &fallbacks)
+            .await
+            .map_err(storage_err)?;
+
+        match result {
+            Some((path, meta)) => {
+                let raw_bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+                let size = meta.size.unwrap_or(raw_bytes.len()) as f64;
+                Ok(Some(KeyValueStoreRecord {
+                    key: meta.key,
+                    content_type: meta.content_type,
+                    size,
+                    value: Buffer::from(raw_bytes),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve a key to the on-disk key that actually exists, using the same
+    /// fallback probe order as `resolveValue` but without reading the value.
+    /// Returns the matched key (the literal key or `key + extension`), or
+    /// `null` if nothing exists. Pass the result to `getPublicUrl` so the URL
+    /// points at the file that exists.
+    #[napi]
+    pub async fn resolve_existing_key(
+        &self,
+        key: String,
+        bare_fallbacks: Vec<String>,
+    ) -> napi::Result<Option<String>> {
+        let fallbacks: Vec<&str> = bare_fallbacks.iter().map(String::as_str).collect();
+        let inner = self.inner.clone();
+        Ok(inner.resolve_existing_key(&key, &fallbacks).await)
+    }
+
     /// Set a value from a Buffer.
     #[napi]
     pub async fn set_value(
@@ -382,16 +435,9 @@ impl FileSystemKeyValueStoreClient {
     /// Internal: get file info for a record (path + metadata), used by the JS
     /// wrapper to create a ReadableStream without buffering the entire file.
     #[napi(js_name = "_getValueFileInfo", skip_typescript)]
-    pub async fn get_value_file_info(
-        &self,
-        key: String,
-        require_record_metadata: Option<bool>,
-    ) -> napi::Result<Option<Value>> {
+    pub async fn get_value_file_info(&self, key: String) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner
-            .get_value(&key, require_record_metadata.unwrap_or(true))
-            .await
-            .map_err(storage_err)?;
+        let result = inner.get_value(&key, true).await.map_err(storage_err)?;
 
         match result {
             Some((path, meta)) => {
@@ -474,16 +520,12 @@ impl FileSystemKeyValueStoreClient {
         self.inner.get_public_url(&key).await
     }
 
-    /// Check whether a record exists for `key`.
-    ///
-    /// When `requireRecordMetadata` is `false`, a value file with no metadata
-    /// sidecar also counts as existing (matching the relaxed `getValue` lookup).
-    /// Defaults to `true` (sidecar required).
+    /// Check whether a tracked record (value file + metadata sidecar) exists for
+    /// `key`. To also match out-of-band files with no sidecar, use
+    /// `resolveExistingKey`, which probes the conventional bare-file extensions.
     #[napi]
-    pub async fn record_exists(&self, key: String, require_record_metadata: Option<bool>) -> bool {
-        self.inner
-            .record_exists(&key, require_record_metadata.unwrap_or(true))
-            .await
+    pub async fn record_exists(&self, key: String) -> bool {
+        self.inner.record_exists(&key, true).await
     }
 }
 

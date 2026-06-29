@@ -29,6 +29,19 @@ pub struct KeyValueStoreRecord {
     pub value: Buffer,
 }
 
+/// One out-of-band ("bare") file fallback for `resolveValue` / `resolveExistingKey`:
+/// an extension appended to the looked-up key, plus the content type to report
+/// when a bare file with that extension is matched. An empty `contentType`
+/// leaves the matched file's synthesized `application/octet-stream` in place.
+///
+/// The core does no MIME inference of its own — the caller declares this
+/// extension→content-type policy (e.g. `.json` → `application/json`).
+#[napi(object)]
+pub struct BareFallback {
+    pub extension: String,
+    pub content_type: String,
+}
+
 #[napi(object)]
 pub struct DatasetMetadata {
     pub id: String,

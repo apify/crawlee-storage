@@ -58,16 +58,10 @@ export interface KvsKeyIterator {
 
 export interface FileSystemKeyValueStoreClient {
     /**
-     * Get a value as a ReadableStream of bytes. Returns null if the key doesn't exist.
-     *
-     * When `requireRecordMetadata` is `false`, a value file without a metadata
-     * sidecar is also streamable (used to read out-of-band files such as a
-     * CLI-written `INPUT.json`). Defaults to `true` (sidecar required).
+     * Get a tracked record's value as a ReadableStream of bytes. Returns null if
+     * there is no tracked record (value file + metadata sidecar) for the key.
      */
-    getValueStream(
-        key: string,
-        requireRecordMetadata?: boolean,
-    ): Promise<KeyValueStoreStreamRecord | null>;
+    getValueStream(key: string): Promise<KeyValueStoreStreamRecord | null>;
     /** Set a value from a ReadableStream. Consumes the entire stream and writes atomically. */
     setValueStream(
         key: string,
@@ -139,17 +133,39 @@ export declare class FileSystemKeyValueStoreClient {
      */
     purge(keep?: Array<string> | undefined | null): Promise<void>;
     /**
-     * Get a record by key. Returns the raw value bytes as a Buffer.
+     * Get a tracked record (value file + metadata sidecar) by key. Returns the
+     * raw value bytes as a Buffer, or `null` if there is no such tracked record.
      *
-     * When `requireRecordMetadata` is `false`, a value file without a metadata
-     * sidecar is also returned (with a generic `application/octet-stream`
-     * content type and no type inference) — used to read out-of-band files such
-     * as a CLI-written `INPUT.json`. Defaults to `true` (sidecar required).
+     * To read out-of-band files that have no metadata sidecar (e.g. a
+     * CLI-written `INPUT.json`), use `resolveValue`, which probes the
+     * conventional bare-file extensions.
      */
-    getValue(
+    getValue(key: string): Promise<KeyValueStoreRecord | null>;
+    /**
+     * Resolve a key to a record, transparently falling back to out-of-band
+     * ("bare") value files that have no metadata sidecar.
+     *
+     * Tries the tracked record for the literal `key` first (its content type
+     * comes verbatim from the sidecar), then probes each `bareFallbacks` entry
+     * as a bare `key + extension` file, reporting the declared content type on
+     * a match. The first match wins; the returned record is always keyed by
+     * the requested `key`. Returns `null` if nothing resolves.
+     *
+     * Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
+     * instead of hand-rolling the extension probing in JS.
+     */
+    resolveValue(
         key: string,
-        requireRecordMetadata?: boolean | undefined | null,
+        bareFallbacks: Array<BareFallback>,
     ): Promise<KeyValueStoreRecord | null>;
+    /**
+     * Resolve a key to the on-disk key that actually exists, using the same
+     * fallback probe order as `resolveValue` but without reading the value.
+     * Returns the matched key (the literal key or `key + extension`), or
+     * `null` if nothing exists. Pass the result to `getPublicUrl` so the URL
+     * points at the file that exists.
+     */
+    resolveExistingKey(key: string, bareFallbacks: Array<string>): Promise<string | null>;
     /** Set a value from a Buffer. */
     setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
@@ -161,13 +177,11 @@ export declare class FileSystemKeyValueStoreClient {
     ): Promise<KvsKeyIterator>;
     getPublicUrl(key: string): Promise<string>;
     /**
-     * Check whether a record exists for `key`.
-     *
-     * When `requireRecordMetadata` is `false`, a value file with no metadata
-     * sidecar also counts as existing (matching the relaxed `getValue` lookup).
-     * Defaults to `true` (sidecar required).
+     * Check whether a tracked record (value file + metadata sidecar) exists for
+     * `key`. To also match out-of-band files with no sidecar, use
+     * `resolveExistingKey`, which probes the conventional bare-file extensions.
      */
-    recordExists(key: string, requireRecordMetadata?: boolean | undefined | null): Promise<boolean>;
+    recordExists(key: string): Promise<boolean>;
 }
 
 export declare class FileSystemRequestQueueClient {
@@ -228,6 +242,20 @@ export declare class FileSystemRequestQueueClient {
 export declare class KvsKeyIterator {
     /** Fetch the next key metadata entry. Returns null when iteration is exhausted. */
     next(): Promise<KeyValueStoreRecordMetadata | null>;
+}
+
+/**
+ * One out-of-band ("bare") file fallback for `resolveValue` / `resolveExistingKey`:
+ * an extension appended to the looked-up key, plus the content type to report
+ * when a bare file with that extension is matched. An empty `contentType`
+ * leaves the matched file's synthesized `application/octet-stream` in place.
+ *
+ * The core does no MIME inference of its own — the caller declares this
+ * extension→content-type policy (e.g. `.json` → `application/json`).
+ */
+export interface BareFallback {
+    extension: string;
+    contentType: string;
 }
 
 export interface DatasetMetadata {

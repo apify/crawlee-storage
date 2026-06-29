@@ -123,6 +123,53 @@ async def test_iterate_keys_accepts_prefix(storage_dir: str) -> None:
     assert all_keys == ["bar:1", "foo:1", "foo:2"]
 
 
+async def test_resolve_value_falls_back_to_bare_file(storage_dir: str) -> None:
+    """`resolve_value` accepts a list of `(extension, content_type)` tuples, probes
+    bare files when the tracked record is absent, applies the declared content type,
+    and re-keys the result to the requested key."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+
+    fallbacks = [
+        ("", ""),
+        (".json", "application/json"),
+        (".bin", ""),
+    ]
+
+    # Hand-place a bare INPUT.json (no sidecar), like a CLI/platform writer would.
+    payload = b'{"foo":"bar"}'
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(payload)
+
+    record = await client.resolve_value("INPUT", fallbacks)
+    assert record is not None
+    assert record["key"] == "INPUT"  # re-keyed, not "INPUT.json"
+    assert record["contentType"] == "application/json"  # declared fallback type
+    assert record["value"] == payload
+
+    # A tracked record wins over the fallback (verbatim sidecar content type).
+    await client.set_value("tracked", b"x", "text/plain")
+    tracked = await client.resolve_value("tracked", fallbacks)
+    assert tracked is not None
+    assert tracked["contentType"] == "text/plain"
+
+    # Nothing resolves -> None.
+    assert await client.resolve_value("missing", fallbacks) is None
+
+
+async def test_resolve_existing_key_returns_matched_key(storage_dir: str) -> None:
+    """`resolve_existing_key` accepts a list of extension strings and returns the
+    matched on-disk key (literal key or key + extension), or None."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    extensions = ["", ".json", ".txt", ".bin"]
+
+    await client.set_value("tracked", b"x", "text/plain")
+    assert await client.resolve_existing_key("tracked", extensions) == "tracked"
+
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(b"{}")
+    assert await client.resolve_existing_key("INPUT", extensions) == "INPUT.json"
+
+    assert await client.resolve_existing_key("nope", extensions) is None
+
+
 async def test_rq_open_assumes_sole_owner_by_default(storage_dir: str) -> None:
     """The RQ `open` default is now `assume_sole_owner=True`: a request left
     in-progress (locked) at crash time is immediately re-fetchable on reopen,

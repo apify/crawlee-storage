@@ -33,11 +33,8 @@ KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
 
 // getValueStream: returns { key, contentType, size, stream } or null.
 // The stream is a Web ReadableStream<Uint8Array> created from the file on disk.
-FileSystemKeyValueStoreClient.prototype.getValueStream = async function (
-    key,
-    requireRecordMetadata,
-) {
-    const info = await this._getValueFileInfo(key, requireRecordMetadata);
+FileSystemKeyValueStoreClient.prototype.getValueStream = async function (key) {
+    const info = await this._getValueFileInfo(key);
     if (info === null) {
         return null;
     }
