@@ -642,13 +642,13 @@ mod tests {
 
         // Null is represented by the frontend as empty bytes + the sentinel CT.
         client
-            .set_value("empty", b"", "application/x-none".to_string())
+            .set_value("empty", b"", crate::NONE_CONTENT_TYPE.to_string())
             .await
             .unwrap();
 
         let (bytes, content_type, size) = read_back(&client, "empty").await.unwrap();
         assert!(bytes.is_empty());
-        assert_eq!(content_type, "application/x-none");
+        assert_eq!(content_type, crate::NONE_CONTENT_TYPE);
         assert_eq!(size, Some(0));
     }
 

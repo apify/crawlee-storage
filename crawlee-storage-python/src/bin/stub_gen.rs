@@ -15,6 +15,12 @@ const SYNC_METHODS: &[&str] = &[
 /// Dunder methods that ARE async (all other dunders stay sync).
 const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];
 
+/// Module-level constants exported via `m.add(...)` in the `#[pymodule]` init.
+/// pyo3-stub-gen does not track runtime `m.add` calls, so the generated `.pyi`
+/// omits them — we inject the declarations (and `__all__` entries) here.
+/// Maps constant name → Python type annotation.
+const MODULE_CONSTANTS: &[(&str, &str)] = &[("NONE_CONTENT_TYPE", "builtins.str")];
+
 // ─── TypedDict generation from serde ────────────────────────────────────────
 
 /// A single field in a Python TypedDict.
@@ -385,6 +391,11 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         if i == insert_before {
             output.push_str(typed_dicts);
             output.push('\n');
+            // Then the module-level constants (e.g. NONE_CONTENT_TYPE).
+            for (const_name, const_type) in MODULE_CONSTANTS {
+                output.push_str(&format!("{const_name}: {const_type}\n"));
+            }
+            output.push('\n');
         }
 
         // Detect __all__ = [ ... ] and inject TypedDict names before the closing `]`.
@@ -394,6 +405,9 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         if in_all_block && line.trim_start().starts_with(']') {
             for name in &names {
                 output.push_str(&format!("    \"{name}\",\n"));
+            }
+            for (const_name, _) in MODULE_CONSTANTS {
+                output.push_str(&format!("    \"{const_name}\",\n"));
             }
             in_all_block = false;
         }
@@ -519,6 +533,9 @@ fn fixup_reexport_stubs(path: &std::path::Path) -> std::io::Result<()> {
         if in_all_block && line.trim_start().starts_with(']') {
             for name in &names {
                 output.push_str(&format!("    \"{name}\",\n"));
+            }
+            for (const_name, _) in MODULE_CONSTANTS {
+                output.push_str(&format!("    \"{const_name}\",\n"));
             }
             in_all_block = false;
         }

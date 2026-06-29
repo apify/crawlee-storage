@@ -21,6 +21,7 @@ __all__ = [
     "ProcessedRequest",
     "RequestQueueMetadata",
     "UnprocessedRequest",
+    "NONE_CONTENT_TYPE",
 ]
 
 class DatasetMetadata(typing.TypedDict):
@@ -82,6 +83,8 @@ class UnprocessedRequest(typing.TypedDict):
 class AddRequestsResponse(typing.TypedDict):
     processedRequests: builtins.list[ProcessedRequest]
     unprocessedRequests: builtins.list[UnprocessedRequest]
+
+NONE_CONTENT_TYPE: builtins.str
 
 @typing.final
 class DatasetItemIterator:

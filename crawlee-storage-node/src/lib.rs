@@ -9,11 +9,17 @@ use napi_derive::napi;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use models::{DatasetMetadata, KeyValueStoreMetadata, RequestQueueMetadata};
+use models::{DatasetMetadata, KeyValueStoreMetadata, KeyValueStoreRecord, RequestQueueMetadata};
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     napi::Error::from_reason(e.to_string())
 }
+
+/// The content-type sentinel for null KVS values (stored on disk as an empty
+/// file). Re-exported from the core crate so consumers reference the shared
+/// constant instead of hardcoding the `application/x-none` literal.
+#[napi]
+pub const NONE_CONTENT_TYPE: &str = crawlee_storage::NONE_CONTENT_TYPE;
 
 /// Pick a clock for a client given the `useTestClock` flag passed across the
 /// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
@@ -327,12 +333,12 @@ impl FileSystemKeyValueStoreClient {
     /// sidecar is also returned (with a generic `application/octet-stream`
     /// content type and no type inference) — used to read out-of-band files such
     /// as a CLI-written `INPUT.json`. Defaults to `true` (sidecar required).
-    #[napi(ts_return_type = "Promise<KeyValueStoreRecord | null>")]
+    #[napi]
     pub async fn get_value(
         &self,
         key: String,
         require_record_metadata: Option<bool>,
-    ) -> napi::Result<Option<Value>> {
+    ) -> napi::Result<Option<KeyValueStoreRecord>> {
         let inner = self.inner.clone();
         let result = inner
             .get_value(&key, require_record_metadata.unwrap_or(true))
@@ -344,24 +350,17 @@ impl FileSystemKeyValueStoreClient {
                 let raw_bytes = tokio::fs::read(&path)
                     .await
                     .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-                let byte_arr: Vec<Value> = raw_bytes
-                    .iter()
-                    .map(|b| Value::Number((*b).into()))
-                    .collect();
-
-                let mut map = serde_json::Map::new();
-                map.insert("key".to_string(), Value::String(key));
-                map.insert("contentType".to_string(), Value::String(meta.content_type));
                 // The core backfills `size` from the value file for any sidecar
                 // that lacks it, so it is always present on read; fall back to
                 // the actual byte count we just read just in case.
-                map.insert(
-                    "size".to_string(),
-                    Value::Number(meta.size.unwrap_or(raw_bytes.len()).into()),
-                );
-                map.insert("value".to_string(), Value::Array(byte_arr));
+                let size = meta.size.unwrap_or(raw_bytes.len()) as f64;
 
-                Ok(Some(Value::Object(map)))
+                Ok(Some(KeyValueStoreRecord {
+                    key,
+                    content_type: meta.content_type,
+                    size,
+                    value: Buffer::from(raw_bytes),
+                }))
             }
             None => Ok(None),
         }

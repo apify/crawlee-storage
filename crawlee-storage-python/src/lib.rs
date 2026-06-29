@@ -989,6 +989,10 @@ fn _crawlee_storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FileSystemRequestQueueClient>()?;
     m.add_class::<DatasetItemIterator>()?;
     m.add_class::<KvsKeyIterator>()?;
+    // The content-type sentinel for null KVS values (empty file on disk).
+    // Exported so consumers reference the shared constant from the core crate
+    // instead of hardcoding the `application/x-none` literal.
+    m.add("NONE_CONTENT_TYPE", crawlee_storage::NONE_CONTENT_TYPE)?;
     Ok(())
 }
 
