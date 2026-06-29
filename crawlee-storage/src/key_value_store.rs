@@ -277,6 +277,12 @@ impl FileSystemKeyValueStoreClient {
         // Sort by filename for deterministic ordering
         sidecar_paths.sort();
 
+        // Track whether a key exactly equal to `exclusive_start_key` was seen
+        // among the (prefix-filtered) candidates. The cursor key is skipped from
+        // the results by the `<= start_key` filter, so we observe it separately —
+        // and over the *whole* candidate set, not just the keys under `limit`.
+        let mut cursor_key_seen = false;
+
         for sidecar_path in sidecar_paths {
             let content = fs::read_to_string(&sidecar_path).await?;
             match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
@@ -288,10 +294,34 @@ impl FileSystemKeyValueStoreClient {
                         }
                     }
 
-                    // Apply cursor filter
+                    // Cursor existence check: does this (prefix-scoped) key
+                    // exactly match the supplied cursor? Recorded before the
+                    // `<=` filter drops it from the page.
+                    if let Some(start_key) = exclusive_start_key {
+                        if record_meta.key.as_str() == start_key {
+                            cursor_key_seen = true;
+                        }
+                    }
+
+                    // Apply cursor filter. Note we keep scanning the remaining
+                    // candidates even once the page is full, because the cursor
+                    // key may sort after the page boundary and we still need to
+                    // confirm it exists.
                     if let Some(start_key) = exclusive_start_key {
                         if record_meta.key.as_str() <= start_key {
                             continue;
+                        }
+                    }
+
+                    // Once the page is full, stop *collecting* further results,
+                    // but keep iterating to validate the cursor (unless there is
+                    // no cursor to validate, in which case we can stop now).
+                    if let Some(lim) = limit {
+                        if results.len() >= lim {
+                            if exclusive_start_key.is_some() && !cursor_key_seen {
+                                continue;
+                            }
+                            break;
                         }
                     }
 
@@ -313,13 +343,6 @@ impl FileSystemKeyValueStoreClient {
                     }
 
                     results.push(record_meta);
-
-                    // Apply limit
-                    if let Some(lim) = limit {
-                        if results.len() >= lim {
-                            break;
-                        }
-                    }
                 }
                 Err(e) => {
                     warn!(
@@ -331,14 +354,34 @@ impl FileSystemKeyValueStoreClient {
             }
         }
 
+        // A supplied cursor that never matched an existing (prefix-scoped) key
+        // is an error — distinct from "all keys are <= cursor".
+        if let Some(start_key) = exclusive_start_key {
+            if !cursor_key_seen {
+                return Err(StorageError::ExclusiveStartKeyNotFound(
+                    start_key.to_string(),
+                ));
+            }
+        }
+
         Ok(results)
     }
 
-    /// Get a file:// URL for a key.
-    pub async fn get_public_url(&self, key: &str) -> String {
+    /// Get a `file://` URL for a key, or `None` if no value file exists for it
+    /// (a single existence `stat` on the encoded path).
+    ///
+    /// Does **not** probe the conventional bare-file extensions: that *policy*
+    /// lives at the caller, which resolves the on-disk key via
+    /// [`resolve_existing_key`](Self::resolve_existing_key) and hands the matched
+    /// key here, preserving the "core = mechanism, caller = policy" split.
+    pub async fn get_public_url(&self, key: &str) -> Option<String> {
         let encoded = encode_key(key);
         let value_path = self.path.join(&encoded);
-        format!("file://{}", value_path.display())
+        if fs::metadata(&value_path).await.is_ok() {
+            Some(format!("file://{}", value_path.display()))
+        } else {
+            None
+        }
     }
 
     /// Get the file path and metadata for a record, without reading its contents.
@@ -1237,6 +1280,192 @@ mod tests {
             .unwrap();
         assert!(page.items.is_empty());
         assert!(!page.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_valid_cursor_paginates() {
+        // (a) A valid, existing cursor still paginates correctly.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        for key in ["alpha", "beta", "gamma", "delta"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // Cursor "beta" exists → keys strictly greater than it, in lexical order.
+        let page = client
+            .iterate_keys_page(Some("beta"), None, 1000, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["delta", "gamma"]
+        );
+        assert!(!page.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_nonexistent_cursor_errors() {
+        // (b) A nonexistent cursor returns the typed error variant.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        client.set_value("alpha", b"x", ct.clone()).await.unwrap();
+        client.set_value("beta", b"x", ct.clone()).await.unwrap();
+
+        // A cursor that does not match any existing key must error, even though
+        // there are keys lexically greater than it (the old behavior silently
+        // returned "beta").
+        let err = client
+            .iterate_keys_page(Some("alfa"), None, 1000, None)
+            .await
+            .unwrap_err();
+        match err {
+            StorageError::ExclusiveStartKeyNotFound(key) => assert_eq!(key, "alfa"),
+            other => panic!("expected ExclusiveStartKeyNotFound, got: {other:?}"),
+        }
+
+        // A stale/deleted cursor (a key that once existed) errors too.
+        client.delete_value("alpha").await.unwrap();
+        let err = client
+            .iterate_keys_page(Some("alpha"), None, 1000, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::ExclusiveStartKeyNotFound(ref k) if k == "alpha"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_cursor_validation_with_prefix() {
+        // (c) Cursor validation is scoped to the prefix-filtered set.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        for key in ["foo:1", "foo:2", "foo:3", "bar:1"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // A cursor that exists AND is within the prefix → paginates fine.
+        let page = client
+            .iterate_keys_page(Some("foo:1"), None, 1000, Some("foo:"))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:2", "foo:3"]
+        );
+
+        // A cursor that exists in the store but is OUTSIDE the prefix scope is
+        // treated as not found (v4 searches within the prefix-filtered set).
+        let err = client
+            .iterate_keys_page(Some("bar:1"), None, 1000, Some("foo:"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::ExclusiveStartKeyNotFound(ref k) if k == "bar:1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_cursor_validation_with_small_page() {
+        // The cursor key may sort after the page boundary; validation must still
+        // confirm its existence by scanning the whole candidate set.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json; charset=utf-8".to_string();
+        for key in ["a", "b", "c", "d", "z"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // Cursor "z" exists but sorts last; with a small page the result set
+        // fills before "z" is reached. It must NOT error, and (since nothing is
+        // greater than "z") the page must be empty.
+        let page = client
+            .iterate_keys_page(Some("z"), None, 2, None)
+            .await
+            .unwrap();
+        assert!(page.items.is_empty());
+        assert!(!page.has_more);
+
+        // Cursor "b" exists; small page returns the next 2 keys after it.
+        let page = client
+            .iterate_keys_page(Some("b"), None, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "d"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_public_url_existence_aware() {
+        // (d) get_public_url returns Some(url) for an existing key, None for a
+        // missing one.
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Missing key → None.
+        assert_eq!(client.get_public_url("missing").await, None);
+
+        // Existing tracked record → Some(url) that points at the encoded path.
+        client
+            .set_value("my-key", b"v", "text/plain".to_string())
+            .await
+            .unwrap();
+        let url = client.get_public_url("my-key").await.unwrap();
+        let expected = format!(
+            "file://{}",
+            client.path().join(encode_key("my-key")).display()
+        );
+        assert_eq!(url, expected);
+
+        // A bare value file (no sidecar) still has its file present, so a URL
+        // for the on-disk key (as resolve_existing_key would return) resolves.
+        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
+            .await
+            .unwrap();
+        assert!(client.get_public_url("INPUT.json").await.is_some());
+
+        // After delete, the URL is gone.
+        client.delete_value("my-key").await.unwrap();
+        assert_eq!(client.get_public_url("my-key").await, None);
     }
 
     #[tokio::test]

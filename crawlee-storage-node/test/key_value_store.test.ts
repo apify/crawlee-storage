@@ -153,9 +153,43 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(keys).toEqual(['foo:1', 'foo:2']);
     });
 
+    it('should paginate from a valid exclusiveStartKey', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('alpha', Buffer.from('1'));
+        await client.setValue('beta', Buffer.from('2'));
+        await client.setValue('gamma', Buffer.from('3'));
+
+        const iterator = await client.iterateKeys('beta', null, 1000);
+        const keys: string[] = [];
+        for await (const entry of iterator) {
+            keys.push(entry.key);
+        }
+
+        expect(keys).toEqual(['gamma']);
+    });
+
+    it('should throw the crawlee contract error for an unknown exclusiveStartKey', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('alpha', Buffer.from('1'));
+
+        // The error surfaces when the first page is fetched (on first next()).
+        const iterator = await client.iterateKeys('does-not-exist', null, 1000);
+        await expect(iterator.next()).rejects.toThrow(
+            'exclusiveStartKey "does-not-exist" was not found in the key-value store. ' +
+                'This is likely a bug — the key may have been deleted between paginated listKeys calls.',
+        );
+    });
+
     it('should get public URL', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
+        // getPublicUrl is existence-aware: a missing record yields null.
+        expect(await client.getPublicUrl('my-key')).toBeNull();
+
+        // Once the record exists, it returns a file:// URL.
+        await client.setValue('my-key', Buffer.from('v'));
         const url = await client.getPublicUrl('my-key');
         expect(url).toMatch(/^file:\/\//);
         // Hyphen is in the unreserved set (quote(safe='') keeps `. - _ ~`), so it

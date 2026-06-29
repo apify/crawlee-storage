@@ -12,7 +12,13 @@ use tokio::sync::Mutex;
 use models::{DatasetMetadata, KeyValueStoreMetadata, KeyValueStoreRecord, RequestQueueMetadata};
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
-    napi::Error::from_reason(e.to_string())
+    use crawlee_storage::utils::StorageError;
+    // Listed explicitly so a future refactor of the variant's Display text
+    // doesn't silently change the JS-visible message.
+    match e {
+        StorageError::ExclusiveStartKeyNotFound(_) => napi::Error::from_reason(e.to_string()),
+        other => napi::Error::from_reason(other.to_string()),
+    }
 }
 
 /// The content-type sentinel for null KVS values (stored on disk as an empty
@@ -515,8 +521,11 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
+    /// Build a `file://` URL for `key`, or `null` if no value file exists for
+    /// it. Stats the encoded path; does not probe bare-file extensions, so the
+    /// caller resolves the on-disk key via `resolveExistingKey` first if needed.
     #[napi]
-    pub async fn get_public_url(&self, key: String) -> String {
+    pub async fn get_public_url(&self, key: String) -> Option<String> {
         self.inner.get_public_url(&key).await
     }
 

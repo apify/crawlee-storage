@@ -218,7 +218,13 @@ class FileSystemKeyValueStoreClient:
         page_size: builtins.int | None = None,
         prefix: builtins.str | None = None,
     ) -> KvsKeyIterator: ...
-    async def get_public_url(self, key: builtins.str) -> builtins.str: ...
+    async def get_public_url(self, key: builtins.str) -> builtins.str | None:
+        r"""
+        Build a `file://` URL for `key`, or `None` if no value file exists for it
+        (matching the crawlee `str | None` contract). For the bare-file
+        (`INPUT` -> `INPUT.json`) case the caller resolves the on-disk key via
+        `resolve_existing_key` first and passes that key here.
+        """
     async def record_exists(self, key: builtins.str) -> builtins.bool:
         r"""
         Check whether a tracked record (value file + metadata sidecar) exists for
