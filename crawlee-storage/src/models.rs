@@ -136,6 +136,37 @@ pub struct KeyValueStoreRecordMetadata {
     pub size: Option<usize>,
 }
 
+/// A fully-read KVS record: metadata with a *guaranteed* non-optional `size`
+/// plus the raw value bytes.
+///
+/// This is what the binding layer should hand callers. Whereas
+/// [`KeyValueStoreRecordMetadata::size`] is `Option<usize>` (a sidecar written
+/// by crawlee-JS `MemoryStorage` or an older Python client may omit it), the
+/// core finalizes `size` from the actual value-file length when it reads a
+/// record, so this struct's `size` is always populated. Both bindings type it
+/// as a non-optional integer (`size: number` / `size: int`), matching
+/// crawlee's `KeyValueStoreItemData.size: number`. Centralizing the read +
+/// size-finalization here keeps the two bindings from each rolling their own
+/// (subtly different) fallback.
+#[derive(Debug, Clone)]
+pub struct KeyValueStoreRecord {
+    pub key: String,
+    pub content_type: String,
+    pub size: usize,
+    pub value: Vec<u8>,
+}
+
+/// Path + finalized record metadata for a value file, *without* reading its
+/// bytes — for streaming reads where the binding opens the file itself. Like
+/// [`KeyValueStoreRecord`], `size` is guaranteed non-optional.
+#[derive(Debug, Clone)]
+pub struct KeyValueStoreValueFileInfo {
+    pub key: String,
+    pub content_type: String,
+    pub size: usize,
+    pub path: std::path::PathBuf,
+}
+
 // ─── Request Queue Metadata ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

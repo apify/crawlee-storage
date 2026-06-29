@@ -205,21 +205,16 @@ fn rq_metadata_to_py(py: Python<'_>, meta: &models::RequestQueueMetadata) -> PyR
     Ok(dict.into_pyobject(py)?.into_any().unbind())
 }
 
-/// Convert a KVS file record (raw bytes) to a Python dict with `bytes` value.
-fn record_file_to_py(
-    py: Python<'_>,
-    key: &str,
-    content_type: &str,
-    size: Option<usize>,
-    data: &[u8],
-) -> PyResult<Py<PyAny>> {
+/// Convert a fully-read KVS record (raw bytes + non-optional size, finalized by
+/// the core) to a Python dict with a `bytes` value.
+fn record_to_py(py: Python<'_>, record: &models::KeyValueStoreRecord) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
 
     let dict = PyDict::new(py);
-    dict.set_item("key", key)?;
-    dict.set_item("contentType", content_type)?;
-    dict.set_item("size", size)?;
-    dict.set_item("value", pyo3::types::PyBytes::new(py, data))?;
+    dict.set_item("key", &record.key)?;
+    dict.set_item("contentType", &record.content_type)?;
+    dict.set_item("size", record.size)?;
+    dict.set_item("value", pyo3::types::PyBytes::new(py, &record.value))?;
 
     Ok(dict.into_pyobject(py)?.into_any().unbind())
 }
@@ -624,16 +619,9 @@ impl FileSystemKeyValueStoreClient {
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client.get_value(&key, true).await.map_err(storage_err)?;
+            let result = client.read_value(&key).await.map_err(storage_err)?;
             match result {
-                Some((path, meta)) => {
-                    let data = tokio::fs::read(&path)
-                        .await
-                        .map_err(|e| storage_err(e.into()))?;
-                    Python::attach(|py| {
-                        record_file_to_py(py, &key, &meta.content_type, meta.size, &data)
-                    })
-                }
+                Some(record) => Python::attach(|py| record_to_py(py, &record)),
                 None => Ok(Python::attach(|py| py.None())),
             }
         })
@@ -668,18 +656,11 @@ impl FileSystemKeyValueStoreClient {
                 .map(|(ext, ct)| (ext.as_str(), ct.as_str()))
                 .collect();
             let result = client
-                .resolve_value(&key, &fallbacks)
+                .resolve_and_read_value(&key, &fallbacks)
                 .await
                 .map_err(storage_err)?;
             match result {
-                Some((path, meta)) => {
-                    let data = tokio::fs::read(&path)
-                        .await
-                        .map_err(|e| storage_err(e.into()))?;
-                    Python::attach(|py| {
-                        record_file_to_py(py, &meta.key, &meta.content_type, meta.size, &data)
-                    })
-                }
+                Some(record) => Python::attach(|py| record_to_py(py, &record)),
                 None => Ok(Python::attach(|py| py.None())),
             }
         })

@@ -342,27 +342,8 @@ impl FileSystemKeyValueStoreClient {
     #[napi]
     pub async fn get_value(&self, key: String) -> napi::Result<Option<KeyValueStoreRecord>> {
         let inner = self.inner.clone();
-        let result = inner.get_value(&key, true).await.map_err(storage_err)?;
-
-        match result {
-            Some((path, meta)) => {
-                let raw_bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-                // The core backfills `size` from the value file for any sidecar
-                // that lacks it, so it is always present on read; fall back to
-                // the actual byte count we just read just in case.
-                let size = meta.size.unwrap_or(raw_bytes.len()) as f64;
-
-                Ok(Some(KeyValueStoreRecord {
-                    key,
-                    content_type: meta.content_type,
-                    size,
-                    value: Buffer::from(raw_bytes),
-                }))
-            }
-            None => Ok(None),
-        }
+        let result = inner.read_value(&key).await.map_err(storage_err)?;
+        Ok(result.map(KeyValueStoreRecord::from))
     }
 
     /// Resolve a key to a record, transparently falling back to out-of-band
@@ -388,25 +369,10 @@ impl FileSystemKeyValueStoreClient {
             .collect();
         let inner = self.inner.clone();
         let result = inner
-            .resolve_value(&key, &fallbacks)
+            .resolve_and_read_value(&key, &fallbacks)
             .await
             .map_err(storage_err)?;
-
-        match result {
-            Some((path, meta)) => {
-                let raw_bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-                let size = meta.size.unwrap_or(raw_bytes.len()) as f64;
-                Ok(Some(KeyValueStoreRecord {
-                    key: meta.key,
-                    content_type: meta.content_type,
-                    size,
-                    value: Buffer::from(raw_bytes),
-                }))
-            }
-            None => Ok(None),
-        }
+        Ok(result.map(KeyValueStoreRecord::from))
     }
 
     /// Resolve a key to the on-disk key that actually exists, using the same
@@ -443,22 +409,19 @@ impl FileSystemKeyValueStoreClient {
     #[napi(js_name = "_getValueFileInfo", skip_typescript)]
     pub async fn get_value_file_info(&self, key: String) -> napi::Result<Option<Value>> {
         let inner = self.inner.clone();
-        let result = inner.get_value(&key, true).await.map_err(storage_err)?;
+        let result = inner.value_file_info(&key).await.map_err(storage_err)?;
 
         match result {
-            Some((path, meta)) => {
+            Some(info) => {
                 let mut map = serde_json::Map::new();
-                map.insert("key".to_string(), Value::String(key));
-                map.insert("contentType".to_string(), Value::String(meta.content_type));
-                // The core backfills `size` from the value file for any sidecar
-                // that lacks it, so it is always present on read.
-                map.insert(
-                    "size".to_string(),
-                    Value::Number(meta.size.unwrap_or(0).into()),
-                );
+                map.insert("key".to_string(), Value::String(info.key));
+                map.insert("contentType".to_string(), Value::String(info.content_type));
+                // The core finalizes `size` to a non-optional value (stating the
+                // file when the sidecar omits it), shared with the read path.
+                map.insert("size".to_string(), Value::Number(info.size.into()));
                 map.insert(
                     "filePath".to_string(),
-                    Value::String(path.to_string_lossy().to_string()),
+                    Value::String(info.path.to_string_lossy().to_string()),
                 );
                 Ok(Some(Value::Object(map)))
             }
