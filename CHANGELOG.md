@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Fake clock support for testing ([#41](https://github.com/apify/crawlee-storage/pull/41)) ([0b9a28f](https://github.com/apify/crawlee-storage/commit/0b9a28ffd3df21a92ade9a6e597a9aeac2e2a4bf)) by [@janbuchar](https://github.com/janbuchar)
 - Return native Date from JS bindings ([#49](https://github.com/apify/crawlee-storage/pull/49)) ([6c66ebf](https://github.com/apify/crawlee-storage/commit/6c66ebf4623f622f4f96d76543fa9524afbcbce9)) by [@janbuchar](https://github.com/janbuchar)
 - Add `prefix` option to KVS listKeys, flip assumeSoleOwner default ([#56](https://github.com/apify/crawlee-storage/pull/56)) ([01f8157](https://github.com/apify/crawlee-storage/commit/01f81576f30c14e2d151606e9fef315b5a3401c4)) by [@janbuchar](https://github.com/janbuchar)
+- [**breaking**] Replace require_record_metadata flag with a higher-level resolveValue method ([#60](https://github.com/apify/crawlee-storage/pull/60)) ([0930389](https://github.com/apify/crawlee-storage/commit/09303899f4d8e29c65393619613286add934864a)) by [@janbuchar](https://github.com/janbuchar)
 
 ### 🐛 Bug Fixes
 
