@@ -58,16 +58,10 @@ export interface KvsKeyIterator {
 
 export interface FileSystemKeyValueStoreClient {
     /**
-     * Get a value as a ReadableStream of bytes. Returns null if the key doesn't exist.
-     *
-     * When `requireRecordMetadata` is `false`, a value file without a metadata
-     * sidecar is also streamable (used to read out-of-band files such as a
-     * CLI-written `INPUT.json`). Defaults to `true` (sidecar required).
+     * Get a tracked record's value as a ReadableStream of bytes. Returns null if
+     * there is no tracked record (value file + metadata sidecar) for the key.
      */
-    getValueStream(
-        key: string,
-        requireRecordMetadata?: boolean,
-    ): Promise<KeyValueStoreStreamRecord | null>;
+    getValueStream(key: string): Promise<KeyValueStoreStreamRecord | null>;
     /** Set a value from a ReadableStream. Consumes the entire stream and writes atomically. */
     setValueStream(
         key: string,

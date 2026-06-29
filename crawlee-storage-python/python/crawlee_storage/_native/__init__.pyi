@@ -163,16 +163,43 @@ class FileSystemKeyValueStoreClient:
         """
     async def get_metadata(self) -> KeyValueStoreMetadata: ...
     async def drop_storage(self) -> None: ...
-    async def get_value(
-        self, key: builtins.str, require_record_metadata: builtins.bool = True
+    async def get_value(self, key: builtins.str) -> KeyValueStoreRecord | None:
+        r"""
+        Get a tracked record (value file + metadata sidecar) by key.
+
+        To read out-of-band files that have no metadata sidecar (e.g. a
+        CLI-written `INPUT.json`), use `resolve_value`, which probes the
+        conventional bare-file extensions.
+        """
+    async def resolve_value(
+        self, key: builtins.str, bare_fallbacks: typing.Sequence[tuple[builtins.str, builtins.str]]
     ) -> KeyValueStoreRecord | None:
         r"""
-        Get a record by key.
+        Resolve a key to a record, transparently falling back to out-of-band
+        ("bare") value files that have no metadata sidecar.
 
-        When `require_record_metadata` is `False`, a value file without a metadata
-        sidecar is also returned (with a generic `application/octet-stream` content
-        type and no type inference) — used to read out-of-band files such as a
-        CLI-written `INPUT.json`. Defaults to `True` (sidecar required).
+        Tries the tracked record for the literal `key` first (its content type
+        comes verbatim from the sidecar), then probes each `(extension,
+        content_type)` in `bare_fallbacks` as a bare `key + extension` file,
+        reporting the declared content type on a match. The first match wins;
+        the returned record is always keyed by the requested `key`. Returns
+        `None` if nothing resolves.
+
+        Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
+        instead of hand-rolling the extension probing in Python. The core does
+        no MIME inference of its own — the caller declares which extensions map
+        to which content type. An empty `content_type` keeps the matched file's
+        synthesized `application/octet-stream`.
+        """
+    async def resolve_existing_key(
+        self, key: builtins.str, bare_fallbacks: typing.Sequence[builtins.str]
+    ) -> builtins.str | None:
+        r"""
+        Resolve a key to the on-disk key that actually exists, using the same
+        fallback probe order as `resolve_value` but without reading the value.
+        Returns the matched key (the literal key or `key + extension`), or
+        `None` if nothing exists. Pass the result to `get_public_url` so the URL
+        points at the file that exists.
         """
     async def set_value(
         self, key: builtins.str, value: builtins.bytes, content_type: builtins.str | None = None
@@ -192,13 +219,11 @@ class FileSystemKeyValueStoreClient:
         prefix: builtins.str | None = None,
     ) -> KvsKeyIterator: ...
     async def get_public_url(self, key: builtins.str) -> builtins.str: ...
-    async def record_exists(self, key: builtins.str, require_record_metadata: builtins.bool = True) -> builtins.bool:
+    async def record_exists(self, key: builtins.str) -> builtins.bool:
         r"""
-        Check whether a record exists for `key`.
-
-        When `require_record_metadata` is `False`, a value file with no metadata
-        sidecar also counts as existing (matching the relaxed `get_value` lookup).
-        Defaults to `True` (sidecar required).
+        Check whether a tracked record (value file + metadata sidecar) exists for
+        `key`. To also match out-of-band files with no sidecar, use
+        `resolve_existing_key`, which probes the conventional bare-file extensions.
         """
 
 @typing.final

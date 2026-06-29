@@ -417,6 +417,81 @@ impl FileSystemKeyValueStoreClient {
         Ok(Some((value_path, record_meta)))
     }
 
+    /// Resolve a key to a value, transparently falling back to out-of-band
+    /// ("bare") value files that have no metadata sidecar.
+    ///
+    /// This bundles the lookup that binding layers would otherwise hand-roll: a
+    /// run's input may be a properly-tracked record, or an out-of-band file a
+    /// CLI/platform dropped on disk under one of several conventional names
+    /// (`INPUT`, `INPUT.json`, `INPUT.bin`, ...). The probe order is:
+    ///
+    /// 1. The tracked record for the literal `key` (value file + sidecar). Its
+    ///    `content_type` comes verbatim from the sidecar.
+    /// 2. For each `(extension, content_type)` in `bare_fallbacks`, the bare
+    ///    file at `key + extension` (no sidecar required). On a match the
+    ///    supplied `content_type` is used.
+    ///
+    /// The first match wins. The returned [`KeyValueStoreRecordMetadata`] is
+    /// always keyed by the originally-requested `key` (never the on-disk
+    /// filename of a matched bare file), so callers see a stable key.
+    ///
+    /// The core still performs **no** MIME inference of its own: the caller
+    /// declares which extensions to probe and what content type each implies
+    /// (the `(extension, content_type)` pairs). That keeps the "which files are
+    /// input, and what type is a `.json`" policy at the frontend while the
+    /// probing/lookup mechanism lives here, shared by every binding.
+    ///
+    /// Returns `(value_path, metadata)` for the first match, or `None`.
+    pub async fn resolve_value(
+        &self,
+        key: &str,
+        bare_fallbacks: &[(&str, &str)],
+    ) -> Result<Option<(PathBuf, KeyValueStoreRecordMetadata)>> {
+        // 1. Tracked record for the literal key — sidecar content type wins.
+        if let Some(result) = self.get_value(key, true).await? {
+            return Ok(Some(result));
+        }
+
+        // 2. Out-of-band bare files: probe each conventional extension.
+        for (extension, content_type) in bare_fallbacks {
+            let candidate = format!("{key}{extension}");
+            if let Some((path, mut meta)) = self.get_value(&candidate, false).await? {
+                // Re-key to the requested key and apply the caller-declared
+                // content type for this extension. An empty extension (the
+                // literal key) keeps the synthesized `application/octet-stream`
+                // unless the caller declared something else.
+                meta.key = key.to_string();
+                if !content_type.is_empty() {
+                    meta.content_type = (*content_type).to_string();
+                }
+                return Ok(Some((path, meta)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check whether a key resolves to a value, using the same fallback probe
+    /// order as [`resolve_value`](Self::resolve_value) but without reading the
+    /// value file. Returns the matched on-disk key (the literal key or a bare
+    /// `key + extension`), or `None` if nothing exists.
+    ///
+    /// The matched key is what a caller should pass to
+    /// [`get_public_url`](Self::get_public_url) so the URL points at the file
+    /// that actually exists.
+    pub async fn resolve_existing_key(&self, key: &str, bare_fallbacks: &[&str]) -> Option<String> {
+        if self.record_exists(key, true).await {
+            return Some(key.to_string());
+        }
+        for extension in bare_fallbacks {
+            let candidate = format!("{key}{extension}");
+            if self.record_exists(&candidate, false).await {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     /// Write raw bytes for a key, with sidecar metadata and atomic write.
     ///
     /// The client is a pure byte transport: `data` is written verbatim and
@@ -818,6 +893,147 @@ mod tests {
         // A genuinely missing file is still absent under either flag.
         assert!(client.get_value("nope", false).await.unwrap().is_none());
         assert!(!client.record_exists("nope", false).await);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_value_prefers_tracked_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // A properly-tracked record for "INPUT" must win over any bare-file
+        // probe, and its verbatim sidecar content type is preserved (the
+        // caller-declared fallback content types are NOT applied).
+        client
+            .set_value("INPUT", br#"{"x":1}"#, "application/json".to_string())
+            .await
+            .unwrap();
+
+        let fallbacks = [("", ""), (".json", "application/json"), (".bin", "")];
+        let (path, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(bytes, br#"{"x":1}"#);
+        assert_eq!(meta.key, "INPUT");
+        assert_eq!(meta.content_type, "application/json");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_value_falls_back_to_bare_file_with_inferred_type() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // No tracked "INPUT" record; instead a bare "INPUT.json" file (no
+        // sidecar), as a CLI/platform writer would leave it.
+        let payload = br#"{"foo":"bar"}"#;
+        tokio::fs::write(client.path().join("INPUT.json"), payload)
+            .await
+            .unwrap();
+
+        let fallbacks = [
+            ("", ""),
+            (".json", "application/json"),
+            (".txt", "text/plain"),
+            (".bin", ""),
+        ];
+        let (path, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(bytes, payload);
+        // Re-keyed to the requested key, not the on-disk "INPUT.json".
+        assert_eq!(meta.key, "INPUT");
+        // Caller-declared content type for the matched extension is applied.
+        assert_eq!(meta.content_type, "application/json");
+        assert_eq!(meta.size, Some(payload.len()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_value_bare_empty_extension_keeps_octet_stream() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // A bare file under the literal key with an empty-extension fallback
+        // (empty declared content type) keeps the synthesized octet-stream.
+        tokio::fs::write(client.path().join("INPUT"), b"raw")
+            .await
+            .unwrap();
+
+        let fallbacks = [("", ""), (".json", "application/json")];
+        let (_, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.key, "INPUT");
+        assert_eq!(meta.content_type, "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_value_missing_returns_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let fallbacks = [("", ""), (".json", "application/json")];
+        assert!(client
+            .resolve_value("nope", &fallbacks)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_existing_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let fallbacks = ["", ".json", ".txt", ".bin"];
+
+        // Tracked record resolves to the literal key.
+        client
+            .set_value("tracked", b"x", "text/plain".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            client.resolve_existing_key("tracked", &fallbacks).await,
+            Some("tracked".to_string())
+        );
+
+        // Bare file resolves to the matched on-disk filename (key + extension).
+        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
+            .await
+            .unwrap();
+        assert_eq!(
+            client.resolve_existing_key("INPUT", &fallbacks).await,
+            Some("INPUT.json".to_string())
+        );
+
+        // Nothing matches → None.
+        assert_eq!(client.resolve_existing_key("nope", &fallbacks).await, None);
     }
 
     #[tokio::test]

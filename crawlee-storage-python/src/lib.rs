@@ -610,26 +610,16 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    /// Get a record by key.
+    /// Get a tracked record (value file + metadata sidecar) by key.
     ///
-    /// When `require_record_metadata` is `False`, a value file without a metadata
-    /// sidecar is also returned (with a generic `application/octet-stream` content
-    /// type and no type inference) — used to read out-of-band files such as a
-    /// CLI-written `INPUT.json`. Defaults to `True` (sidecar required).
+    /// To read out-of-band files that have no metadata sidecar (e.g. a
+    /// CLI-written `INPUT.json`), use `resolve_value`, which probes the
+    /// conventional bare-file extensions.
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
-    #[pyo3(signature = (key, require_record_metadata=true))]
-    fn get_value<'py>(
-        &self,
-        py: Python<'py>,
-        key: String,
-        require_record_metadata: bool,
-    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client
-                .get_value(&key, require_record_metadata)
-                .await
-                .map_err(storage_err)?;
+            let result = client.get_value(&key, true).await.map_err(storage_err)?;
             match result {
                 Some((path, meta)) => {
                     let data = tokio::fs::read(&path)
@@ -641,6 +631,71 @@ impl FileSystemKeyValueStoreClient {
                 }
                 None => Ok(Python::attach(|py| py.None())),
             }
+        })
+    }
+
+    /// Resolve a key to a record, transparently falling back to out-of-band
+    /// ("bare") value files that have no metadata sidecar.
+    ///
+    /// Tries the tracked record for the literal `key` first (its content type
+    /// comes verbatim from the sidecar), then probes each `(extension,
+    /// content_type)` in `bare_fallbacks` as a bare `key + extension` file,
+    /// reporting the declared content type on a match. The first match wins;
+    /// the returned record is always keyed by the requested `key`. Returns
+    /// `None` if nothing resolves.
+    ///
+    /// Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
+    /// instead of hand-rolling the extension probing in Python. The core does
+    /// no MIME inference of its own — the caller declares which extensions map
+    /// to which content type. An empty `content_type` keeps the matched file's
+    /// synthesized `application/octet-stream`.
+    #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
+    fn resolve_value<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        bare_fallbacks: Vec<(String, String)>,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let fallbacks: Vec<(&str, &str)> = bare_fallbacks
+                .iter()
+                .map(|(ext, ct)| (ext.as_str(), ct.as_str()))
+                .collect();
+            let result = client
+                .resolve_value(&key, &fallbacks)
+                .await
+                .map_err(storage_err)?;
+            match result {
+                Some((path, meta)) => {
+                    let data = tokio::fs::read(&path)
+                        .await
+                        .map_err(|e| storage_err(e.into()))?;
+                    Python::attach(|py| {
+                        record_file_to_py(py, &meta.key, &meta.content_type, meta.size, &data)
+                    })
+                }
+                None => Ok(Python::attach(|py| py.None())),
+            }
+        })
+    }
+
+    /// Resolve a key to the on-disk key that actually exists, using the same
+    /// fallback probe order as `resolve_value` but without reading the value.
+    /// Returns the matched key (the literal key or `key + extension`), or
+    /// `None` if nothing exists. Pass the result to `get_public_url` so the URL
+    /// points at the file that exists.
+    #[gen_stub(override_return_type(type_repr = "builtins.str | None"))]
+    fn resolve_existing_key<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        bare_fallbacks: Vec<String>,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let fallbacks: Vec<&str> = bare_fallbacks.iter().map(String::as_str).collect();
+            Ok(client.resolve_existing_key(&key, &fallbacks).await)
         })
     }
 
@@ -714,22 +769,18 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    /// Check whether a record exists for `key`.
-    ///
-    /// When `require_record_metadata` is `False`, a value file with no metadata
-    /// sidecar also counts as existing (matching the relaxed `get_value` lookup).
-    /// Defaults to `True` (sidecar required).
+    /// Check whether a tracked record (value file + metadata sidecar) exists for
+    /// `key`. To also match out-of-band files with no sidecar, use
+    /// `resolve_existing_key`, which probes the conventional bare-file extensions.
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
-    #[pyo3(signature = (key, require_record_metadata=true))]
     fn record_exists<'py>(
         &self,
         py: Python<'py>,
         key: String,
-        require_record_metadata: bool,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(client.record_exists(&key, require_record_metadata).await)
+            Ok(client.record_exists(&key, true).await)
         })
     }
 }

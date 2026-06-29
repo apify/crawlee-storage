@@ -188,7 +188,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(existsSync(client.pathToMetadata)).toBe(true);
     });
 
-    it('should read a sidecar-less file only when requireRecordMetadata is false', async () => {
+    it('getValue/recordExists are strict: a sidecar-less file is invisible to them', async () => {
         const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
@@ -196,18 +196,64 @@ describe('FileSystemKeyValueStoreClient', () => {
         const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
         await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
 
-        // Default (strict): invisible.
+        // getValue / recordExists only ever see tracked records (value + sidecar),
+        // so a bare file is invisible to them — reaching it is resolveValue's job.
         expect(await client.getValue('INPUT.json')).toBeNull();
         expect(await client.recordExists('INPUT.json')).toBe(false);
+    });
 
-        // Opt-in: served with generic content type, no extension inference.
-        const record = await client.getValue('INPUT.json', false);
+    it('resolveValue prefers a tracked record over bare-file fallbacks', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('INPUT', Buffer.from(JSON.stringify({ x: 1 })), 'application/json');
+
+        const fallbacks = [
+            { extension: '', contentType: '' },
+            { extension: '.json', contentType: 'application/json; charset=utf-8' },
+        ];
+        const record = await client.resolveValue('INPUT', fallbacks);
         expect(record).not.toBeNull();
-        expect(record!.key).toBe('INPUT.json');
-        expect(record!.contentType).toBe('application/octet-stream');
-        expect(Buffer.isBuffer(record!.value)).toBe(true);
+        expect(record!.key).toBe('INPUT');
+        // The tracked sidecar content type wins — fallback types are NOT applied.
+        expect(record!.contentType).toBe('application/json');
+    });
+
+    it('resolveValue falls back to a bare file and applies the declared content type', async () => {
+        const { writeFile } = await import('fs/promises');
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
+
+        const fallbacks = [
+            { extension: '', contentType: '' },
+            { extension: '.json', contentType: 'application/json; charset=utf-8' },
+            { extension: '.bin', contentType: '' },
+        ];
+        const record = await client.resolveValue('INPUT', fallbacks);
+        expect(record).not.toBeNull();
+        // Re-keyed to the requested key, not the on-disk "INPUT.json".
+        expect(record!.key).toBe('INPUT');
+        expect(record!.contentType).toBe('application/json; charset=utf-8');
         expect(record!.value.equals(payload)).toBe(true);
-        expect(await client.recordExists('INPUT.json', false)).toBe(true);
+
+        // Nothing resolves → null.
+        expect(await client.resolveValue('missing', fallbacks)).toBeNull();
+    });
+
+    it('resolveExistingKey returns the matched on-disk key', async () => {
+        const { writeFile } = await import('fs/promises');
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        const extensions = ['', '.json', '.txt', '.bin'];
+
+        await client.setValue('tracked', Buffer.from('x'), 'text/plain');
+        expect(await client.resolveExistingKey('tracked', extensions)).toBe('tracked');
+
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), Buffer.from('{}'));
+        expect(await client.resolveExistingKey('INPUT', extensions)).toBe('INPUT.json');
+
+        expect(await client.resolveExistingKey('nope', extensions)).toBeNull();
     });
 
     it('should drop storage entirely', async () => {
