@@ -14,7 +14,7 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 /// Source of "now" for storage clients. Implementations must be cheap and
 /// monotonic-in-practice (we don't formally require monotonicity, but the
@@ -58,22 +58,25 @@ impl TestClock {
         Self::default()
     }
 
-    /// Move the clock forward by `millis`. Negative values move it backwards,
+    /// Move the clock forward by `delta`. Negative deltas move it backwards,
     /// which is supported but rarely what you want — the orderNo lock model
     /// assumes a roughly monotonic clock.
-    pub fn advance(&self, millis: i64) {
-        self.offset_millis.fetch_add(millis, Ordering::SeqCst);
+    pub fn advance(&self, delta: Duration) {
+        self.offset_millis
+            .fetch_add(delta.num_milliseconds(), Ordering::SeqCst);
     }
 
     /// Replace the current offset wholesale (useful for setting an absolute
-    /// time rather than relative advancement).
-    pub fn set_offset(&self, millis: i64) {
-        self.offset_millis.store(millis, Ordering::SeqCst);
+    /// offset from epoch-now rather than relative advancement). Sub-millisecond
+    /// precision is truncated.
+    pub fn set_offset(&self, offset: Duration) {
+        self.offset_millis
+            .store(offset.num_milliseconds(), Ordering::SeqCst);
     }
 
-    /// Read the current offset in milliseconds.
-    pub fn offset(&self) -> i64 {
-        self.offset_millis.load(Ordering::SeqCst)
+    /// Read the current offset as a [`Duration`].
+    pub fn offset(&self) -> Duration {
+        Duration::milliseconds(self.offset_millis.load(Ordering::SeqCst))
     }
 }
 
