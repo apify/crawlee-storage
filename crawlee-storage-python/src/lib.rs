@@ -773,12 +773,15 @@ impl FileSystemKeyValueStoreClient {
     /// `key`. To also match out-of-band files with no sidecar, use
     /// `resolve_existing_key`, which probes the conventional bare-file extensions.
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
-    fn record_exists<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
+    fn record_exists<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { Ok(client.record_exists(&key, true).await) },
-        )
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(client.record_exists(&key, true).await)
+        })
     }
 }
 

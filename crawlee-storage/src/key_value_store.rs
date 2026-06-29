@@ -479,11 +479,7 @@ impl FileSystemKeyValueStoreClient {
     /// The matched key is what a caller should pass to
     /// [`get_public_url`](Self::get_public_url) so the URL points at the file
     /// that actually exists.
-    pub async fn resolve_existing_key(
-        &self,
-        key: &str,
-        bare_fallbacks: &[&str],
-    ) -> Option<String> {
+    pub async fn resolve_existing_key(&self, key: &str, bare_fallbacks: &[&str]) -> Option<String> {
         if self.record_exists(key, true).await {
             return Some(key.to_string());
         }
@@ -917,7 +913,11 @@ mod tests {
             .unwrap();
 
         let fallbacks = [("", ""), (".json", "application/json"), (".bin", "")];
-        let (path, meta) = client.resolve_value("INPUT", &fallbacks).await.unwrap().unwrap();
+        let (path, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
         let bytes = tokio::fs::read(&path).await.unwrap();
         assert_eq!(bytes, br#"{"x":1}"#);
         assert_eq!(meta.key, "INPUT");
@@ -946,7 +946,11 @@ mod tests {
             (".txt", "text/plain"),
             (".bin", ""),
         ];
-        let (path, meta) = client.resolve_value("INPUT", &fallbacks).await.unwrap().unwrap();
+        let (path, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
         let bytes = tokio::fs::read(&path).await.unwrap();
         assert_eq!(bytes, payload);
         // Re-keyed to the requested key, not the on-disk "INPUT.json".
@@ -972,7 +976,11 @@ mod tests {
             .unwrap();
 
         let fallbacks = [("", ""), (".json", "application/json")];
-        let (_, meta) = client.resolve_value("INPUT", &fallbacks).await.unwrap().unwrap();
+        let (_, meta) = client
+            .resolve_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.key, "INPUT");
         assert_eq!(meta.content_type, "application/octet-stream");
     }
