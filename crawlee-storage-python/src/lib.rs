@@ -28,7 +28,7 @@ fn pick_clock(use_test_clock: bool) -> (ClockRef, Option<Arc<TestClock>>) {
 }
 
 /// Shared `advance_clock_for_testing` implementation. Raises `ValueError` if
-/// the client was opened without `use_test_clock=True`. 
+/// the client was opened without `use_test_clock=True`.
 fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, delta: Duration) -> PyResult<()> {
     match test_clock {
         Some(tc) => {
