@@ -211,6 +211,10 @@ class FileSystemKeyValueStoreClient:
         Matching is by exact key (no extension globbing): to spare both `INPUT`
         and `INPUT.json`, pass both. The store metadata is always kept.
         """
+    async def delete_value(self, key: builtins.str) -> None:
+        r"""
+        Delete a single value (and its metadata sidecar) by key.
+        """
     def iterate_keys(
         self,
         exclusive_start_key: builtins.str | None = None,
