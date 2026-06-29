@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
 use crawlee_storage::models;
+use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
 };
@@ -223,22 +224,13 @@ fn record_to_py(py: Python<'_>, record: &models::KeyValueStoreRecord) -> PyResul
 
 const DEFAULT_PAGE_SIZE: usize = 1000;
 
-struct DatasetItemIteratorState {
-    client: Arc<crawlee_storage::dataset::FileSystemDatasetClient>,
-    offset: usize,
-    remaining_limit: Option<usize>,
-    desc: bool,
-    skip_empty: bool,
-    page_size: usize,
-    buffer: Vec<Value>,
-    buf_index: usize,
-    done: bool,
-}
-
 #[gen_stub_pyclass]
 #[pyclass]
 struct DatasetItemIterator {
-    state: Arc<Mutex<DatasetItemIteratorState>>,
+    // The shared core cursor owns the page-buffering state machine; this
+    // wrapper only converts each yielded item to a Python dict and turns
+    // exhaustion into `StopAsyncIteration`.
+    cursor: Arc<Mutex<crawlee_storage::pagination::PageCursor<DatasetItemSource>>>,
 }
 
 #[gen_stub_pymethods]
@@ -250,76 +242,22 @@ impl DatasetItemIterator {
 
     #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let state = self.state.clone();
+        let cursor = self.cursor.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut st = state.lock().await;
-
-            // If we still have buffered items, return the next one.
-            if st.buf_index < st.buffer.len() {
-                let item = st.buffer[st.buf_index].clone();
-                st.buf_index += 1;
-                return Python::attach(|py| value_to_py(py, &item));
+            match cursor.lock().await.next().await.map_err(storage_err)? {
+                Some(item) => Python::attach(|py| value_to_py(py, &item)),
+                None => Err(PyStopAsyncIteration::new_err(())),
             }
-
-            // If we've exhausted everything, signal StopAsyncIteration.
-            if st.done {
-                return Err(PyStopAsyncIteration::new_err(()));
-            }
-
-            // Fetch the next page.
-            let page = st
-                .client
-                .iterate_items_page(
-                    st.offset,
-                    st.remaining_limit,
-                    st.page_size,
-                    st.desc,
-                    st.skip_empty,
-                )
-                .await
-                .map_err(storage_err)?;
-
-            let page_len = page.items.len();
-            if page_len == 0 {
-                st.done = true;
-                return Err(PyStopAsyncIteration::new_err(()));
-            }
-
-            // Update state for the next page fetch.
-            st.offset += page_len;
-            if let Some(ref mut rem) = st.remaining_limit {
-                *rem = rem.saturating_sub(page_len);
-            }
-            if !page.has_more {
-                st.done = true;
-            }
-
-            // Buffer the page and return the first item.
-            st.buffer = page.items;
-            st.buf_index = 1; // We're returning index 0 now.
-            let item = st.buffer[0].clone();
-            Python::attach(|py| value_to_py(py, &item))
         })
     }
 }
 
 // ─── KVS Key Iterator ──────────────────────────────────────────────────────
 
-struct KvsKeyIteratorState {
-    client: Arc<crawlee_storage::key_value_store::FileSystemKeyValueStoreClient>,
-    exclusive_start_key: Option<String>,
-    remaining_limit: Option<usize>,
-    page_size: usize,
-    prefix: Option<String>,
-    buffer: Vec<crawlee_storage::models::KeyValueStoreRecordMetadata>,
-    buf_index: usize,
-    done: bool,
-}
-
 #[gen_stub_pyclass]
 #[pyclass]
 struct KvsKeyIterator {
-    state: Arc<Mutex<KvsKeyIteratorState>>,
+    cursor: Arc<Mutex<crawlee_storage::pagination::PageCursor<KvsKeySource>>>,
 }
 
 #[gen_stub_pymethods]
@@ -331,54 +269,12 @@ impl KvsKeyIterator {
 
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecordMetadata"))]
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let state = self.state.clone();
+        let cursor = self.cursor.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut st = state.lock().await;
-
-            // If we still have buffered items, return the next one.
-            if st.buf_index < st.buffer.len() {
-                let meta = st.buffer[st.buf_index].clone();
-                st.buf_index += 1;
-                return Python::attach(|py| serde_to_py(py, &meta));
+            match cursor.lock().await.next().await.map_err(storage_err)? {
+                Some(meta) => Python::attach(|py| serde_to_py(py, &meta)),
+                None => Err(PyStopAsyncIteration::new_err(())),
             }
-
-            // If we've exhausted everything, signal StopAsyncIteration.
-            if st.done {
-                return Err(PyStopAsyncIteration::new_err(()));
-            }
-
-            // Fetch the next page.
-            let page = st
-                .client
-                .iterate_keys_page(
-                    st.exclusive_start_key.as_deref(),
-                    st.remaining_limit,
-                    st.page_size,
-                    st.prefix.as_deref(),
-                )
-                .await
-                .map_err(storage_err)?;
-
-            let page_len = page.items.len();
-            if page_len == 0 {
-                st.done = true;
-                return Err(PyStopAsyncIteration::new_err(()));
-            }
-
-            // Update cursor to the last key in this page.
-            st.exclusive_start_key = Some(page.items.last().unwrap().key.clone());
-            if let Some(ref mut rem) = st.remaining_limit {
-                *rem = rem.saturating_sub(page_len);
-            }
-            if !page.has_more {
-                st.done = true;
-            }
-
-            // Buffer the page and return the first item.
-            st.buffer = page.items;
-            st.buf_index = 1;
-            let meta = st.buffer[0].clone();
-            Python::attach(|py| serde_to_py(py, &meta))
         })
     }
 }
@@ -514,18 +410,15 @@ impl FileSystemDatasetClient {
         skip_empty: bool,
         page_size: Option<usize>,
     ) -> DatasetItemIterator {
+        let source = DatasetItemSource::new(
+            self.inner.clone(),
+            offset,
+            page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+            desc,
+            skip_empty,
+        );
         DatasetItemIterator {
-            state: Arc::new(Mutex::new(DatasetItemIteratorState {
-                client: self.inner.clone(),
-                offset,
-                remaining_limit: limit,
-                desc,
-                skip_empty,
-                page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-                buffer: Vec::new(),
-                buf_index: 0,
-                done: false,
-            })),
+            cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
         }
     }
 }
@@ -739,17 +632,14 @@ impl FileSystemKeyValueStoreClient {
         page_size: Option<usize>,
         prefix: Option<String>,
     ) -> KvsKeyIterator {
+        let source = KvsKeySource::new(
+            self.inner.clone(),
+            exclusive_start_key,
+            page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+            prefix,
+        );
         KvsKeyIterator {
-            state: Arc::new(Mutex::new(KvsKeyIteratorState {
-                client: self.inner.clone(),
-                exclusive_start_key,
-                remaining_limit: limit,
-                page_size: page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-                prefix,
-                buffer: Vec::new(),
-                buf_index: 0,
-                done: false,
-            })),
+            cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
         }
     }
 
