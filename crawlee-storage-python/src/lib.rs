@@ -7,10 +7,9 @@ use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
 use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
 use pyo3::exceptions::{
-    PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
+    PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value;
@@ -44,96 +43,25 @@ fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, delta: Duration) -> P
     }
 }
 
+/// Convert a `serde_json::Value` to a Python object (`None`/`bool`/`int`/`float`/
+/// `str`/`list`/`dict`). Thin wrapper over `pythonize`, which walks the value
+/// via serde — so this stays correct as the JSON shape evolves without any
+/// hand-rolled recursion.
 fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
-    match value {
-        Value::Null => Ok(py.None()),
-        Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)?.into_any().unbind())
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            } else {
-                Ok(py.None())
-            }
-        }
-        Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
-        Value::Array(arr) => {
-            let list = pyo3::types::PyList::empty(py);
-            for item in arr {
-                list.append(value_to_py(py, item)?)?;
-            }
-            Ok(list.into_any().unbind())
-        }
-        Value::Object(map) => {
-            let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, value_to_py(py, v)?)?;
-            }
-            Ok(dict.into_any().unbind())
-        }
-    }
+    Ok(pythonize::pythonize(py, value)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .unbind())
 }
 
+/// Convert a Python object to a `serde_json::Value` via `pythonize`'s
+/// serde-backed depythonizer. Accepts the JSON-shaped Python types plus the
+/// sequence/collection types the old hand-rolled walker did
+/// (`None`/`bool`/`int`/`float`/`str`/`list`/`tuple`/`set`/`frozenset`/`dict`;
+/// sets and tuples become JSON arrays). Arbitrary objects now raise
+/// `TypeError` instead of being silently `str()`-stringified — that fallback
+/// was a quiet data-corruption hazard.
 fn py_to_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Value> {
-    if obj.is_none() {
-        return Ok(Value::Null);
-    }
-    if let Ok(b) = obj.extract::<bool>() {
-        return Ok(Value::Bool(b));
-    }
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(Value::Number(i.into()));
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return Ok(serde_json::Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null));
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(Value::String(s));
-    }
-    if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
-        let mut arr = Vec::new();
-        for item in list.iter() {
-            arr.push(py_to_value(&item)?);
-        }
-        return Ok(Value::Array(arr));
-    }
-    // Also handle tuples and sets as JSON arrays
-    if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
-        let mut arr = Vec::new();
-        for item in tuple.iter() {
-            arr.push(py_to_value(&item)?);
-        }
-        return Ok(Value::Array(arr));
-    }
-    if let Ok(set) = obj.cast::<pyo3::types::PySet>() {
-        let mut arr = Vec::new();
-        for item in set.iter() {
-            arr.push(py_to_value(&item)?);
-        }
-        return Ok(Value::Array(arr));
-    }
-    if let Ok(frozenset) = obj.cast::<pyo3::types::PyFrozenSet>() {
-        let mut arr = Vec::new();
-        for item in frozenset.iter() {
-            arr.push(py_to_value(&item)?);
-        }
-        return Ok(Value::Array(arr));
-    }
-    if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut map = serde_json::Map::new();
-        for (k, v) in dict.iter() {
-            let key: String = k.extract()?;
-            map.insert(key, py_to_value(&v)?);
-        }
-        return Ok(Value::Object(map));
-    }
-    // Fallback: convert via str()
-    let s: String = obj.str()?.extract()?;
-    Ok(Value::String(s))
+    pythonize::depythonize(obj).map_err(|e| PyTypeError::new_err(e.to_string()))
 }
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
