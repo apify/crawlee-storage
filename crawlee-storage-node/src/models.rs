@@ -29,6 +29,19 @@ pub struct KeyValueStoreRecord {
     pub value: Buffer,
 }
 
+impl From<crawlee_storage::models::KeyValueStoreRecord> for KeyValueStoreRecord {
+    fn from(r: crawlee_storage::models::KeyValueStoreRecord) -> Self {
+        Self {
+            key: r.key,
+            content_type: r.content_type,
+            // The core finalizes `size` to a non-optional `usize`; widen to
+            // `f64` for the FFI (exact up to 2^53 bytes).
+            size: r.size as f64,
+            value: Buffer::from(r.value),
+        }
+    }
+}
+
 /// One out-of-band ("bare") file fallback for `resolveValue` / `resolveExistingKey`:
 /// an extension appended to the looked-up key, plus the content type to report
 /// when a bare file with that extension is matched. An empty `contentType`

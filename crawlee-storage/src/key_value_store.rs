@@ -5,7 +5,10 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::clock::{system_clock, ClockRef};
-use crate::models::{KeyValueStoreMetadata, KeyValueStoreRecordMetadata, KvsKeysPage};
+use crate::models::{
+    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata,
+    KeyValueStoreValueFileInfo, KvsKeysPage,
+};
 use crate::utils::{
     atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps_value,
     validate_exclusive_args, validate_subdirectory, Result, StorageError, METADATA_FILENAME,
@@ -458,6 +461,83 @@ impl FileSystemKeyValueStoreClient {
         };
 
         Ok(Some((value_path, record_meta)))
+    }
+
+    /// Read a tracked record (value file + metadata sidecar) by key, returning
+    /// its raw bytes alongside metadata with a *guaranteed* non-optional `size`.
+    ///
+    /// This is the read counterpart that binding layers should use instead of
+    /// calling [`get_value`](Self::get_value) and re-reading the file + patching
+    /// `size` themselves (each binding previously did this slightly differently).
+    /// The `size` is finalized once, here: the sidecar's value if present, else
+    /// the length of the bytes just read. Returns `None` for a key with no
+    /// tracked record (strict — like `get_value(key, true)`).
+    pub async fn read_value(&self, key: &str) -> Result<Option<KeyValueStoreRecord>> {
+        match self.get_value(key, true).await? {
+            Some((path, meta)) => Ok(Some(self.read_record_bytes(path, meta).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Read the bytes for a `(path, metadata)` pair (as returned by
+    /// [`get_value`](Self::get_value) / [`resolve_value`](Self::resolve_value))
+    /// into a [`KeyValueStoreRecord`], finalizing `size` from the byte count
+    /// read when the sidecar didn't carry one. This is the single place the
+    /// "size is always populated" invariant is enforced.
+    async fn read_record_bytes(
+        &self,
+        path: PathBuf,
+        meta: KeyValueStoreRecordMetadata,
+    ) -> Result<KeyValueStoreRecord> {
+        let value = fs::read(&path).await?;
+        // `get_value`/`resolve_value` already backfill `size` from the value
+        // file, so it's normally present; fall back to the bytes we just read
+        // to keep the non-optional guarantee airtight.
+        let size = meta.size.unwrap_or(value.len());
+        Ok(KeyValueStoreRecord {
+            key: meta.key,
+            content_type: meta.content_type,
+            size,
+            value,
+        })
+    }
+
+    /// Get the value file path + finalized metadata for a record without
+    /// reading its bytes — for streaming reads. Like
+    /// [`read_value`](Self::read_value), `size` is guaranteed non-optional
+    /// (stated from the value file when the sidecar omits it). Returns `None`
+    /// for a key with no tracked record.
+    pub async fn value_file_info(&self, key: &str) -> Result<Option<KeyValueStoreValueFileInfo>> {
+        match self.get_value(key, true).await? {
+            Some((path, meta)) => {
+                let size = match meta.size {
+                    Some(size) => size,
+                    None => fs::metadata(&path).await.map(|m| m.len() as usize).unwrap_or(0),
+                };
+                Ok(Some(KeyValueStoreValueFileInfo {
+                    key: meta.key,
+                    content_type: meta.content_type,
+                    size,
+                    path,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Like [`resolve_value`](Self::resolve_value), but reads the matched value
+    /// file into a [`KeyValueStoreRecord`] (bytes + non-optional `size`) in one
+    /// call. This is the bare-file-aware read counterpart binding layers should
+    /// use so they don't re-implement the read + size-finalization.
+    pub async fn resolve_and_read_value(
+        &self,
+        key: &str,
+        bare_fallbacks: &[(&str, &str)],
+    ) -> Result<Option<KeyValueStoreRecord>> {
+        match self.resolve_value(key, bare_fallbacks).await? {
+            Some((path, meta)) => Ok(Some(self.read_record_bytes(path, meta).await?)),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a key to a value, transparently falling back to out-of-band
@@ -1633,5 +1713,117 @@ mod tests {
         assert_eq!(meta.base.modified_at.timestamp(), expected_secs);
         // The `.123Z` fractional part must survive too.
         assert_eq!(meta.base.accessed_at.timestamp_subsec_millis(), 123);
+    }
+
+    #[tokio::test]
+    async fn test_read_value_returns_bytes_and_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .set_value("k", b"hello", "text/plain".to_string())
+            .await
+            .unwrap();
+
+        let record = client.read_value("k").await.unwrap().unwrap();
+        assert_eq!(record.key, "k");
+        assert_eq!(record.content_type, "text/plain");
+        assert_eq!(record.value, b"hello");
+        // Non-optional size, populated from the sidecar.
+        assert_eq!(record.size, 5);
+
+        // A missing key reads as None.
+        assert!(client.read_value("nope").await.unwrap().is_none());
+        // A bare file with no sidecar is not a tracked record (strict).
+        tokio::fs::write(client.path().join("bare"), b"x")
+            .await
+            .unwrap();
+        assert!(client.read_value("bare").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_value_finalizes_size_for_sidecar_without_size() {
+        // A sidecar written by crawlee-JS / older Python may omit `size`.
+        // read_value must finalize it from the actual byte count, never None.
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        let key = "legacy";
+        let payload = b"twelve bytes";
+        let encoded = encode_key(key);
+        tokio::fs::write(client.path().join(&encoded), payload)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            client.path().join(format!("{encoded}.{METADATA_FILENAME}")),
+            br#"{"key":"legacy","contentType":"text/plain"}"#,
+        )
+        .await
+        .unwrap();
+
+        let record = client.read_value(key).await.unwrap().unwrap();
+        assert_eq!(record.value, payload);
+        assert_eq!(record.size, payload.len());
+    }
+
+    #[tokio::test]
+    async fn test_value_file_info_has_size_without_reading_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        client
+            .set_value("k", b"abcd", "application/json".to_string())
+            .await
+            .unwrap();
+
+        let info = client.value_file_info("k").await.unwrap().unwrap();
+        assert_eq!(info.key, "k");
+        assert_eq!(info.content_type, "application/json");
+        assert_eq!(info.size, 4);
+        assert_eq!(info.path, client.path().join(encode_key("k")));
+        // The bytes at that path match what we'd stream.
+        assert_eq!(tokio::fs::read(&info.path).await.unwrap(), b"abcd");
+
+        assert!(client.value_file_info("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_and_read_value_bare_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+            .await
+            .unwrap();
+
+        // Bare INPUT.json with no sidecar, as a CLI/platform writer leaves it.
+        let payload = br#"{"foo":"bar"}"#;
+        tokio::fs::write(client.path().join("INPUT.json"), payload)
+            .await
+            .unwrap();
+
+        let fallbacks = [("", ""), (".json", "application/json"), (".bin", "")];
+        let record = client
+            .resolve_and_read_value("INPUT", &fallbacks)
+            .await
+            .unwrap()
+            .unwrap();
+        // Re-keyed to the requested key, caller-declared content type applied,
+        // bytes read, and size finalized — all in one call.
+        assert_eq!(record.key, "INPUT");
+        assert_eq!(record.content_type, "application/json");
+        assert_eq!(record.value, payload);
+        assert_eq!(record.size, payload.len());
+
+        // Nothing resolves → None.
+        assert!(client
+            .resolve_and_read_value("missing", &fallbacks)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
