@@ -28,11 +28,11 @@ fn pick_clock(use_test_clock: bool) -> (ClockRef, Option<Arc<TestClock>>) {
 }
 
 /// Shared `advance_clock_for_testing` implementation. Raises `ValueError` if
-/// the client was opened without `use_test_clock=True`.
-fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, millis: i64) -> PyResult<()> {
+/// the client was opened without `use_test_clock=True`. 
+fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, delta: Duration) -> PyResult<()> {
     match test_clock {
         Some(tc) => {
-            tc.advance(millis);
+            tc.advance(delta);
             Ok(())
         }
         None => Err(PyValueError::new_err(
@@ -434,7 +434,7 @@ impl FileSystemDatasetClient {
     /// was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
     #[gen_stub(override_return_type(type_repr = "None"))]
     fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, duration.num_milliseconds())
+        advance_test_clock(&self.test_clock, duration)
     }
 
     /// Path to the dataset directory.
@@ -582,7 +582,7 @@ impl FileSystemKeyValueStoreClient {
     /// was opened with ``use_test_clock=True``; raises ``ValueError`` otherwise.
     #[gen_stub(override_return_type(type_repr = "None"))]
     fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, duration.num_milliseconds())
+        advance_test_clock(&self.test_clock, duration)
     }
 
     /// Path to the key-value store directory.
@@ -872,7 +872,7 @@ impl FileSystemRequestQueueClient {
     /// Rust-side clock explicitly via this method.
     #[gen_stub(override_return_type(type_repr = "None"))]
     fn advance_clock_for_testing(&self, duration: Duration) -> PyResult<()> {
-        advance_test_clock(&self.test_clock, duration.num_milliseconds())
+        advance_test_clock(&self.test_clock, duration)
     }
 
     /// Path to the request queue directory.
@@ -1027,15 +1027,11 @@ impl FileSystemRequestQueueClient {
         py: Python<'py>,
         duration: Duration,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        // Convert to fractional seconds. `num_microseconds` returns Some unless
-        // the duration overflows ~292,000 years — fall back to ms if it does.
-        let secs = duration
-            .num_microseconds()
-            .map(|us| us as f64 / 1_000_000.0)
-            .unwrap_or_else(|| duration.num_milliseconds() as f64 / 1_000.0);
+        // The core takes a `chrono::Duration` directly (the unit lives there),
+        // so the `timedelta` passes straight through.
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.set_expected_request_processing_time(secs).await;
+            client.set_expected_request_processing_time(duration).await;
             Ok(())
         })
     }

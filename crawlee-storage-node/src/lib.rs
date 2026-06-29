@@ -46,7 +46,9 @@ fn pick_clock(use_test_clock: Option<bool>) -> (ClockRef, Option<Arc<TestClock>>
 fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, millis: i64) -> napi::Result<()> {
     match test_clock {
         Some(tc) => {
-            tc.advance(millis);
+            // JS has no native duration type, so the API stays in millis;
+            // convert to `chrono::Duration` here (the core owns the unit).
+            tc.advance(chrono::Duration::milliseconds(millis));
             Ok(())
         }
         None => Err(napi::Error::from_reason(
@@ -773,7 +775,13 @@ impl FileSystemRequestQueueClient {
 
     #[napi]
     pub async fn set_expected_request_processing_time(&self, secs: f64) {
-        self.inner.set_expected_request_processing_time(secs).await;
+        // JS has no native duration type, so the API stays in seconds; convert
+        // to `chrono::Duration` at the boundary (the core owns the unit). Use
+        // millisecond resolution to match the core's internal `lock_millis`.
+        let duration = chrono::Duration::milliseconds((secs * 1000.0) as i64);
+        self.inner
+            .set_expected_request_processing_time(duration)
+            .await;
     }
 
     #[napi]

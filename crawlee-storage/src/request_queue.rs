@@ -755,14 +755,14 @@ impl FileSystemRequestQueueClient {
         !inner.requests.values().any(|e| e.order_no.is_some())
     }
 
-    /// Hint how long a fetched request should stay locked, in seconds.
+    /// Hint how long a fetched request should stay locked.
     ///
     /// The crawler knows the only sensible lock duration (long enough to
     /// outlive its request handler). We only ever *raise* the duration so a
     /// short-lived consumer sharing the queue cannot cut short a long-lived
     /// one's reservation. Matches the JS `setExpectedRequestProcessingTime`.
-    pub async fn set_expected_request_processing_time(&self, secs: f64) {
-        let millis = (secs * 1000.0) as i64;
+    pub async fn set_expected_request_processing_time(&self, duration: chrono::Duration) {
+        let millis = duration.num_milliseconds();
         let mut inner = self.inner.lock().await;
         if millis > inner.lock_millis {
             inner.lock_millis = millis;
@@ -1293,7 +1293,9 @@ mod tests {
             .unwrap();
 
         // Make the lock effectively zero so it expires immediately.
-        client.set_expected_request_processing_time(0.0).await;
+        client
+            .set_expected_request_processing_time(chrono::Duration::zero())
+            .await;
         // set_* only raises, so force the internal value down for the test.
         {
             let mut inner = client.inner.lock().await;
@@ -1360,7 +1362,7 @@ mod tests {
         );
 
         // Jump past the default 3-minute lock window.
-        clock.advance(4 * 60 * 1000);
+        clock.advance(chrono::Duration::milliseconds(4 * 60 * 1000));
 
         let again = client.fetch_next_request().await.unwrap();
         assert!(
@@ -1399,7 +1401,7 @@ mod tests {
         let _locked = client_a.fetch_next_request().await.unwrap().unwrap();
 
         // Advance time on the shared clock.
-        clock.advance(4 * 60 * 1000);
+        clock.advance(chrono::Duration::milliseconds(4 * 60 * 1000));
 
         // A *second* client opened against the same dir+clock must also see
         // the request as unlocked. We open it after the advancement so it
@@ -1779,7 +1781,7 @@ mod tests {
         // Crash recovery story: walk the clock past the lock window so the
         // crashed peer's lock expires. After that, all three requests are
         // fetchable in turn.
-        clock.advance(4 * 60 * 1000);
+        clock.advance(chrono::Duration::milliseconds(4 * 60 * 1000));
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..3 {
@@ -1788,7 +1790,7 @@ mod tests {
             client2.mark_request_as_handled(r).await.unwrap();
             // Push the clock forward between fetches so each fresh lock also
             // expires before the next iteration.
-            clock.advance(4 * 60 * 1000);
+            clock.advance(chrono::Duration::milliseconds(4 * 60 * 1000));
         }
         assert_eq!(
             seen.len(),
