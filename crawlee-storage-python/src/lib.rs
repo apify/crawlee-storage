@@ -1,9 +1,10 @@
+pub mod models;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
-use crawlee_storage::models;
 use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
 use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyValueError,
@@ -164,61 +165,9 @@ fn serde_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyA
     value_to_py(py, &val)
 }
 
-/// Set the three shared base-metadata fields on a Python dict: `id`, `name`,
-/// `accessedAt`, `createdAt`, `modifiedAt`. The datetime fields cross the FFI
-/// as native `datetime.datetime` (timezone-aware UTC) thanks to PyO3's
-/// `chrono` feature.
-fn set_base_metadata_fields(
-    dict: &Bound<'_, PyDict>,
-    base: &models::StorageMetadata,
-) -> PyResult<()> {
-    dict.set_item("id", &base.id)?;
-    dict.set_item("name", &base.name)?;
-    dict.set_item("accessedAt", base.accessed_at)?;
-    dict.set_item("createdAt", base.created_at)?;
-    dict.set_item("modifiedAt", base.modified_at)?;
-    Ok(())
-}
-
-fn dataset_metadata_to_py(py: Python<'_>, meta: &models::DatasetMetadata) -> PyResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
-    let dict = PyDict::new(py);
-    set_base_metadata_fields(&dict, &meta.base)?;
-    dict.set_item("itemCount", meta.item_count)?;
-    Ok(dict.into_pyobject(py)?.into_any().unbind())
-}
-
-fn kvs_metadata_to_py(py: Python<'_>, meta: &models::KeyValueStoreMetadata) -> PyResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
-    let dict = PyDict::new(py);
-    set_base_metadata_fields(&dict, &meta.base)?;
-    Ok(dict.into_pyobject(py)?.into_any().unbind())
-}
-
-fn rq_metadata_to_py(py: Python<'_>, meta: &models::RequestQueueMetadata) -> PyResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
-    let dict = PyDict::new(py);
-    set_base_metadata_fields(&dict, &meta.base)?;
-    dict.set_item("hadMultipleClients", meta.had_multiple_clients)?;
-    dict.set_item("handledRequestCount", meta.handled_request_count)?;
-    dict.set_item("pendingRequestCount", meta.pending_request_count)?;
-    dict.set_item("totalRequestCount", meta.total_request_count)?;
-    Ok(dict.into_pyobject(py)?.into_any().unbind())
-}
-
-/// Convert a fully-read KVS record (raw bytes + non-optional size, finalized by
-/// the core) to a Python dict with a `bytes` value.
-fn record_to_py(py: Python<'_>, record: &models::KeyValueStoreRecord) -> PyResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
-
-    let dict = PyDict::new(py);
-    dict.set_item("key", &record.key)?;
-    dict.set_item("contentType", &record.content_type)?;
-    dict.set_item("size", record.size)?;
-    dict.set_item("value", pyo3::types::PyBytes::new(py, &record.value))?;
-
-    Ok(dict.into_pyobject(py)?.into_any().unbind())
-}
+// The metadata/record → Python dict builders now live next to their field
+// specs in `models.rs` (`models::DatasetMetadata::to_py`, etc.), so the dict a
+// caller receives and the `TypedDict` the stub promises are defined together.
 
 // ─── Dataset Item Iterator ──────────────────────────────────────────────────
 
@@ -272,7 +221,9 @@ impl KvsKeyIterator {
         let cursor = self.cursor.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             match cursor.lock().await.next().await.map_err(storage_err)? {
-                Some(meta) => Python::attach(|py| serde_to_py(py, &meta)),
+                Some(meta) => {
+                    Python::attach(|py| models::KeyValueStoreRecordMetadata(&meta).to_py(py))
+                }
                 None => Err(PyStopAsyncIteration::new_err(())),
             }
         })
@@ -345,7 +296,7 @@ impl FileSystemDatasetClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| dataset_metadata_to_py(py, &meta))
+            Python::attach(|py| models::DatasetMetadata(&meta).to_py(py))
         })
     }
 
@@ -490,7 +441,7 @@ impl FileSystemKeyValueStoreClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| kvs_metadata_to_py(py, &meta))
+            Python::attach(|py| models::KeyValueStoreMetadata(&meta).to_py(py))
         })
     }
 
@@ -514,7 +465,7 @@ impl FileSystemKeyValueStoreClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let result = client.read_value(&key).await.map_err(storage_err)?;
             match result {
-                Some(record) => Python::attach(|py| record_to_py(py, &record)),
+                Some(record) => Python::attach(|py| models::KeyValueStoreRecord(&record).to_py(py)),
                 None => Ok(Python::attach(|py| py.None())),
             }
         })
@@ -553,7 +504,7 @@ impl FileSystemKeyValueStoreClient {
                 .await
                 .map_err(storage_err)?;
             match result {
-                Some(record) => Python::attach(|py| record_to_py(py, &record)),
+                Some(record) => Python::attach(|py| models::KeyValueStoreRecord(&record).to_py(py)),
                 None => Ok(Python::attach(|py| py.None())),
             }
         })
@@ -763,7 +714,7 @@ impl FileSystemRequestQueueClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let meta = client.get_metadata().await;
-            Python::attach(|py| rq_metadata_to_py(py, &meta))
+            Python::attach(|py| models::RequestQueueMetadata(&meta).to_py(py))
         })
     }
 

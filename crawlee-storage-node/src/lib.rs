@@ -10,7 +10,10 @@ use napi_derive::napi;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use models::{DatasetMetadata, KeyValueStoreMetadata, KeyValueStoreRecord, RequestQueueMetadata};
+use models::{
+    AddRequestsResponse, DatasetItemsListPage, DatasetMetadata, KeyValueStoreMetadata,
+    KeyValueStoreRecord, KeyValueStoreRecordMetadata, ProcessedRequest, RequestQueueMetadata,
+};
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
     use crawlee_storage::utils::StorageError;
@@ -58,14 +61,6 @@ fn advance_test_clock(test_clock: &Option<Arc<TestClock>>, millis: i64) -> napi:
                 .to_string(),
         )),
     }
-}
-
-/// Serialize any serde-compatible struct to a `serde_json::Value`.
-///
-/// The core library models already serialize with camelCase field names
-/// (via `#[serde(rename = "...")]`), so no extra transformation is needed.
-fn to_js<T: serde::Serialize>(src: &T) -> napi::Result<Value> {
-    serde_json::to_value(src).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 // ─── Dataset Client ─────────────────────────────────────────────────────────
@@ -141,14 +136,14 @@ impl FileSystemDatasetClient {
         self.inner.push_data(data).await.map_err(storage_err)
     }
 
-    #[napi(ts_return_type = "Promise<DatasetItemsListPage>")]
+    #[napi]
     pub async fn get_data(
         &self,
         offset: Option<u32>,
         limit: Option<u32>,
         desc: Option<bool>,
         skip_empty: Option<bool>,
-    ) -> napi::Result<Value> {
+    ) -> napi::Result<DatasetItemsListPage> {
         let page = self
             .inner
             .get_data(
@@ -159,7 +154,7 @@ impl FileSystemDatasetClient {
             )
             .await
             .map_err(storage_err)?;
-        to_js(&page)
+        Ok(DatasetItemsListPage::from(page))
     }
 
     #[napi]
@@ -459,10 +454,10 @@ pub struct KvsKeyIterator {
 #[napi]
 impl KvsKeyIterator {
     /// Fetch the next key metadata entry. Returns null when iteration is exhausted.
-    #[napi(ts_return_type = "Promise<KeyValueStoreRecordMetadata | null>")]
-    pub async fn next(&self) -> napi::Result<Option<Value>> {
+    #[napi]
+    pub async fn next(&self) -> napi::Result<Option<KeyValueStoreRecordMetadata>> {
         match self.cursor.lock().await.next().await.map_err(storage_err)? {
-            Some(meta) => Ok(Some(to_js(&meta)?)),
+            Some(meta) => Ok(Some(KeyValueStoreRecordMetadata::from(meta))),
             None => Ok(None),
         }
     }
@@ -555,20 +550,19 @@ impl FileSystemRequestQueueClient {
     }
 
     #[napi(
-        ts_args_type = "requests: Record<string, unknown>[], forefront?: boolean | undefined | null",
-        ts_return_type = "Promise<AddRequestsResponse>"
+        ts_args_type = "requests: Record<string, unknown>[], forefront?: boolean | undefined | null"
     )]
     pub async fn add_batch_of_requests(
         &self,
         requests: Vec<Value>,
         forefront: Option<bool>,
-    ) -> napi::Result<Value> {
+    ) -> napi::Result<AddRequestsResponse> {
         let response = self
             .inner
             .add_batch_of_requests(requests, forefront.unwrap_or(false))
             .await
             .map_err(storage_err)?;
-        to_js(&response)
+        Ok(AddRequestsResponse::from(response))
     }
 
     #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
@@ -584,40 +578,33 @@ impl FileSystemRequestQueueClient {
         self.inner.fetch_next_request().await.map_err(storage_err)
     }
 
-    #[napi(
-        ts_args_type = "request: Record<string, unknown>",
-        ts_return_type = "Promise<ProcessedRequest | null>"
-    )]
-    pub async fn mark_request_as_handled(&self, request: Value) -> napi::Result<Option<Value>> {
+    #[napi(ts_args_type = "request: Record<string, unknown>")]
+    pub async fn mark_request_as_handled(
+        &self,
+        request: Value,
+    ) -> napi::Result<Option<ProcessedRequest>> {
         let result = self
             .inner
             .mark_request_as_handled(request)
             .await
             .map_err(storage_err)?;
-        match result {
-            Some(r) => Ok(Some(to_js(&r)?)),
-            None => Ok(None),
-        }
+        Ok(result.map(ProcessedRequest::from))
     }
 
     #[napi(
-        ts_args_type = "request: Record<string, unknown>, forefront?: boolean | undefined | null",
-        ts_return_type = "Promise<ProcessedRequest | null>"
+        ts_args_type = "request: Record<string, unknown>, forefront?: boolean | undefined | null"
     )]
     pub async fn reclaim_request(
         &self,
         request: Value,
         forefront: Option<bool>,
-    ) -> napi::Result<Option<Value>> {
+    ) -> napi::Result<Option<ProcessedRequest>> {
         let result = self
             .inner
             .reclaim_request(request, forefront.unwrap_or(false))
             .await
             .map_err(storage_err)?;
-        match result {
-            Some(r) => Ok(Some(to_js(&r)?)),
-            None => Ok(None),
-        }
+        Ok(result.map(ProcessedRequest::from))
     }
 
     #[napi]
