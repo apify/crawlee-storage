@@ -789,9 +789,11 @@ const {
     FileSystemKeyValueStoreClient,
     FileSystemRequestQueueClient,
     KvsKeyIterator,
+    NONE_CONTENT_TYPE,
 } = nativeBinding;
 export { DatasetItemIterator };
 export { FileSystemDatasetClient };
 export { FileSystemKeyValueStoreClient };
 export { FileSystemRequestQueueClient };
 export { KvsKeyIterator };
+export { NONE_CONTENT_TYPE };

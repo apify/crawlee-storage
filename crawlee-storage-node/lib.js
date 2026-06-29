@@ -31,16 +31,6 @@ KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
     };
 };
 
-// Wrap getValue to convert the byte-array value to a real Buffer.
-const origGetValue = FileSystemKeyValueStoreClient.prototype.getValue;
-FileSystemKeyValueStoreClient.prototype.getValue = async function (...args) {
-    const record = await origGetValue.apply(this, args);
-    if (record) {
-        record.value = Buffer.from(record.value);
-    }
-    return record;
-};
-
 // getValueStream: returns { key, contentType, size, stream } or null.
 // The stream is a Web ReadableStream<Uint8Array> created from the file on disk.
 FileSystemKeyValueStoreClient.prototype.getValueStream = async function (

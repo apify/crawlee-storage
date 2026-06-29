@@ -166,6 +166,15 @@ pub fn unique_key_to_request_id(unique_key: &str) -> String {
 /// The metadata filename constant, matching Python's `METADATA_FILENAME`.
 pub const METADATA_FILENAME: &str = "__metadata__.json";
 
+/// The content-type sentinel used for `None`/null KVS values (stored on disk
+/// as an empty file). Matches crawlee's `application/x-none` MIME type.
+///
+/// The core never *writes* this itself — callers pass it as the content type
+/// when storing a null value — but it's part of the on-disk compatibility
+/// contract, so it's exported here for bindings to reference instead of
+/// hardcoding the literal string.
+pub const NONE_CONTENT_TYPE: &str = "application/x-none";
+
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
 pub fn validate_exclusive_args(

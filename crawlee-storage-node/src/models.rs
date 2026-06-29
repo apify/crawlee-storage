@@ -9,7 +9,25 @@
 //! passed through as-is.
 
 use chrono::{DateTime, Utc};
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+
+/// A KVS record returned by `getValue`: the raw value bytes as a `Buffer`
+/// alongside the key, content type, and size. Replaces the hand-written
+/// `KeyValueStoreRecord` interface that used to live in `dts-header.d.ts` —
+/// the `value: Buffer` now crosses the FFI directly instead of as a per-byte
+/// JSON number array.
+#[napi(object)]
+pub struct KeyValueStoreRecord {
+    pub key: String,
+    pub content_type: String,
+    /// Byte length of the value. Typed `f64` so it crosses the FFI as a JS
+    /// `number` (matching crawlee's `KeyValueStoreItemData.size: number`)
+    /// without the 4 GiB ceiling a `u32` would impose; a `usize` length is
+    /// exact in an `f64` up to 2^53 bytes (8 PiB), well beyond any KVS record.
+    pub size: f64,
+    pub value: Buffer,
+}
 
 #[napi(object)]
 pub struct DatasetMetadata {
