@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - **ci:** Fix postbuild npm script ([#52](https://github.com/apify/crawlee-storage/pull/52)) ([46447b7](https://github.com/apify/crawlee-storage/commit/46447b752aa139514cf6fcf254def1932a7d1dc7)) by [@janbuchar](https://github.com/janbuchar)
 - Reduce the amount of nullable fields in the public API ([#53](https://github.com/apify/crawlee-storage/pull/53)) ([96742e1](https://github.com/apify/crawlee-storage/commit/96742e1e627cb1bfca213728abf74d70cb33d81d)) by [@janbuchar](https://github.com/janbuchar)
 - Improve handling of bare KeyValueStore records ([#58](https://github.com/apify/crawlee-storage/pull/58)) ([73be116](https://github.com/apify/crawlee-storage/commit/73be1160e1640754aa86a7afdb034aa41fb34344)) by [@janbuchar](https://github.com/janbuchar)
+- Re-add accidentally deleted KeyValueStore.delete_value method in Python binding ([#62](https://github.com/apify/crawlee-storage/pull/62)) ([593ccb4](https://github.com/apify/crawlee-storage/commit/593ccb4a4c313ba10a91462b55facc0eff96d22a)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
