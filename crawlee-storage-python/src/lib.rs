@@ -740,6 +740,16 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
+    /// Delete a single value (and its metadata sidecar) by key.
+    #[gen_stub(override_return_type(type_repr = "None"))]
+    fn delete_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.delete_value(&key).await.map_err(storage_err)?;
+            Ok(())
+        })
+    }
+
     #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None))]
     fn iterate_keys(
         &self,
