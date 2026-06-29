@@ -512,7 +512,10 @@ impl FileSystemKeyValueStoreClient {
             Some((path, meta)) => {
                 let size = match meta.size {
                     Some(size) => size,
-                    None => fs::metadata(&path).await.map(|m| m.len() as usize).unwrap_or(0),
+                    None => fs::metadata(&path)
+                        .await
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0),
                 };
                 Ok(Some(KeyValueStoreValueFileInfo {
                     key: meta.key,
