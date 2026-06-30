@@ -503,19 +503,37 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None))]
+    /// Lazily iterate the store's keys.
+    ///
+    /// `bare_fallbacks` additionally surfaces out-of-band ("bare") value files
+    /// that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
+    /// keys. Each entry is a `(name, content_type)` tuple where `name` is the
+    /// file's on-disk key: if that file exists with no tracked record, it is
+    /// listed under `name` (an empty `content_type` reports the synthesized
+    /// `application/octet-stream`). Pass an empty list (the default) to list only
+    /// tracked records.
+    ///
+    /// Round-trip caveat: a surfaced bare key does NOT round-trip through the
+    /// strict read path. The listed key is the literal on-disk `name`, but
+    /// `get_value` / `record_exists` only see tracked records (value + sidecar)
+    /// and return `None` / `False` for a sidecar-less bare file. Read a listed
+    /// bare key back via `resolve_value` / `resolve_existing_key`, not
+    /// `get_value`.
+    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None, bare_fallbacks=vec![]))]
     fn iterate_keys(
         &self,
         exclusive_start_key: Option<String>,
         limit: Option<usize>,
         page_size: Option<usize>,
         prefix: Option<String>,
+        bare_fallbacks: Vec<(String, String)>,
     ) -> KvsKeyIterator {
         let source = KvsKeySource::new(
             self.inner.clone(),
             exclusive_start_key,
             page_size.unwrap_or(DEFAULT_PAGE_SIZE),
             prefix,
+            bare_fallbacks,
         );
         KvsKeyIterator {
             cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
