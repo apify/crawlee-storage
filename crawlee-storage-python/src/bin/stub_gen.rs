@@ -68,6 +68,36 @@ fn typed_dict_names() -> Vec<&'static str> {
     names
 }
 
+/// Append TypedDict + module-constant names to an `__all__` list.
+///
+/// Walks `lines`, copying each into `output`, and just before the closing `]`
+/// of the `__all__ = [ ... ]` block splices in every TypedDict name (sorted)
+/// followed by every module constant. Shared by both the native-stub and
+/// re-export-stub post-processors, which used to carry identical copies of
+/// this `in_all_block` dance.
+fn append_to_all_block(lines: &[&str], output: &mut String) {
+    let names = typed_dict_names();
+    let mut in_all_block = false;
+
+    for line in lines {
+        if line.contains("__all__") && line.contains('[') {
+            in_all_block = true;
+        }
+        if in_all_block && line.trim_start().starts_with(']') {
+            for name in &names {
+                output.push_str(&format!("    \"{name}\",\n"));
+            }
+            for (const_name, _) in MODULE_CONSTANTS {
+                output.push_str(&format!("    \"{const_name}\",\n"));
+            }
+            in_all_block = false;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+}
+
 // ─── Stub file post-processing ──────────────────────────────────────────────
 
 /// Post-process a generated `.pyi` stub file:
@@ -80,10 +110,8 @@ fn typed_dict_names() -> Vec<&'static str> {
 /// `ruff` in `format_stubs`, not here.
 fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
-    let mut output = String::with_capacity(content.len() + typed_dicts.len());
 
     let lines: Vec<&str> = content.lines().collect();
-    let names = typed_dict_names();
 
     // Ensure `import datetime` is present — the metadata TypedDicts reference
     // `datetime.datetime`. pyo3_stub_gen only adds it when a method signature
@@ -105,32 +133,21 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         .map(|(i, _)| i)
         .next_back();
 
-    // Track whether we're inside the __all__ block so we can append names.
-    let mut in_all_block = false;
+    // Pass 1: inject TypedDicts + module constants, splice `import datetime`,
+    // and rewrite `def` → `async def`. The `__all__` splicing is left to pass 2
+    // (`append_to_all_block`) so it isn't duplicated here — the `__all__` block
+    // always precedes `insert_before`, so the two passes don't fight.
+    let mut pass1 = String::with_capacity(content.len() + typed_dicts.len());
 
     for (i, line) in lines.iter().enumerate() {
         // Inject TypedDicts (then module constants) right before the first class.
         if i == insert_before {
-            output.push_str(typed_dicts);
-            output.push('\n');
+            pass1.push_str(typed_dicts);
+            pass1.push('\n');
             for (const_name, const_type) in MODULE_CONSTANTS {
-                output.push_str(&format!("{const_name}: {const_type}\n"));
+                pass1.push_str(&format!("{const_name}: {const_type}\n"));
             }
-            output.push('\n');
-        }
-
-        // Detect __all__ = [ ... ] and inject names before the closing `]`.
-        if line.contains("__all__") && line.contains('[') {
-            in_all_block = true;
-        }
-        if in_all_block && line.trim_start().starts_with(']') {
-            for name in &names {
-                output.push_str(&format!("    \"{name}\",\n"));
-            }
-            for (const_name, _) in MODULE_CONSTANTS {
-                output.push_str(&format!("    \"{const_name}\",\n"));
-            }
-            in_all_block = false;
+            pass1.push('\n');
         }
 
         let trimmed = line.trim_start();
@@ -153,22 +170,27 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
             if !is_sync {
                 // Replace "def " with "async def ", preserving indentation.
                 let indent = &line[..line.len() - trimmed.len()];
-                output.push_str(indent);
-                output.push_str("async def ");
-                output.push_str(after_def);
-                output.push('\n');
+                pass1.push_str(indent);
+                pass1.push_str("async def ");
+                pass1.push_str(after_def);
+                pass1.push('\n');
                 continue;
             }
         }
 
-        output.push_str(line);
-        output.push('\n');
+        pass1.push_str(line);
+        pass1.push('\n');
 
         // After the last existing import, splice in `import datetime` if missing.
         if !has_datetime_import && last_import_idx == Some(i) {
-            output.push_str("import datetime\n");
+            pass1.push_str("import datetime\n");
         }
     }
+
+    // Pass 2: append the TypedDict + constant names to `__all__`.
+    let pass1_lines: Vec<&str> = pass1.lines().collect();
+    let mut output = String::with_capacity(pass1.len());
+    append_to_all_block(&pass1_lines, &mut output);
 
     std::fs::write(path, output)?;
     Ok(())
@@ -180,26 +202,7 @@ fn fixup_reexport_stubs(path: &std::path::Path) -> std::io::Result<()> {
     let mut output = String::with_capacity(content.len());
 
     let lines: Vec<&str> = content.lines().collect();
-    let names = typed_dict_names();
-    let mut in_all_block = false;
-
-    for line in &lines {
-        if line.contains("__all__") && line.contains('[') {
-            in_all_block = true;
-        }
-        if in_all_block && line.trim_start().starts_with(']') {
-            for name in &names {
-                output.push_str(&format!("    \"{name}\",\n"));
-            }
-            for (const_name, _) in MODULE_CONSTANTS {
-                output.push_str(&format!("    \"{const_name}\",\n"));
-            }
-            in_all_block = false;
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
+    append_to_all_block(&lines, &mut output);
 
     std::fs::write(path, output)?;
     Ok(())
