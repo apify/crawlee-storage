@@ -11,12 +11,11 @@
 use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+use serde_json::Value;
 
 /// A KVS record returned by `getValue`: the raw value bytes as a `Buffer`
-/// alongside the key, content type, and size. Replaces the hand-written
-/// `KeyValueStoreRecord` interface that used to live in `dts-header.d.ts` —
-/// the `value: Buffer` now crosses the FFI directly instead of as a per-byte
-/// JSON number array.
+/// alongside the key, content type, and size. The `value: Buffer` crosses the
+/// FFI directly instead of as a per-byte JSON number array.
 #[napi(object)]
 pub struct KeyValueStoreRecord {
     pub key: String,
@@ -38,6 +37,30 @@ impl From<crawlee_storage::models::KeyValueStoreRecord> for KeyValueStoreRecord 
             // `f64` for the FFI (exact up to 2^53 bytes).
             size: r.size as f64,
             value: Buffer::from(r.value),
+        }
+    }
+}
+
+/// Metadata for a single KVS record, as yielded by the key iterator
+/// (`KvsKeyIterator.next`) and `iterateKeys`. Mirrors the core's
+/// `KeyValueStoreRecordMetadata` with `size` finalized to a non-optional value.
+#[napi(object)]
+pub struct KeyValueStoreRecordMetadata {
+    pub key: String,
+    pub content_type: String,
+    /// Byte length of the value. Typed `f64` (same rationale as
+    /// `KeyValueStoreRecord::size`): exact up to 2^53 bytes, no 4 GiB ceiling.
+    pub size: f64,
+}
+
+impl From<crawlee_storage::models::KeyValueStoreRecordMetadata> for KeyValueStoreRecordMetadata {
+    fn from(m: crawlee_storage::models::KeyValueStoreRecordMetadata) -> Self {
+        Self {
+            key: m.key,
+            content_type: m.content_type,
+            // The core backfills a missing `size` from the value-file length on
+            // read, so by the time it reaches here it is always populated.
+            size: m.size.unwrap_or(0) as f64,
         }
     }
 }
@@ -124,6 +147,91 @@ impl From<&crawlee_storage::models::RequestQueueMetadata> for RequestQueueMetada
             handled_request_count: m.handled_request_count as u32,
             pending_request_count: m.pending_request_count as u32,
             total_request_count: m.total_request_count as u32,
+        }
+    }
+}
+
+/// A page of dataset items returned by `getData`. Mirrors the core's
+/// `DatasetItemsListPage` so napi emits an honest TS interface instead of a
+/// hand-written one. The `items` are arbitrary user JSON, so they cross the
+/// FFI as `serde_json::Value` and are typed `Record<string, unknown>[]`.
+#[napi(object)]
+pub struct DatasetItemsListPage {
+    pub count: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub total: u32,
+    pub desc: bool,
+    #[napi(ts_type = "Record<string, unknown>[]")]
+    pub items: Vec<Value>,
+}
+
+impl From<crawlee_storage::models::DatasetItemsListPage> for DatasetItemsListPage {
+    fn from(p: crawlee_storage::models::DatasetItemsListPage) -> Self {
+        Self {
+            count: p.count as u32,
+            offset: p.offset as u32,
+            limit: p.limit as u32,
+            total: p.total as u32,
+            desc: p.desc,
+            items: p.items,
+        }
+    }
+}
+
+/// Result of processing one request in `addBatchOfRequests`. Mirrors the core's
+/// `ProcessedRequest`.
+#[napi(object)]
+pub struct ProcessedRequest {
+    pub request_id: String,
+    pub unique_key: String,
+    pub was_already_present: bool,
+    pub was_already_handled: bool,
+}
+
+impl From<crawlee_storage::models::ProcessedRequest> for ProcessedRequest {
+    fn from(r: crawlee_storage::models::ProcessedRequest) -> Self {
+        Self {
+            request_id: r.request_id,
+            unique_key: r.unique_key,
+            was_already_present: r.was_already_present,
+            was_already_handled: r.was_already_handled,
+        }
+    }
+}
+
+/// A request that could not be processed in `addBatchOfRequests`. Mirrors the
+/// core's `UnprocessedRequest`. `method` is optional; omitting `use_nullable`
+/// keeps it as `method?: string` rather than `method: string | null`.
+#[napi(object)]
+pub struct UnprocessedRequest {
+    pub unique_key: String,
+    pub url: String,
+    pub method: Option<String>,
+}
+
+impl From<crawlee_storage::models::UnprocessedRequest> for UnprocessedRequest {
+    fn from(r: crawlee_storage::models::UnprocessedRequest) -> Self {
+        Self {
+            unique_key: r.unique_key,
+            url: r.url,
+            method: r.method,
+        }
+    }
+}
+
+/// Response from `addBatchOfRequests`. Mirrors the core's `AddRequestsResponse`.
+#[napi(object)]
+pub struct AddRequestsResponse {
+    pub processed_requests: Vec<ProcessedRequest>,
+    pub unprocessed_requests: Vec<UnprocessedRequest>,
+}
+
+impl From<crawlee_storage::models::AddRequestsResponse> for AddRequestsResponse {
+    fn from(r: crawlee_storage::models::AddRequestsResponse) -> Self {
+        Self {
+            processed_requests: r.processed_requests.into_iter().map(Into::into).collect(),
+            unprocessed_requests: r.unprocessed_requests.into_iter().map(Into::into).collect(),
         }
     }
 }

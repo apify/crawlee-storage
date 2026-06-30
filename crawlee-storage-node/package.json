@@ -55,7 +55,6 @@
     },
     "napi": {
         "binaryName": "fs-storage-native",
-        "dtsHeaderFile": "dts-header.d.ts",
         "targets": [
             "x86_64-unknown-linux-gnu",
             "x86_64-apple-darwin",

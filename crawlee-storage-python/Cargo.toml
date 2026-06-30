@@ -15,9 +15,10 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 chrono = "0.4"
 crawlee-storage = { path = "../crawlee-storage" }
-pyo3 = { version = "0.28", features = ["chrono"] }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
-pyo3-stub-gen = "0.19"
+pyo3 = { version = "0.29", features = ["chrono"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+pyo3-stub-gen = "0.23"
+pythonize = "0.29"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

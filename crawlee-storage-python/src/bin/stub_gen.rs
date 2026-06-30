@@ -1,19 +1,99 @@
-use crawlee_storage::models;
+//! Generates and post-processes the `.pyi` type stubs.
+//!
+//! `pyo3-stub-gen` produces most of the stub, but it can't express two things on
+//! its own, so this binary patches them in:
+//!
+//! 1. **`TypedDict` definitions** for the camelCase dicts the bindings return.
+//!    A method returning a `dict` is just `dict[str, Any]` to the generator, so
+//!    the real shapes are declared as `TypedDict`s. Their field lists come
+//!    *directly* from the rustc-checked `TypedDictModel` specs in
+//!    `crate::models` (see that module for why) — no JSON-shape guessing, no
+//!    per-field override table.
+//!
+//! 2. **`async def` markers**: methods built on
+//!    `pyo3_async_runtimes::tokio::future_into_py` appear as plain sync `fn` to
+//!    `pyo3-stub-gen`, so we rewrite them to `async def` here. Which methods are
+//!    async is derived from the binding source itself (`async_method_names`
+//!    scans `lib.rs` for the `future_into_py` return type), not from a
+//!    hand-maintained list.
+//!
+//! Plus housekeeping: inject module constants, ensure `import datetime`, append
+//! TypedDict names to `__all__`, and run `ruff` to format + PEP 604-ify
+//! (`Optional[X]` → `X | None`) the result.
+
+use std::collections::HashSet;
+
+use _crawlee_storage::models::{self, TypedDictField};
 use pyo3_stub_gen::Result;
-use serde::Serialize;
-use serde_json::Value;
 
-/// Method names that should remain synchronous (not marked async).
-const SYNC_METHODS: &[&str] = &[
-    "iterate_items",
-    "iterate_keys",
-    // advance_clock_for_testing is a plain sync PyO3 method — it doesn't
-    // go through `future_into_py`, so its stub must not be `async`.
-    "advance_clock_for_testing",
-];
+/// The Rust return type that uniquely marks a `#[pymethods]` method as async.
+///
+/// Every `future_into_py`-based method returns exactly this — that's what
+/// `pyo3_async_runtimes::tokio::future_into_py` hands back — and no synchronous
+/// method does (the sync ones return `PathBuf`, `PyResult<()>`, an iterator
+/// struct, or `PyRef<Self>`). So the presence of this return type in a method's
+/// signature *is* the async-ness signal, read straight from the binding source
+/// instead of duplicated into a hand-maintained name list.
+const ASYNC_RETURN_TYPE: &str = "-> PyResult<Bound<'py, pyo3::PyAny>>";
 
-/// Dunder methods that ARE async (all other dunders stay sync).
+/// Dunder methods that ARE async (all other dunders stay sync). The iterator
+/// `__anext__` bodies use `future_into_py` too, but they're matched by name
+/// here rather than by return type so the rule covers the dunder family
+/// (`__aenter__`/`__aexit__`) uniformly even if one is added later.
 const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];
+
+/// Scan the binding source (`lib.rs`) for the set of method names whose
+/// signature returns [`ASYNC_RETURN_TYPE`] — i.e. the `future_into_py`-based
+/// async methods. Signatures may span multiple lines (the `'py` lifetime and
+/// args wrap), so we pair each `fn NAME` with the return arrow that follows it
+/// within the same signature (before the opening `{`).
+///
+/// This replaces the old pair of hand-maintained `SYNC_METHODS`/`ASYNC_METHODS`
+/// lists: async-ness is now derived from the one source of truth (the actual
+/// return type in `lib.rs`), so a newly-added method is classified correctly
+/// with no list to update and no panic to appease.
+fn async_method_names(lib_rs: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pending_fn: Option<String> = None;
+
+    for line in lib_rs.lines() {
+        let trimmed = line.trim_start();
+
+        // Start tracking a signature when we see `fn NAME...`.
+        if let Some(after_fn) = trimmed.strip_prefix("fn ") {
+            // Method name ends at `(`, `<` (generic/lifetime), or whitespace.
+            let name: String = after_fn
+                .chars()
+                .take_while(|c| !matches!(c, '(' | '<' | ' '))
+                .collect();
+            pending_fn = Some(name);
+        }
+
+        if let Some(name) = &pending_fn {
+            if line.contains(ASYNC_RETURN_TYPE) {
+                names.insert(name.clone());
+                pending_fn = None;
+            } else if line.contains('{') {
+                // Body started without the async return type → sync method.
+                pending_fn = None;
+            }
+        }
+    }
+
+    names
+}
+
+/// Whether a method in the generated stub should be marked `async def`, given
+/// the set of async method names derived from the binding source.
+fn classify_method(method_name: &str, is_property: bool, async_methods: &HashSet<String>) -> bool {
+    if is_property {
+        return false;
+    }
+    if method_name.starts_with("__") {
+        return ASYNC_DUNDERS.contains(&method_name);
+    }
+    async_methods.contains(method_name)
+}
 
 /// Module-level constants exported via `m.add(...)` in the `#[pymodule]` init.
 /// pyo3-stub-gen does not track runtime `m.add` calls, so the generated `.pyi`
@@ -21,346 +101,81 @@ const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];
 /// Maps constant name → Python type annotation.
 const MODULE_CONSTANTS: &[(&str, &str)] = &[("NONE_CONTENT_TYPE", "builtins.str")];
 
-// ─── TypedDict generation from serde ────────────────────────────────────────
+// ─── TypedDict generation (from rustc-checked model specs) ──────────────────
 
-/// A single field in a Python TypedDict.
-struct TypedDictField {
-    /// The JSON key name (camelCase, as produced by serde).
-    name: String,
-    /// The Python type annotation string.
-    py_type: String,
-}
-
-/// A complete TypedDict definition to emit into the `.pyi` file.
-struct TypedDictDef {
-    /// Python class name.
-    class_name: &'static str,
-    /// Ordered list of fields.
-    fields: Vec<TypedDictField>,
-}
-
-impl TypedDictDef {
-    /// Render as a Python `class Foo(typing.TypedDict): ...` block.
-    fn render(&self) -> String {
-        let mut out = format!("class {}(typing.TypedDict):\n", self.class_name);
-        for field in &self.fields {
-            out.push_str(&format!("    {}: {}\n", field.name, field.py_type));
-        }
-        out
-    }
-}
-
-/// Map a `serde_json::Value` (from a dummy instance) to a Python type string.
-///
-/// Nested references to other TypedDicts are resolved via `known_types`:
-/// if a JSON object's key set matches a known TypedDict, that name is used
-/// instead of `dict[str, typing.Any]`.
-fn json_value_to_py_type(
-    val: &Value,
-    optional: bool,
-    known_types: &[(&str, Vec<String>)],
-) -> String {
-    let base = match val {
-        Value::Bool(_) => "builtins.bool".to_string(),
-        Value::Number(n) => {
-            if n.is_f64() && !n.is_i64() && !n.is_u64() {
-                "builtins.float".to_string()
-            } else {
-                "builtins.int".to_string()
-            }
-        }
-        Value::String(_) => "builtins.str".to_string(),
-        Value::Null => {
-            // A null value with `optional` means `T | None`. Since we don't know
-            // the inner type from null alone, we fall back to `typing.Any`.
-            // In practice, fields where we do know `T` are covered by
-            // `FIELD_OVERRIDES` below.
-            return "typing.Any | None".to_string();
-        }
-        Value::Array(arr) => {
-            if let Some(first) = arr.first() {
-                let inner = json_value_to_py_type(first, false, known_types);
-                format!("builtins.list[{inner}]")
-            } else {
-                "builtins.list[typing.Any]".to_string()
-            }
-        }
-        Value::Object(map) => {
-            // Check if this object's key set matches a known TypedDict.
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for (name, expected_keys) in known_types {
-                if keys == *expected_keys {
-                    return (*name).to_string();
-                }
-            }
-            "dict[builtins.str, typing.Any]".to_string()
-        }
-    };
-
-    if optional {
-        format!("{base} | None")
-    } else {
-        base
-    }
-}
-
-/// Per-field type overrides used when the dummy-instance JSON serialization
-/// doesn't carry enough information to derive the right Python type. Maps
-/// `(struct_name, field_name)` → Python type annotation.
-///
-/// Two situations need overrides:
-///
-/// 1. **`Option<T>` fields**: serde renders `None` as JSON `null`, which loses
-///    the inner type `T`. The auto-deriver can only produce `Any | None` for
-///    these — list them here to recover `T`.
-///
-/// 2. **`DateTime<Utc>` fields**: the core library serializes datetimes as
-///    ISO-8601 strings (the on-disk format), but the binding layer converts
-///    them to native `datetime.datetime` via PyO3's `chrono` feature
-///    (see `set_base_metadata_fields` in `src/lib.rs`). So the dummy looks
-///    like a string but the real value is a `datetime`.
-const FIELD_OVERRIDES: &[(&str, &str, &str)] = &[
-    // Option<String> fields whose dummy serializes to `null`.
-    ("DatasetMetadata", "name", "builtins.str | None"),
-    ("KeyValueStoreMetadata", "name", "builtins.str | None"),
-    ("RequestQueueMetadata", "name", "builtins.str | None"),
-    // `size` is always present on read: the core backfills it from the value
-    // file for any (legacy/foreign) sidecar that omits it.
-    ("KeyValueStoreRecordMetadata", "size", "builtins.int"),
-    ("UnprocessedRequest", "method", "builtins.str | None"),
-    // Datetime fields: ISO strings on disk, but the binding layer hands Python
-    // native tz-aware `datetime.datetime`s.
-    ("DatasetMetadata", "accessedAt", "datetime.datetime"),
-    ("DatasetMetadata", "createdAt", "datetime.datetime"),
-    ("DatasetMetadata", "modifiedAt", "datetime.datetime"),
-    ("KeyValueStoreMetadata", "accessedAt", "datetime.datetime"),
-    ("KeyValueStoreMetadata", "createdAt", "datetime.datetime"),
-    ("KeyValueStoreMetadata", "modifiedAt", "datetime.datetime"),
-    ("RequestQueueMetadata", "accessedAt", "datetime.datetime"),
-    ("RequestQueueMetadata", "createdAt", "datetime.datetime"),
-    ("RequestQueueMetadata", "modifiedAt", "datetime.datetime"),
-];
-
-/// Build a `TypedDictDef` by serializing a dummy instance of `T` and inspecting the JSON keys.
-fn typed_dict_from_serde<T: Serialize>(
-    class_name: &'static str,
-    dummy: &T,
-    known_types: &[(&str, Vec<String>)],
-) -> TypedDictDef {
-    let val = serde_json::to_value(dummy).expect("dummy instance must serialize");
-    let map = val.as_object().expect("serialized dummy must be an object");
-
-    let fields = map
-        .iter()
-        .map(|(key, val)| {
-            // Check for explicit override first.
-            let py_type = FIELD_OVERRIDES
-                .iter()
-                .find(|(s, f, _)| *s == class_name && *f == key)
-                .map(|(_, _, ty)| (*ty).to_string())
-                .unwrap_or_else(|| {
-                    let is_null = val.is_null();
-                    json_value_to_py_type(val, is_null, known_types)
-                });
-
-            TypedDictField {
-                name: key.clone(),
-                py_type,
-            }
-        })
-        .collect();
-
-    TypedDictDef { class_name, fields }
-}
-
-/// Collect the ordered key names from a serialized dummy, for matching nested objects.
-fn keys_of<T: Serialize>(dummy: &T) -> Vec<String> {
-    let val = serde_json::to_value(dummy).expect("dummy must serialize");
-    val.as_object()
-        .expect("must be an object")
-        .keys()
-        .cloned()
-        .collect()
-}
-
-/// Generate all TypedDict definitions as a single string block.
-fn generate_typed_dicts() -> String {
-    // Dummy instances — field values don't matter, only types & key names.
-    let dataset_meta = models::DatasetMetadata::new("".into(), None);
-    let kvs_meta = models::KeyValueStoreMetadata::new("".into(), None);
-    let rq_meta = models::RequestQueueMetadata::new("".into(), None);
-    let kvs_record_meta = models::KeyValueStoreRecordMetadata {
-        key: String::new(),
-        content_type: String::new(),
-        size: None,
-    };
-    let dataset_page = models::DatasetItemsListPage {
-        count: 0,
-        offset: 0,
-        limit: 0,
-        total: 0,
-        desc: false,
-        items: vec![serde_json::json!({})],
-    };
-    let processed_req = models::ProcessedRequest {
-        request_id: String::new(),
-        unique_key: String::new(),
-        was_already_present: false,
-        was_already_handled: false,
-    };
-    let unprocessed_req = models::UnprocessedRequest {
-        unique_key: String::new(),
-        url: String::new(),
-        method: None,
-    };
-    let add_requests_resp = models::AddRequestsResponse {
-        processed_requests: vec![models::ProcessedRequest {
-            request_id: String::new(),
-            unique_key: String::new(),
-            was_already_present: false,
-            was_already_handled: false,
-        }],
-        unprocessed_requests: vec![models::UnprocessedRequest {
-            unique_key: String::new(),
-            url: String::new(),
-            method: None,
-        }],
-    };
-
-    // Known types for nested object resolution (ordered by dependency).
-    let known_types: Vec<(&str, Vec<String>)> = vec![
-        ("ProcessedRequest", keys_of(&processed_req)),
-        ("UnprocessedRequest", keys_of(&unprocessed_req)),
-    ];
-
-    // Build the TypedDict definitions (order matters for forward references).
-    let defs: Vec<TypedDictDef> = vec![
-        typed_dict_from_serde("DatasetMetadata", &dataset_meta, &known_types),
-        typed_dict_from_serde("KeyValueStoreMetadata", &kvs_meta, &known_types),
-        typed_dict_from_serde(
-            "KeyValueStoreRecordMetadata",
-            &kvs_record_meta,
-            &known_types,
-        ),
-        // KeyValueStoreRecord is a special case: it's built manually by `record_to_py()`
-        // with camelCase keys, and `value` is the raw record bytes (`builtins.bytes`).
-        TypedDictDef {
-            class_name: "KeyValueStoreRecord",
-            fields: vec![
-                TypedDictField {
-                    name: "key".into(),
-                    py_type: "builtins.str".into(),
-                },
-                TypedDictField {
-                    name: "contentType".into(),
-                    py_type: "builtins.str".into(),
-                },
-                TypedDictField {
-                    name: "size".into(),
-                    py_type: "builtins.int".into(),
-                },
-                TypedDictField {
-                    name: "value".into(),
-                    py_type: "builtins.bytes".into(),
-                },
-            ],
-        },
-        typed_dict_from_serde("RequestQueueMetadata", &rq_meta, &known_types),
-        typed_dict_from_serde("DatasetItemsListPage", &dataset_page, &known_types),
-        typed_dict_from_serde("ProcessedRequest", &processed_req, &known_types),
-        typed_dict_from_serde("UnprocessedRequest", &unprocessed_req, &known_types),
-        typed_dict_from_serde("AddRequestsResponse", &add_requests_resp, &known_types),
-    ];
-
-    let mut out = String::new();
-    for def in &defs {
-        out.push('\n');
-        out.push_str(&def.render());
+/// Render one `TypedDict` class body from a model's `(name, fields)` spec.
+fn render_typed_dict(name: &str, fields: &[TypedDictField]) -> String {
+    let mut out = format!("class {name}(typing.TypedDict):\n");
+    for field in fields {
+        out.push_str(&format!("    {}: {}\n", field.key, field.py_type));
     }
     out
 }
 
-/// Collect all TypedDict class names (for `__all__` injection), in sorted order.
+/// All TypedDict definitions as a single string block, in `all_specs()` order.
+fn generate_typed_dicts() -> String {
+    let mut out = String::new();
+    for (name, fields) in models::all_specs() {
+        out.push('\n');
+        out.push_str(&render_typed_dict(name, fields));
+    }
+    out
+}
+
+/// TypedDict class names. Used for `__all__` injection (order irrelevant —
+/// `RUF022` sorts the block) and as a lookup set in `pyclass_names`.
 fn typed_dict_names() -> Vec<&'static str> {
-    let mut names = vec![
-        "AddRequestsResponse",
-        "DatasetItemsListPage",
-        "DatasetMetadata",
-        "KeyValueStoreMetadata",
-        "KeyValueStoreRecord",
-        "KeyValueStoreRecordMetadata",
-        "ProcessedRequest",
-        "RequestQueueMetadata",
-        "UnprocessedRequest",
-    ];
-    names.sort();
-    names
+    models::all_specs().into_iter().map(|(n, _)| n).collect()
+}
+
+/// Append TypedDict + module-constant names to the native stub's `__all__`.
+///
+/// Splices every TypedDict name and module constant in just before the closing
+/// `]` of the `__all__` block. Order doesn't matter — `RUF022` (run in
+/// `format_stubs`) sorts the block afterwards. No de-duplication is needed
+/// either: `pyo3-stub-gen`'s `stub.generate()` rewrites the `.pyi` from scratch
+/// on every run, so when this splice runs the injected names are never already
+/// present (the previous run's edits were overwritten).
+fn append_to_all_block(lines: &[&str], output: &mut String) {
+    let mut in_all_block = false;
+
+    for line in lines {
+        if line.contains("__all__") && line.contains('[') {
+            in_all_block = true;
+        }
+        if in_all_block && line.trim_start().starts_with(']') {
+            for name in typed_dict_names() {
+                output.push_str(&format!("    \"{name}\",\n"));
+            }
+            for (const_name, _) in MODULE_CONSTANTS {
+                output.push_str(&format!("    \"{const_name}\",\n"));
+            }
+            in_all_block = false;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
 }
 
 // ─── Stub file post-processing ──────────────────────────────────────────────
 
-/// Rewrite `typing.Optional[X]` → `X | None` (PEP 604) in a single line.
-/// Handles nested brackets correctly. Conservative: only rewrites
-/// `typing.Optional[...]`, ignores bare `Optional[...]`.
-fn rewrite_optional_to_pep604(line: &str) -> String {
-    const NEEDLE: &str = "typing.Optional[";
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(idx) = rest.find(NEEDLE) {
-        out.push_str(&rest[..idx]);
-        let after_open = &rest[idx + NEEDLE.len()..];
-        // Walk the inner contents, tracking bracket depth, to find the matching `]`.
-        let mut depth = 1usize;
-        let mut end = None;
-        for (i, c) in after_open.char_indices() {
-            match c {
-                '[' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(i);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        match end {
-            Some(end_idx) => {
-                let inner = &after_open[..end_idx];
-                // Recursively rewrite inner (could contain more Optionals).
-                let inner_rewritten = rewrite_optional_to_pep604(inner);
-                out.push_str(&inner_rewritten);
-                out.push_str(" | None");
-                rest = &after_open[end_idx + 1..];
-            }
-            None => {
-                // Malformed — bail out, keep the rest as-is.
-                out.push_str(&rest[idx..]);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Post-process a generated `.pyi` stub file:
-/// 1. Inject `TypedDict` definitions after the imports.
-/// 2. Append TypedDict names to `__all__`.
-/// 3. Mark methods as `async def` where appropriate.
-/// 4. Ensure `import datetime` is present (TypedDicts reference it).
-/// 5. Rewrite `typing.Optional[X]` → `X | None` (PEP 604).
+/// 1. Inject `TypedDict` definitions (and module constants) before the first class.
+/// 2. Append TypedDict + constant names to `__all__`.
+/// 3. Mark `future_into_py`-based methods as `async def`.
+/// 4. Ensure `import datetime` is present (the metadata TypedDicts reference it).
 ///
-/// pyo3_stub_gen cannot detect async methods that use
-/// `pyo3_async_runtimes::tokio::future_into_py` (they appear as sync `fn` in Rust),
-/// so we fix them up here.
-fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()> {
+/// PEP 604 rewriting (`Optional[X]` → `X | None`) and formatting are handled by
+/// `ruff` in `format_stubs`, not here.
+fn fixup_stubs(
+    path: &std::path::Path,
+    typed_dicts: &str,
+    async_methods: &HashSet<String>,
+) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
-    let mut output = String::with_capacity(content.len() + typed_dicts.len());
 
     let lines: Vec<&str> = content.lines().collect();
-    let names = typed_dict_names();
 
     // Ensure `import datetime` is present — the metadata TypedDicts reference
     // `datetime.datetime`. pyo3_stub_gen only adds it when a method signature
@@ -374,8 +189,7 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         .position(|line| line.starts_with("@typing.final") || line.starts_with("class "))
         .unwrap_or(lines.len());
 
-    // Find the last `import` line — that's where we'll splice in `import datetime`
-    // if it's missing.
+    // Find the last `import`/`from` line — where we splice in `import datetime`.
     let last_import_idx = lines
         .iter()
         .enumerate()
@@ -383,125 +197,211 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
         .map(|(i, _)| i)
         .next_back();
 
-    // Track whether we're inside the __all__ block so we can append TypedDict names.
-    let mut in_all_block = false;
+    // Pass 1: inject TypedDicts + module constants, splice `import datetime`,
+    // and rewrite `def` → `async def`. The `__all__` splicing is left to pass 2
+    // (`append_to_all_block`) so it isn't duplicated here — the `__all__` block
+    // always precedes `insert_before`, so the two passes don't fight.
+    let mut pass1 = String::with_capacity(content.len() + typed_dicts.len());
 
     for (i, line) in lines.iter().enumerate() {
-        // Inject TypedDicts right before the first class definition.
+        // Inject TypedDicts (then module constants) right before the first class.
         if i == insert_before {
-            output.push_str(typed_dicts);
-            output.push('\n');
-            // Then the module-level constants (e.g. NONE_CONTENT_TYPE).
+            pass1.push_str(typed_dicts);
+            pass1.push('\n');
             for (const_name, const_type) in MODULE_CONSTANTS {
-                output.push_str(&format!("{const_name}: {const_type}\n"));
+                pass1.push_str(&format!("{const_name}: {const_type}\n"));
             }
-            output.push('\n');
-        }
-
-        // Detect __all__ = [ ... ] and inject TypedDict names before the closing `]`.
-        if line.contains("__all__") && line.contains('[') {
-            in_all_block = true;
-        }
-        if in_all_block && line.trim_start().starts_with(']') {
-            for name in &names {
-                output.push_str(&format!("    \"{name}\",\n"));
-            }
-            for (const_name, _) in MODULE_CONSTANTS {
-                output.push_str(&format!("    \"{const_name}\",\n"));
-            }
-            in_all_block = false;
+            pass1.push('\n');
         }
 
         let trimmed = line.trim_start();
-        let rewritten = rewrite_optional_to_pep604(line);
 
         if let Some(after_def) = trimmed.strip_prefix("def ") {
             // Extract method name: "foo(" -> "foo"
             let method_name = after_def.split('(').next().unwrap_or("");
 
-            // Check if the previous non-empty line is a @property decorator
+            // Check if the previous non-empty line is a @property decorator.
             let is_property = (0..i)
                 .rev()
                 .find(|&j| !lines[j].trim().is_empty())
                 .is_some_and(|j| lines[j].trim() == "@property");
 
-            let is_dunder = method_name.starts_with("__");
-            let is_sync = SYNC_METHODS.contains(&method_name)
-                || (is_dunder && !ASYNC_DUNDERS.contains(&method_name))
-                || is_property;
-
-            // We also need to strip "Optional" from the trimmed line to find
-            // method name, but it's been done already above.
-            let rewritten_trimmed = rewritten.trim_start();
-            let rewritten_after_def = rewritten_trimmed.strip_prefix("def ").unwrap_or(after_def);
-
-            if !is_sync {
-                // Replace "def " with "async def " preserving indentation
-                let indent = &rewritten[..rewritten.len() - rewritten_trimmed.len()];
-                output.push_str(indent);
-                output.push_str("async def ");
-                output.push_str(rewritten_after_def);
-                output.push('\n');
+            if classify_method(method_name, is_property, async_methods) {
+                // Replace "def " with "async def ", preserving indentation.
+                let indent = &line[..line.len() - trimmed.len()];
+                pass1.push_str(indent);
+                pass1.push_str("async def ");
+                pass1.push_str(after_def);
+                pass1.push('\n');
                 continue;
             }
         }
 
-        output.push_str(&rewritten);
-        output.push('\n');
+        pass1.push_str(line);
+        pass1.push('\n');
 
         // After the last existing import, splice in `import datetime` if missing.
         if !has_datetime_import && last_import_idx == Some(i) {
-            output.push_str("import datetime\n");
+            pass1.push_str("import datetime\n");
         }
+    }
+
+    // Pass 2: append the TypedDict + constant names to `__all__`.
+    let pass1_lines: Vec<&str> = pass1.lines().collect();
+    let mut output = String::with_capacity(pass1.len());
+    append_to_all_block(&pass1_lines, &mut output);
+
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
+/// Module docstring restored onto the generated top-level `__init__.py`.
+const TOPLEVEL_DOCSTRING: &str =
+    "\"\"\"Python bindings for crawlee-storage (Rust-powered filesystem storage clients).\"\"\"";
+
+/// Post-process the generated top-level `crawlee_storage/__init__.py`.
+///
+/// The generator emits a runtime `__init__.py` (re-exports + `__all__`) from
+/// the native module's classes, but can't reproduce two things, so we patch
+/// them back in:
+///
+/// 1. the module docstring (placed first so it counts as `__doc__`), and
+/// 2. the `NONE_CONTENT_TYPE` constant — it's added at runtime via `m.add(...)`
+///    (see the `#[pymodule]` init), which the generator doesn't track, so it's
+///    neither imported nor listed in `__all__`.
+///
+/// TypedDict names are deliberately **not** added here: they're type-only (no
+/// runtime binding), so listing them in the runtime `__all__` would break
+/// `from crawlee_storage import *`. Type checkers see them via the companion
+/// `__init__.pyi` from `write_toplevel_pyi`.
+fn fixup_init_py(path: &std::path::Path) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+
+    let mut output = String::with_capacity(content.len() + 256);
+    // Module docstring must be the first statement to count as `__doc__`.
+    output.push_str(TOPLEVEL_DOCSTRING);
+    output.push_str("\n\n");
+
+    for line in content.lines() {
+        // Add the runtime-only constant to the native re-export import if absent.
+        if line.starts_with("from crawlee_storage._native import ")
+            && !line.contains("NONE_CONTENT_TYPE")
+        {
+            output.push_str(&line.replacen("import ", "import NONE_CONTENT_TYPE, ", 1));
+            output.push('\n');
+            continue;
+        }
+
+        // Add NONE_CONTENT_TYPE to __all__ if it's missing (the generator omits
+        // runtime `m.add` constants). Splice it just before the closing bracket.
+        if line.trim_start().starts_with(']') && !output.contains("\"NONE_CONTENT_TYPE\"") {
+            output.push_str("    \"NONE_CONTENT_TYPE\",\n");
+        }
+
+        output.push_str(line);
+        output.push('\n');
     }
 
     std::fs::write(path, output)?;
     Ok(())
 }
 
-/// Run `ruff format` (and `ruff check --fix --select I` for import ordering)
-/// over the generated stub files so they match the project's formatting
-/// conventions (line-length, signature wrapping, sorted imports, etc.).
+/// Write the top-level `crawlee_storage/__init__.pyi` type stub.
 ///
-/// The generator emits unformatted output (collapsed single-line signatures
-/// and the occasional unsorted import block), so without these steps every
-/// regeneration produces noisy cosmetic diffs and `ruff check` then trips on
-/// the result during CI.
-///
-/// Both steps are best-effort: if `ruff` is not on `PATH` we emit a warning
-/// rather than failing the whole generation, since the stubs are otherwise
-/// valid.
+/// A `.pyi` alongside the runtime `__init__.py` lets `crawlee_storage` (not just
+/// `crawlee_storage._native`) expose the TypedDict names to type checkers. It
+/// re-exports everything from the native module — the runtime classes, the
+/// constant, and all the TypedDicts.
+/// Extract the runtime `#[pyclass]` names from the already-generated native
+/// stub: every top-level `class X:` definition that isn't one of the injected
+/// `TypedDict`s. This replaces a hand-maintained class list (which silently
+/// went stale whenever a client class was added/removed) with a read off the
+/// generator's own output, so the top-level re-export stays in lockstep with
+/// `m.add_class::<…>()` automatically.
+fn pyclass_names(native_stub_path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(native_stub_path)?;
+    let typed_dicts: std::collections::HashSet<&str> = typed_dict_names().into_iter().collect();
+
+    let mut names = Vec::new();
+    for line in content.lines() {
+        // Match `class Foo:` / `class Foo(Base):` at column 0 (top-level only).
+        if let Some(rest) = line.strip_prefix("class ") {
+            let name = rest.split([':', '(']).next().unwrap_or("").trim();
+            // TypedDicts are also emitted as `class …(typing.TypedDict):` — skip
+            // them (they're type-only and added to `__all__` separately).
+            if !name.is_empty() && !typed_dicts.contains(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // Order is irrelevant here — `RUF022` sorts the `__all__` block that these
+    // names land in (see `write_toplevel_pyi` / `format_stubs`).
+    Ok(names)
+}
+
+fn write_toplevel_pyi(
+    path: &std::path::Path,
+    native_stub_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut out = String::new();
+    out.push_str("# This file is automatically generated by stub_gen\n");
+    out.push_str("# ruff: noqa: E501, F401, F403, F405\n\n");
+    out.push_str("from crawlee_storage._native import *\n");
+    out.push_str("from crawlee_storage._native import NONE_CONTENT_TYPE as NONE_CONTENT_TYPE\n\n");
+
+    out.push_str("__all__ = [\n");
+    // Runtime pyclasses, read off the native stub (no hand-maintained list).
+    for name in pyclass_names(native_stub_path)? {
+        out.push_str(&format!("    \"{name}\",\n"));
+    }
+    // Module constants added via `m.add(...)` (not tracked by the generator).
+    for (const_name, _) in MODULE_CONSTANTS {
+        out.push_str(&format!("    \"{const_name}\",\n"));
+    }
+    for name in typed_dict_names() {
+        out.push_str(&format!("    \"{name}\",\n"));
+    }
+    out.push_str("]\n");
+
+    std::fs::write(path, out)?;
+    Ok(())
+}
+
+/// Format the generated stubs with `ruff`: sort imports (`I`), modernize typing
+/// syntax to PEP 604 (`UP` rewrites `Optional[X]` → `X | None`), and sort the
+/// `__all__` blocks (`RUF022`), then `ruff format`. Letting `RUF022` own the
+/// `__all__` ordering means the injection sites below can append names in any
+/// order without hand-sorting. Best-effort: a missing `ruff` only warns, since
+/// the stubs are otherwise valid.
 fn format_stubs(paths: &[&std::path::Path]) {
     let existing: Vec<&std::path::Path> = paths.iter().copied().filter(|p| p.exists()).collect();
     if existing.is_empty() {
         return;
     }
 
-    // 1. Sort/fix imports first — `ruff check --fix --select I` rearranges them
-    //    without touching anything else.
-    let mut sort_imports = std::process::Command::new("ruff");
-    sort_imports
-        .arg("check")
+    // 1. Sort imports, modernize typing syntax (Optional[X] -> X | None), and
+    //    sort `__all__` (RUF022). Doing this before `format` avoids fighting
+    //    over blank-line groupings.
+    let mut fix = std::process::Command::new("ruff");
+    fix.arg("check")
         .arg("--fix")
         .arg("--select")
-        .arg("I")
+        .arg("I,UP,RUF022")
         .args(&existing);
-    match sort_imports.status() {
+    match fix.status() {
         Ok(status) if status.success() => {
-            eprintln!("Sorted imports in stubs with `ruff check --fix --select I`");
+            eprintln!("Applied `ruff check --fix --select I,UP,RUF022` to stubs");
         }
         Ok(status) => {
             eprintln!("Warning: `ruff check --fix` exited with status {status}");
         }
         Err(err) => {
-            eprintln!("Warning: could not run `ruff check --fix` ({err}); imports left unsorted");
+            eprintln!("Warning: could not run `ruff check --fix` ({err}); stubs left unfixed");
             return;
         }
     }
 
-    // 2. Then format. Doing it in this order avoids `ruff format` collapsing
-    //    blank separators between import groups that `ruff check` would then
-    //    flag as I001.
+    // 2. Format.
     let mut fmt = std::process::Command::new("ruff");
     fmt.arg("format").args(&existing);
     match fmt.status() {
@@ -517,37 +417,6 @@ fn format_stubs(paths: &[&std::path::Path]) {
     }
 }
 
-/// Append TypedDict names to the `__all__` list in a re-export stub file.
-fn fixup_reexport_stubs(path: &std::path::Path) -> std::io::Result<()> {
-    let content = std::fs::read_to_string(path)?;
-    let mut output = String::with_capacity(content.len());
-
-    let lines: Vec<&str> = content.lines().collect();
-    let names = typed_dict_names();
-    let mut in_all_block = false;
-
-    for line in &lines {
-        if line.contains("__all__") && line.contains('[') {
-            in_all_block = true;
-        }
-        if in_all_block && line.trim_start().starts_with(']') {
-            for name in &names {
-                output.push_str(&format!("    \"{name}\",\n"));
-            }
-            for (const_name, _) in MODULE_CONSTANTS {
-                output.push_str(&format!("    \"{const_name}\",\n"));
-            }
-            in_all_block = false;
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    std::fs::write(path, output)?;
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let stub = _crawlee_storage::stub_info()?;
     stub.generate()?;
@@ -557,28 +426,42 @@ fn main() -> Result<()> {
     let manifest_dir: &std::path::Path = env!("CARGO_MANIFEST_DIR").as_ref();
     let python_dir = manifest_dir.join("python").join("crawlee_storage");
 
-    // Post-process _native/__init__.pyi: inject TypedDicts and add `async` markers
+    // Derive the async method set from the binding source (the `future_into_py`
+    // methods, identified by their return type) so the stub's `async def`
+    // markers track the code, not a hand-maintained list.
+    let lib_rs = std::fs::read_to_string(manifest_dir.join("src").join("lib.rs"))
+        .expect("Failed to read src/lib.rs to derive async method set");
+    let async_methods = async_method_names(&lib_rs);
+
+    // Post-process _native/__init__.pyi: inject TypedDicts and async markers.
     let native_stub_path = python_dir.join("_native").join("__init__.pyi");
     if native_stub_path.exists() {
-        fixup_stubs(&native_stub_path, &typed_dicts).expect("Failed to post-process native stubs");
+        fixup_stubs(&native_stub_path, &typed_dicts, &async_methods)
+            .expect("Failed to post-process native stubs");
         eprintln!(
             "Post-processed stubs: injected TypedDicts and async markers into {}",
             native_stub_path.display()
         );
     }
 
-    // Post-process top-level __init__.pyi: add TypedDict names to __all__
-    let toplevel_stub_path = python_dir.join("__init__.pyi");
-    if toplevel_stub_path.exists() {
-        fixup_reexport_stubs(&toplevel_stub_path).expect("Failed to post-process top-level stubs");
+    // Patch the generated runtime __init__.py (docstring + NONE_CONTENT_TYPE).
+    let toplevel_init_py = python_dir.join("__init__.py");
+    if toplevel_init_py.exists() {
+        fixup_init_py(&toplevel_init_py).expect("Failed to post-process top-level __init__.py");
         eprintln!(
-            "Post-processed stubs: added TypedDict names to __all__ in {}",
-            toplevel_stub_path.display()
+            "Post-processed top-level __init__.py (docstring, NONE_CONTENT_TYPE, __all__) at {}",
+            toplevel_init_py.display()
         );
     }
 
-    // Format the generated stubs so they match the project's ruff conventions.
-    format_stubs(&[&native_stub_path, &toplevel_stub_path]);
+    // Write the companion top-level type stub (re-exports the TypedDicts).
+    let toplevel_pyi = python_dir.join("__init__.pyi");
+    write_toplevel_pyi(&toplevel_pyi, &native_stub_path)
+        .expect("Failed to write top-level __init__.pyi");
+    eprintln!("Wrote top-level type stub {}", toplevel_pyi.display());
+
+    // Format the generated files so they match the project's ruff conventions.
+    format_stubs(&[&native_stub_path, &toplevel_init_py, &toplevel_pyi]);
 
     Ok(())
 }
