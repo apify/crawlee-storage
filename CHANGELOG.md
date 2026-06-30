@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - Add `prefix` option to KVS listKeys, flip assumeSoleOwner default ([#56](https://github.com/apify/crawlee-storage/pull/56)) ([01f8157](https://github.com/apify/crawlee-storage/commit/01f81576f30c14e2d151606e9fef315b5a3401c4)) by [@janbuchar](https://github.com/janbuchar)
 - [**breaking**] Replace require_record_metadata flag with a higher-level resolveValue method ([#60](https://github.com/apify/crawlee-storage/pull/60)) ([0930389](https://github.com/apify/crawlee-storage/commit/09303899f4d8e29c65393619613286add934864a)) by [@janbuchar](https://github.com/janbuchar)
 - GetPublicUrl checks for existence, listKeys validates exclusiveStartKey ([#61](https://github.com/apify/crawlee-storage/pull/61)) ([4e6d32f](https://github.com/apify/crawlee-storage/commit/4e6d32f7038846943f0d737d06fbcaa49521a245)) by [@janbuchar](https://github.com/janbuchar)
+- Add option to include selected bare files in listKeys output ([#69](https://github.com/apify/crawlee-storage/pull/69)) ([b64a6ba](https://github.com/apify/crawlee-storage/commit/b64a6bacab03b945c97ff5f5af8dcc200d191000)) by [@janbuchar](https://github.com/janbuchar)
 
 ### 🐛 Bug Fixes
 
