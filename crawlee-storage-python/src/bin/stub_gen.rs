@@ -122,44 +122,21 @@ fn generate_typed_dicts() -> String {
     out
 }
 
-/// TypedDict class names, sorted (for `__all__` injection).
+/// TypedDict class names. Used for `__all__` injection (order irrelevant —
+/// `RUF022` sorts the block) and as a lookup set in `pyclass_names`.
 fn typed_dict_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = models::all_specs().into_iter().map(|(n, _)| n).collect();
-    names.sort_unstable();
-    names
+    models::all_specs().into_iter().map(|(n, _)| n).collect()
 }
 
 /// Append TypedDict + module-constant names to the native stub's `__all__`.
 ///
-/// Just before the closing `]` of the `__all__` block, splices in every
-/// TypedDict name (sorted) followed by every module constant. Idempotent: names
-/// already present are skipped, so re-running over a patched stub is a no-op.
+/// Splices every TypedDict name and module constant in just before the closing
+/// `]` of the `__all__` block. Order doesn't matter — `RUF022` (run in
+/// `format_stubs`) sorts the block afterwards. No de-duplication is needed
+/// either: `pyo3-stub-gen`'s `stub.generate()` rewrites the `.pyi` from scratch
+/// on every run, so when this splice runs the injected names are never already
+/// present (the previous run's edits were overwritten).
 fn append_to_all_block(lines: &[&str], output: &mut String) {
-    let names = typed_dict_names();
-
-    // Collect the entries already present in the `__all__` block so we don't
-    // re-add them. Entries look like `    "Foo",` — pull the quoted name out.
-    let existing: std::collections::HashSet<String> = {
-        let mut set = std::collections::HashSet::new();
-        let mut scanning = false;
-        for line in lines {
-            if line.contains("__all__") && line.contains('[') {
-                scanning = true;
-            }
-            if scanning {
-                if line.trim_start().starts_with(']') {
-                    break;
-                }
-                if let Some(name) = line.trim().trim_end_matches(',').strip_prefix('"') {
-                    if let Some(name) = name.strip_suffix('"') {
-                        set.insert(name.to_string());
-                    }
-                }
-            }
-        }
-        set
-    };
-
     let mut in_all_block = false;
 
     for line in lines {
@@ -167,15 +144,11 @@ fn append_to_all_block(lines: &[&str], output: &mut String) {
             in_all_block = true;
         }
         if in_all_block && line.trim_start().starts_with(']') {
-            for name in &names {
-                if !existing.contains(*name) {
-                    output.push_str(&format!("    \"{name}\",\n"));
-                }
+            for name in typed_dict_names() {
+                output.push_str(&format!("    \"{name}\",\n"));
             }
             for (const_name, _) in MODULE_CONSTANTS {
-                if !existing.contains(*const_name) {
-                    output.push_str(&format!("    \"{const_name}\",\n"));
-                }
+                output.push_str(&format!("    \"{const_name}\",\n"));
             }
             in_all_block = false;
         }
@@ -365,7 +338,8 @@ fn pyclass_names(native_stub_path: &std::path::Path) -> std::io::Result<Vec<Stri
             }
         }
     }
-    names.sort_unstable();
+    // Order is irrelevant here — `RUF022` sorts the `__all__` block that these
+    // names land in (see `write_toplevel_pyi` / `format_stubs`).
     Ok(names)
 }
 
@@ -397,27 +371,30 @@ fn write_toplevel_pyi(
     Ok(())
 }
 
-/// Format the generated stubs with `ruff`: sort imports (`check --fix --select
-/// I`), upgrade typing syntax to PEP 604 (`--select UP` rewrites
-/// `Optional[X]` → `X | None`), then `ruff format`. Best-effort: a missing
-/// `ruff` only warns, since the stubs are otherwise valid.
+/// Format the generated stubs with `ruff`: sort imports (`I`), modernize typing
+/// syntax to PEP 604 (`UP` rewrites `Optional[X]` → `X | None`), and sort the
+/// `__all__` blocks (`RUF022`), then `ruff format`. Letting `RUF022` own the
+/// `__all__` ordering means the injection sites below can append names in any
+/// order without hand-sorting. Best-effort: a missing `ruff` only warns, since
+/// the stubs are otherwise valid.
 fn format_stubs(paths: &[&std::path::Path]) {
     let existing: Vec<&std::path::Path> = paths.iter().copied().filter(|p| p.exists()).collect();
     if existing.is_empty() {
         return;
     }
 
-    // 1. Sort imports and modernize typing syntax (Optional[X] -> X | None).
-    //    Doing this before `format` avoids fighting over blank-line groupings.
+    // 1. Sort imports, modernize typing syntax (Optional[X] -> X | None), and
+    //    sort `__all__` (RUF022). Doing this before `format` avoids fighting
+    //    over blank-line groupings.
     let mut fix = std::process::Command::new("ruff");
     fix.arg("check")
         .arg("--fix")
         .arg("--select")
-        .arg("I,UP")
+        .arg("I,UP,RUF022")
         .args(&existing);
     match fix.status() {
         Ok(status) if status.success() => {
-            eprintln!("Applied `ruff check --fix --select I,UP` to stubs");
+            eprintln!("Applied `ruff check --fix --select I,UP,RUF022` to stubs");
         }
         Ok(status) => {
             eprintln!("Warning: `ruff check --fix` exited with status {status}");
