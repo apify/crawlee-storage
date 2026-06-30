@@ -393,15 +393,15 @@ describe('FileSystemRequestQueueClient', () => {
             );
             await clientA.fetchNextRequest(); // locks it on disk
 
-            // Multi-process scenario: B must NOT assume sole ownership, so it
-            // respects A's on-disk lock instead of reclaiming it at open time.
+            // Multi-process scenario: B opens in 'shared' mode, so it respects
+            // A's on-disk lock instead of reclaiming it at open time.
             const clientB = await FileSystemRequestQueueClient.open(
                 null,
                 null,
                 null,
                 storageDir,
                 true,
-                false,
+                'shared',
             );
 
             // B has its own clock at offset 0; the lock is in the future on disk.
@@ -415,16 +415,17 @@ describe('FileSystemRequestQueueClient', () => {
         });
     });
 
-    // ─── assumeSoleOwner mode ──────────────────────────────────────────────
+    // ─── requestQueueAccess mode ───────────────────────────────────────────
     //
     // When the caller knows nothing else is using the on-disk queue (the
-    // typical single-process crawler case), opening with `assumeSoleOwner:
-    // true` causes any future-dated `orderNo` on disk to be reclaimed
-    // immediately. This restores the historical instant-crash-recovery
-    // behavior; without it, a crashed peer's locks would naturally expire
-    // after the lock window (default 3 min) instead.
-    describe('assumeSoleOwner', () => {
-        it('default (false) respects an in-progress lock left on disk by a previous run', async () => {
+    // typical single-process crawler case), opening with
+    // `requestQueueAccess: 'single'` (the default) causes any future-dated
+    // `orderNo` on disk to be reclaimed immediately. This restores the
+    // historical instant-crash-recovery behavior; with `'shared'`, a crashed
+    // peer's locks instead expire naturally after the lock window (default
+    // 3 min).
+    describe('requestQueueAccess', () => {
+        it("'shared' respects an in-progress lock left on disk by a previous run", async () => {
             const first = await FileSystemRequestQueueClient.open(
                 null,
                 null,
@@ -438,21 +439,21 @@ describe('FileSystemRequestQueueClient', () => {
             );
             await first.fetchNextRequest(); // locks r1 on disk
 
-            // Reopen without sole-ownership opt-in: the lock is still in
-            // effect, so r1 is not fetchable.
+            // Reopen in shared mode: the lock is still in effect, so r1 is
+            // not fetchable.
             const reopened = await FileSystemRequestQueueClient.open(
                 null,
                 null,
                 null,
                 storageDir,
                 true,
-                false, // assumeSoleOwner
+                'shared', // requestQueueAccess
             );
             const blocked = await reopened.fetchNextRequest();
             expect(blocked).toBeNull();
         });
 
-        it('true reclaims stale locks on open so they are immediately fetchable', async () => {
+        it("'single' (default) reclaims stale locks on open so they are immediately fetchable", async () => {
             const first = await FileSystemRequestQueueClient.open(
                 null,
                 null,
@@ -466,15 +467,15 @@ describe('FileSystemRequestQueueClient', () => {
             );
             await first.fetchNextRequest(); // locks r1 on disk
 
-            // Reopen with assumeSoleOwner: true. The on-disk lock is treated
-            // as a stale crash artifact and reclaimed immediately.
+            // Reopen with requestQueueAccess: 'single'. The on-disk lock is
+            // treated as a stale crash artifact and reclaimed immediately.
             const reopened = await FileSystemRequestQueueClient.open(
                 null,
                 null,
                 null,
                 storageDir,
                 true,
-                true, // assumeSoleOwner
+                'single', // requestQueueAccess
             );
             const fetched = await reopened.fetchNextRequest();
             expect(fetched).not.toBeNull();

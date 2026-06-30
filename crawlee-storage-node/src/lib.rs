@@ -31,6 +31,23 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
 #[napi]
 pub const NONE_CONTENT_TYPE: &str = crawlee_storage::NONE_CONTENT_TYPE;
 
+/// How the on-disk request queue is expected to be accessed. Mirrors the
+/// Apify Python SDK's `request_queue_access` option so the naming stays
+/// consistent across projects.
+///
+/// Crosses the FFI as a plain string (`'single'` | `'shared'`); the TS type is
+/// pinned via `ts_args_type` on `open`. Map to the core's `assume_sole_owner`
+/// mechanism flag.
+fn request_queue_access_to_sole_owner(value: Option<String>) -> napi::Result<bool> {
+    match value.as_deref().unwrap_or("single") {
+        "single" => Ok(true),
+        "shared" => Ok(false),
+        other => Err(napi::Error::from_reason(format!(
+            "requestQueueAccess must be 'single' or 'shared', got '{other}'"
+        ))),
+    }
+}
+
 /// Pick a clock for a client given the `useTestClock` flag passed across the
 /// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
 /// concrete `TestClock` we keep on the wrapper so JS can drive it later (or
@@ -476,33 +493,38 @@ impl FileSystemRequestQueueClient {
     ///
     /// `useTestClock`: see `advanceClockForTesting` below.
     ///
-    /// `assumeSoleOwner` (default `true`): controls how locks on disk are
-    /// treated at open time. With `true` (the default, tuned for the common
-    /// single-process crawl), the caller asserts nothing else is using this
-    /// queue and any in-progress locks are reclaimed immediately, so a request
-    /// whose previous run died is instantly re-fetchable. Set to `false` when
-    /// multiple processes share the same on-disk queue concurrently: any
-    /// future-dated `orderNo` is then respected as a potential live peer's
-    /// lock, and crashed peers' locks expire naturally on the wall clock —
-    /// otherwise you risk two peers processing the same request.
-    #[napi(factory)]
+    /// `requestQueueAccess` (default `'single'`): how the on-disk queue is
+    /// expected to be accessed. With `'single'` (the default, tuned for the
+    /// common single-process crawl), the caller asserts nothing else is using
+    /// this queue and any in-progress locks are reclaimed immediately, so a
+    /// request whose previous run died is instantly re-fetchable. Use
+    /// `'shared'` when multiple processes share the same on-disk queue
+    /// concurrently: any future-dated `orderNo` is then respected as a
+    /// potential live peer's lock, and crashed peers' locks expire naturally
+    /// on the wall clock — otherwise you risk two peers processing the same
+    /// request.
+    #[napi(
+        factory,
+        ts_args_type = "id?: string | undefined | null, name?: string | undefined | null, alias?: string | undefined | null, storageDir?: string | undefined | null, useTestClock?: boolean | undefined | null, requestQueueAccess?: 'single' | 'shared' | undefined | null"
+    )]
     pub async fn open(
         id: Option<String>,
         name: Option<String>,
         alias: Option<String>,
         storage_dir: Option<String>,
         use_test_clock: Option<bool>,
-        assume_sole_owner: Option<bool>,
+        request_queue_access: Option<String>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
         let (clock, test_clock) = pick_clock(use_test_clock);
+        let assume_sole_owner = request_queue_access_to_sole_owner(request_queue_access)?;
         let client = crawlee_storage::request_queue::FileSystemRequestQueueClient::open_with_clock(
             id,
             name,
             alias,
             &storage_dir,
             clock,
-            assume_sole_owner.unwrap_or(true),
+            assume_sole_owner,
         )
         .await
         .map_err(storage_err)?;

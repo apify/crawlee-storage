@@ -206,10 +206,10 @@ async def test_get_public_url_is_existence_aware(storage_dir: str) -> None:
     assert "my-key" in url
 
 
-async def test_rq_open_assumes_sole_owner_by_default(storage_dir: str) -> None:
-    """The RQ `open` default is now `assume_sole_owner=True`: a request left
-    in-progress (locked) at crash time is immediately re-fetchable on reopen,
-    without waiting out the lock window."""
+async def test_rq_open_assumes_single_access_by_default(storage_dir: str) -> None:
+    """The RQ `open` default is now `request_queue_access="single"`: a request
+    left in-progress (locked) at crash time is immediately re-fetchable on
+    reopen, without waiting out the lock window."""
     client = await FileSystemRequestQueueClient.open(storage_dir=storage_dir, name="recover")
     await client.add_batch_of_requests(
         [{"uniqueKey": "k", "url": "https://example.com/k", "method": "GET"}],
@@ -224,3 +224,29 @@ async def test_rq_open_assumes_sole_owner_by_default(storage_dir: str) -> None:
     refetched = await reopened.fetch_next_request()
     assert refetched is not None
     assert refetched["uniqueKey"] == "k"
+
+
+async def test_rq_open_shared_respects_on_disk_lock(storage_dir: str) -> None:
+    """With `request_queue_access="shared"` an in-progress lock left on disk by
+    a previous run is respected (not reclaimed at open time), so the locked
+    request is not immediately re-fetchable."""
+    client = await FileSystemRequestQueueClient.open(storage_dir=storage_dir, name="shared")
+    await client.add_batch_of_requests(
+        [{"uniqueKey": "k", "url": "https://example.com/k", "method": "GET"}],
+        forefront=False,
+    )
+    assert await client.fetch_next_request() is not None  # locks it on disk
+    rq_id = (await client.get_metadata())["id"]
+
+    reopened = await FileSystemRequestQueueClient.open(storage_dir=storage_dir, id=rq_id, request_queue_access="shared")
+    assert await reopened.fetch_next_request() is None
+
+
+async def test_rq_open_rejects_invalid_access_mode(storage_dir: str) -> None:
+    """An unknown `request_queue_access` value raises `ValueError`."""
+    with pytest.raises(ValueError, match="request_queue_access must be 'single' or 'shared'"):
+        await FileSystemRequestQueueClient.open(
+            storage_dir=storage_dir,
+            name="bad",
+            request_queue_access="nonsense",  # type: ignore[arg-type]
+        )
