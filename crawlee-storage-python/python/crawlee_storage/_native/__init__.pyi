@@ -24,6 +24,18 @@ __all__ = [
     "NONE_CONTENT_TYPE",
 ]
 
+class AddRequestsResponse(typing.TypedDict):
+    processedRequests: builtins.list[ProcessedRequest]
+    unprocessedRequests: builtins.list[UnprocessedRequest]
+
+class DatasetItemsListPage(typing.TypedDict):
+    count: builtins.int
+    offset: builtins.int
+    limit: builtins.int
+    total: builtins.int
+    desc: builtins.bool
+    items: builtins.list[dict[builtins.str, typing.Any]]
+
 class DatasetMetadata(typing.TypedDict):
     id: builtins.str
     name: builtins.str | None
@@ -39,16 +51,22 @@ class KeyValueStoreMetadata(typing.TypedDict):
     createdAt: datetime.datetime
     modifiedAt: datetime.datetime
 
-class KeyValueStoreRecordMetadata(typing.TypedDict):
-    key: builtins.str
-    contentType: builtins.str
-    size: builtins.int
-
 class KeyValueStoreRecord(typing.TypedDict):
     key: builtins.str
     contentType: builtins.str
     size: builtins.int
     value: builtins.bytes
+
+class KeyValueStoreRecordMetadata(typing.TypedDict):
+    key: builtins.str
+    contentType: builtins.str
+    size: builtins.int
+
+class ProcessedRequest(typing.TypedDict):
+    requestId: builtins.str
+    uniqueKey: builtins.str
+    wasAlreadyPresent: builtins.bool
+    wasAlreadyHandled: builtins.bool
 
 class RequestQueueMetadata(typing.TypedDict):
     id: builtins.str
@@ -61,28 +79,10 @@ class RequestQueueMetadata(typing.TypedDict):
     pendingRequestCount: builtins.int
     totalRequestCount: builtins.int
 
-class DatasetItemsListPage(typing.TypedDict):
-    count: builtins.int
-    offset: builtins.int
-    limit: builtins.int
-    total: builtins.int
-    desc: builtins.bool
-    items: builtins.list[dict[builtins.str, typing.Any]]
-
-class ProcessedRequest(typing.TypedDict):
-    requestId: builtins.str
-    uniqueKey: builtins.str
-    wasAlreadyPresent: builtins.bool
-    wasAlreadyHandled: builtins.bool
-
 class UnprocessedRequest(typing.TypedDict):
     uniqueKey: builtins.str
     url: builtins.str
     method: builtins.str | None
-
-class AddRequestsResponse(typing.TypedDict):
-    processedRequests: builtins.list[ProcessedRequest]
-    unprocessedRequests: builtins.list[UnprocessedRequest]
 
 NONE_CONTENT_TYPE: builtins.str
 

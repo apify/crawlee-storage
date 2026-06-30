@@ -27,6 +27,7 @@
 use crawlee_storage::models;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use pyo3_stub_gen::inventory;
 
 /// One field of a generated `TypedDict`: the camelCase JSON key as handed to
 /// Python, and the Python type annotation string the stub should emit.
@@ -46,9 +47,128 @@ pub trait TypedDictModel {
     const SPEC: &'static [TypedDictField];
 }
 
+/// One registered `TypedDict`, collected via `inventory` so the stub generator
+/// can discover every model without a hand-maintained list. Every
+/// `typed_dict_model!` / `typed_dict_spec!` invocation submits one of these, so
+/// adding a model can no longer silently skip the `.pyi` (the old failure mode
+/// of forgetting to append it to `all_specs()`).
+pub struct RegisteredTypedDict {
+    pub name: &'static str,
+    pub spec: &'static [TypedDictField],
+}
+
+inventory::collect!(RegisteredTypedDict);
+
 /// Shorthand for a `TypedDictField` literal.
 const fn f(key: &'static str, py_type: &'static str) -> TypedDictField {
     TypedDictField { key, py_type }
+}
+
+/// Define a builder-backed `TypedDict` model: a newtype wrapper over a core
+/// type, its `TypedDictModel` (`NAME` + `SPEC`) impl, and the matching `to_py`
+/// dict builder — all from one declaration, so the stub's claimed shape and the
+/// dict's actual keys can no longer drift apart (they're generated from the
+/// same field list, in the same order).
+///
+/// Each field is written once as:
+///
+/// ```ignore
+/// "camelCaseKey": "python.type" => |this, py| value_expression,
+/// ```
+///
+/// where `this` is `&self.0` (the borrowed core value) and `py` is the
+/// `Python<'_>` token; the closure body is the expression handed to
+/// `dict.set_item("camelCaseKey", ...)`. An optional leading `@base($field)`
+/// token splices in the five shared base-metadata fields (`id`/`name`/
+/// `accessedAt`/`createdAt`/`modifiedAt`) — both in the `SPEC` and via
+/// `set_base_metadata_fields(&self.0.$field)` — ahead of the per-field entries.
+/// Submit one `TypedDictModel` impl to the `inventory` registry so `all_specs()`
+/// (and thus the stub) picks it up automatically. `$wrapper` is the impl type;
+/// `$($lt)?` lets it work for both the lifetime-carrying builder wrappers and
+/// the bare serde-only unit structs.
+macro_rules! register_typed_dict {
+    ($wrapper:ident $(<$lt:lifetime>)?) => {
+        inventory::submit! {
+            RegisteredTypedDict {
+                name: <$wrapper $(<$lt>)?as TypedDictModel>::NAME,
+                spec: <$wrapper $(<$lt>)? as TypedDictModel>::SPEC,
+            }
+        }
+    };
+}
+
+macro_rules! typed_dict_model {
+    // With the shared base-metadata block spliced in first. `$base` is the
+    // field on the core type holding the `StorageMetadata` (always `base`).
+    (
+        $wrapper:ident<$lt:lifetime>($core:path),
+        $name:literal,
+        @base($base:ident),
+        { $( $key:literal : $ty:literal => |$this:ident, $py:ident| $val:expr ),* $(,)? }
+    ) => {
+        pub struct $wrapper<$lt>(pub &$lt $core);
+
+        impl TypedDictModel for $wrapper<'_> {
+            const NAME: &'static str = $name;
+            const SPEC: &'static [TypedDictField] = &[
+                BASE_META_FIELDS[0],
+                BASE_META_FIELDS[1],
+                BASE_META_FIELDS[2],
+                BASE_META_FIELDS[3],
+                BASE_META_FIELDS[4],
+                $( f($key, $ty), )*
+            ];
+        }
+
+        register_typed_dict!($wrapper<'static>);
+
+        impl $wrapper<'_> {
+            pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+                let dict = PyDict::new(py);
+                set_base_metadata_fields(&dict, &self.0.$base)?;
+                $(
+                    {
+                        let $this = self.0;
+                        let $py = py;
+                        dict.set_item($key, $val)?;
+                    }
+                )*
+                Ok(dict.into_any().unbind())
+            }
+        }
+    };
+
+    // No base-metadata block: every field is listed explicitly.
+    (
+        $wrapper:ident<$lt:lifetime>($core:path),
+        $name:literal,
+        { $( $key:literal : $ty:literal => |$this:ident, $py:ident| $val:expr ),* $(,)? }
+    ) => {
+        pub struct $wrapper<$lt>(pub &$lt $core);
+
+        impl TypedDictModel for $wrapper<'_> {
+            const NAME: &'static str = $name;
+            const SPEC: &'static [TypedDictField] = &[
+                $( f($key, $ty), )*
+            ];
+        }
+
+        register_typed_dict!($wrapper<'static>);
+
+        impl $wrapper<'_> {
+            pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+                let dict = PyDict::new(py);
+                $(
+                    {
+                        let $this = self.0;
+                        let $py = py;
+                        dict.set_item($key, $val)?;
+                    }
+                )*
+                Ok(dict.into_any().unbind())
+            }
+        }
+    };
 }
 
 // The five base-metadata fields shared by every storage metadata TypedDict.
@@ -81,125 +201,98 @@ fn set_base_metadata_fields(
 
 // ─── Dataset metadata ───────────────────────────────────────────────────────
 
-pub struct DatasetMetadata<'a>(pub &'a models::DatasetMetadata);
-
-impl TypedDictModel for DatasetMetadata<'_> {
-    const NAME: &'static str = "DatasetMetadata";
-    const SPEC: &'static [TypedDictField] = &[
-        BASE_META_FIELDS[0],
-        BASE_META_FIELDS[1],
-        BASE_META_FIELDS[2],
-        BASE_META_FIELDS[3],
-        BASE_META_FIELDS[4],
-        f("itemCount", "builtins.int"),
-    ];
-}
-
-impl DatasetMetadata<'_> {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        set_base_metadata_fields(&dict, &self.0.base)?;
-        dict.set_item("itemCount", self.0.item_count)?;
-        Ok(dict.into_any().unbind())
+typed_dict_model! {
+    DatasetMetadata<'a>(models::DatasetMetadata),
+    "DatasetMetadata",
+    @base(base),
+    {
+        "itemCount": "builtins.int" => |this, _py| this.item_count,
     }
 }
 
 // ─── Key-value store metadata ───────────────────────────────────────────────
 
-pub struct KeyValueStoreMetadata<'a>(pub &'a models::KeyValueStoreMetadata);
-
-impl TypedDictModel for KeyValueStoreMetadata<'_> {
-    const NAME: &'static str = "KeyValueStoreMetadata";
-    const SPEC: &'static [TypedDictField] = &BASE_META_FIELDS;
-}
-
-impl KeyValueStoreMetadata<'_> {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        set_base_metadata_fields(&dict, &self.0.base)?;
-        Ok(dict.into_any().unbind())
-    }
+typed_dict_model! {
+    KeyValueStoreMetadata<'a>(models::KeyValueStoreMetadata),
+    "KeyValueStoreMetadata",
+    @base(base),
+    {}
 }
 
 // ─── Request queue metadata ─────────────────────────────────────────────────
 
-pub struct RequestQueueMetadata<'a>(pub &'a models::RequestQueueMetadata);
-
-impl TypedDictModel for RequestQueueMetadata<'_> {
-    const NAME: &'static str = "RequestQueueMetadata";
-    const SPEC: &'static [TypedDictField] = &[
-        BASE_META_FIELDS[0],
-        BASE_META_FIELDS[1],
-        BASE_META_FIELDS[2],
-        BASE_META_FIELDS[3],
-        BASE_META_FIELDS[4],
-        f("hadMultipleClients", "builtins.bool"),
-        f("handledRequestCount", "builtins.int"),
-        f("pendingRequestCount", "builtins.int"),
-        f("totalRequestCount", "builtins.int"),
-    ];
-}
-
-impl RequestQueueMetadata<'_> {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        set_base_metadata_fields(&dict, &self.0.base)?;
-        dict.set_item("hadMultipleClients", self.0.had_multiple_clients)?;
-        dict.set_item("handledRequestCount", self.0.handled_request_count)?;
-        dict.set_item("pendingRequestCount", self.0.pending_request_count)?;
-        dict.set_item("totalRequestCount", self.0.total_request_count)?;
-        Ok(dict.into_any().unbind())
+typed_dict_model! {
+    RequestQueueMetadata<'a>(models::RequestQueueMetadata),
+    "RequestQueueMetadata",
+    @base(base),
+    {
+        "hadMultipleClients": "builtins.bool" => |this, _py| this.had_multiple_clients,
+        "handledRequestCount": "builtins.int" => |this, _py| this.handled_request_count,
+        "pendingRequestCount": "builtins.int" => |this, _py| this.pending_request_count,
+        "totalRequestCount": "builtins.int" => |this, _py| this.total_request_count,
     }
 }
 
 // ─── KVS record metadata (yielded by the key iterator) ──────────────────────
 
-pub struct KeyValueStoreRecordMetadata<'a>(pub &'a models::KeyValueStoreRecordMetadata);
-
-impl TypedDictModel for KeyValueStoreRecordMetadata<'_> {
-    const NAME: &'static str = "KeyValueStoreRecordMetadata";
-    const SPEC: &'static [TypedDictField] = &[
-        f("key", "builtins.str"),
-        f("contentType", "builtins.str"),
+typed_dict_model! {
+    KeyValueStoreRecordMetadata<'a>(models::KeyValueStoreRecordMetadata),
+    "KeyValueStoreRecordMetadata",
+    {
+        "key": "builtins.str" => |this, _py| &this.key,
+        "contentType": "builtins.str" => |this, _py| &this.content_type,
         // The core backfills a missing `size` from the value-file length on
         // read, so it is always populated by the time it reaches Python.
-        f("size", "builtins.int"),
-    ];
-}
-
-impl KeyValueStoreRecordMetadata<'_> {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("key", &self.0.key)?;
-        dict.set_item("contentType", &self.0.content_type)?;
-        dict.set_item("size", self.0.size.unwrap_or(0))?;
-        Ok(dict.into_any().unbind())
+        "size": "builtins.int" => |this, _py| this.size.unwrap_or(0),
     }
 }
 
 // ─── KVS record (full value) ────────────────────────────────────────────────
 
-pub struct KeyValueStoreRecord<'a>(pub &'a models::KeyValueStoreRecord);
-
-impl TypedDictModel for KeyValueStoreRecord<'_> {
-    const NAME: &'static str = "KeyValueStoreRecord";
-    const SPEC: &'static [TypedDictField] = &[
-        f("key", "builtins.str"),
-        f("contentType", "builtins.str"),
-        f("size", "builtins.int"),
-        f("value", "builtins.bytes"),
-    ];
+typed_dict_model! {
+    KeyValueStoreRecord<'a>(models::KeyValueStoreRecord),
+    "KeyValueStoreRecord",
+    {
+        "key": "builtins.str" => |this, _py| &this.key,
+        "contentType": "builtins.str" => |this, _py| &this.content_type,
+        "size": "builtins.int" => |this, _py| this.size,
+        "value": "builtins.bytes" => |this, py| PyBytes::new(py, &this.value),
+    }
 }
 
-impl KeyValueStoreRecord<'_> {
-    pub fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("key", &self.0.key)?;
-        dict.set_item("contentType", &self.0.content_type)?;
-        dict.set_item("size", self.0.size)?;
-        dict.set_item("value", PyBytes::new(py, &self.0.value))?;
-        Ok(dict.into_any().unbind())
-    }
+/// Define a **spec-only** `TypedDict` model: a `TypedDictModel` impl plus its
+/// `inventory` registration, with no wrapper struct and no `to_py` builder.
+///
+/// These describe payloads whose dicts are built by `serde_to_py` (the values
+/// carry no datetime fields, so a serde round-trip is lossless), so there's
+/// nothing to drift against on the value side — only the `SPEC` matters. The
+/// `=> $core` clause names the core type the spec mirrors and emits a
+/// compile-time guard binding (`let _: &core::Type`), so renaming or removing
+/// that core type fails the build — a nudge to re-check the field list. (It
+/// still can't verify the *field names* against the core struct — those are
+/// strings — but it keeps the link from going stale silently, replacing the
+/// old free-floating `_core_type_guard` fn.)
+macro_rules! typed_dict_spec {
+    (
+        $tyname:ident => $core:path,
+        $name:literal,
+        [ $( $key:literal : $ty:literal ),* $(,)? ]
+    ) => {
+        pub struct $tyname;
+
+        impl TypedDictModel for $tyname {
+            const NAME: &'static str = $name;
+            const SPEC: &'static [TypedDictField] = &[
+                $( f($key, $ty), )*
+            ];
+        }
+
+        register_typed_dict!($tyname);
+
+        // Anchor the spec to the core type it mirrors: if `$core` is renamed or
+        // removed, this const-eval fails to compile.
+        const _: fn(&$core) = |_| {};
+    };
 }
 
 // ─── Dataset items list page ────────────────────────────────────────────────
@@ -209,88 +302,62 @@ impl KeyValueStoreRecord<'_> {
 // by the caller via `serde_to_py` (the values carry no datetime fields), so
 // this model contributes only its `SPEC` to the stub.
 
-pub struct DatasetItemsListPage;
-
-impl TypedDictModel for DatasetItemsListPage {
-    const NAME: &'static str = "DatasetItemsListPage";
-    const SPEC: &'static [TypedDictField] = &[
-        f("count", "builtins.int"),
-        f("offset", "builtins.int"),
-        f("limit", "builtins.int"),
-        f("total", "builtins.int"),
-        f("desc", "builtins.bool"),
-        f("items", "builtins.list[dict[builtins.str, typing.Any]]"),
-    ];
+typed_dict_spec! {
+    DatasetItemsListPage => models::DatasetItemsListPage,
+    "DatasetItemsListPage",
+    [
+        "count": "builtins.int",
+        "offset": "builtins.int",
+        "limit": "builtins.int",
+        "total": "builtins.int",
+        "desc": "builtins.bool",
+        "items": "builtins.list[dict[builtins.str, typing.Any]]",
+    ]
 }
 
 // ─── Request queue operation results ────────────────────────────────────────
 
-pub struct ProcessedRequest;
-
-impl TypedDictModel for ProcessedRequest {
-    const NAME: &'static str = "ProcessedRequest";
-    const SPEC: &'static [TypedDictField] = &[
-        f("requestId", "builtins.str"),
-        f("uniqueKey", "builtins.str"),
-        f("wasAlreadyPresent", "builtins.bool"),
-        f("wasAlreadyHandled", "builtins.bool"),
-    ];
-}
-
-pub struct UnprocessedRequest;
-
-impl TypedDictModel for UnprocessedRequest {
-    const NAME: &'static str = "UnprocessedRequest";
-    const SPEC: &'static [TypedDictField] = &[
-        f("uniqueKey", "builtins.str"),
-        f("url", "builtins.str"),
-        f("method", "builtins.str | None"),
-    ];
-}
-
-pub struct AddRequestsResponse;
-
-impl TypedDictModel for AddRequestsResponse {
-    const NAME: &'static str = "AddRequestsResponse";
-    const SPEC: &'static [TypedDictField] = &[
-        f("processedRequests", "builtins.list[ProcessedRequest]"),
-        f("unprocessedRequests", "builtins.list[UnprocessedRequest]"),
-    ];
-}
-
-/// Compile-time guard tying the unit-struct specs (whose payloads are built by
-/// `serde_to_py`, so they have no `From` impl above to anchor them) to the core
-/// types they describe. If a referenced core type is renamed or removed, this
-/// fails to build — a nudge to re-check the corresponding `SPEC`. It can't
-/// verify the *field names* match (those are strings), but it keeps the link
-/// from going stale silently.
-#[allow(dead_code)]
-fn _core_type_guard(
-    _a: &models::DatasetItemsListPage,
-    _b: &models::ProcessedRequest,
-    _c: &models::UnprocessedRequest,
-    _d: &models::AddRequestsResponse,
-) {
-}
-
-/// All TypedDict specs, in stub emission order (dependencies — `ProcessedRequest`,
-/// `UnprocessedRequest` — appear before `AddRequestsResponse` consumers, though
-/// forward references in `.pyi` are fine regardless). This single list drives
-/// both the class-body generation and the `__all__` additions, so the names
-/// can't fall out of sync.
-pub fn all_specs() -> Vec<(&'static str, &'static [TypedDictField])> {
-    vec![
-        (DatasetMetadata::NAME, DatasetMetadata::SPEC),
-        (KeyValueStoreMetadata::NAME, KeyValueStoreMetadata::SPEC),
-        (
-            KeyValueStoreRecordMetadata::NAME,
-            KeyValueStoreRecordMetadata::SPEC,
-        ),
-        (KeyValueStoreRecord::NAME, KeyValueStoreRecord::SPEC),
-        (RequestQueueMetadata::NAME, RequestQueueMetadata::SPEC),
-        (DatasetItemsListPage::NAME, DatasetItemsListPage::SPEC),
-        (ProcessedRequest::NAME, ProcessedRequest::SPEC),
-        (UnprocessedRequest::NAME, UnprocessedRequest::SPEC),
-        (AddRequestsResponse::NAME, AddRequestsResponse::SPEC),
+typed_dict_spec! {
+    ProcessedRequest => models::ProcessedRequest,
+    "ProcessedRequest",
+    [
+        "requestId": "builtins.str",
+        "uniqueKey": "builtins.str",
+        "wasAlreadyPresent": "builtins.bool",
+        "wasAlreadyHandled": "builtins.bool",
     ]
+}
+
+typed_dict_spec! {
+    UnprocessedRequest => models::UnprocessedRequest,
+    "UnprocessedRequest",
+    [
+        "uniqueKey": "builtins.str",
+        "url": "builtins.str",
+        "method": "builtins.str | None",
+    ]
+}
+
+typed_dict_spec! {
+    AddRequestsResponse => models::AddRequestsResponse,
+    "AddRequestsResponse",
+    [
+        "processedRequests": "builtins.list[ProcessedRequest]",
+        "unprocessedRequests": "builtins.list[UnprocessedRequest]",
+    ]
+}
+
+/// All registered TypedDict specs, sorted by name for a deterministic,
+/// diff-stable emission order. Collected from the `inventory` registry that
+/// every `typed_dict_model!` / `typed_dict_spec!` invocation submits to — so
+/// adding a model wires it into the stub automatically, with no hand-maintained
+/// list to forget to update. (Forward references in the generated `.pyi` are
+/// fine, so name order — rather than a curated dependency order — is enough.)
+pub fn all_specs() -> Vec<(&'static str, &'static [TypedDictField])> {
+    let mut specs: Vec<(&'static str, &'static [TypedDictField])> =
+        inventory::iter::<RegisteredTypedDict>()
+            .map(|r| (r.name, r.spec))
+            .collect();
+    specs.sort_unstable_by_key(|(name, _)| *name);
+    specs
 }
