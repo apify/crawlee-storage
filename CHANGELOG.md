@@ -24,6 +24,10 @@ All notable changes to this project will be documented in this file.
 - Improve handling of bare KeyValueStore records ([#58](https://github.com/apify/crawlee-storage/pull/58)) ([73be116](https://github.com/apify/crawlee-storage/commit/73be1160e1640754aa86a7afdb034aa41fb34344)) by [@janbuchar](https://github.com/janbuchar)
 - Re-add accidentally deleted KeyValueStore.delete_value method in Python binding ([#62](https://github.com/apify/crawlee-storage/pull/62)) ([593ccb4](https://github.com/apify/crawlee-storage/commit/593ccb4a4c313ba10a91462b55facc0eff96d22a)) by [@janbuchar](https://github.com/janbuchar)
 
+### 🚜 Refactor
+
+- [**breaking**] Assume_sole_owner flag -&gt; request_queue_access enum ([#68](https://github.com/apify/crawlee-storage/pull/68)) ([5b03441](https://github.com/apify/crawlee-storage/commit/5b03441a7f1aa7d34e6cd01e675b58c40bf15c0a)) by [@janbuchar](https://github.com/janbuchar)
+
 
 <!-- git-cliff-unreleased-end -->
 # Changelog
