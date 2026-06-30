@@ -68,15 +68,37 @@ fn typed_dict_names() -> Vec<&'static str> {
     names
 }
 
-/// Append TypedDict + module-constant names to an `__all__` list.
+/// Append TypedDict + module-constant names to the native stub's `__all__`.
 ///
-/// Walks `lines`, copying each into `output`, and just before the closing `]`
-/// of the `__all__ = [ ... ]` block splices in every TypedDict name (sorted)
-/// followed by every module constant. Shared by both the native-stub and
-/// re-export-stub post-processors, which used to carry identical copies of
-/// this `in_all_block` dance.
+/// Just before the closing `]` of the `__all__` block, splices in every
+/// TypedDict name (sorted) followed by every module constant. Idempotent: names
+/// already present are skipped, so re-running over a patched stub is a no-op.
 fn append_to_all_block(lines: &[&str], output: &mut String) {
     let names = typed_dict_names();
+
+    // Collect the entries already present in the `__all__` block so we don't
+    // re-add them. Entries look like `    "Foo",` — pull the quoted name out.
+    let existing: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        let mut scanning = false;
+        for line in lines {
+            if line.contains("__all__") && line.contains('[') {
+                scanning = true;
+            }
+            if scanning {
+                if line.trim_start().starts_with(']') {
+                    break;
+                }
+                if let Some(name) = line.trim().trim_end_matches(',').strip_prefix('"') {
+                    if let Some(name) = name.strip_suffix('"') {
+                        set.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        set
+    };
+
     let mut in_all_block = false;
 
     for line in lines {
@@ -85,10 +107,14 @@ fn append_to_all_block(lines: &[&str], output: &mut String) {
         }
         if in_all_block && line.trim_start().starts_with(']') {
             for name in &names {
-                output.push_str(&format!("    \"{name}\",\n"));
+                if !existing.contains(*name) {
+                    output.push_str(&format!("    \"{name}\",\n"));
+                }
             }
             for (const_name, _) in MODULE_CONSTANTS {
-                output.push_str(&format!("    \"{const_name}\",\n"));
+                if !existing.contains(*const_name) {
+                    output.push_str(&format!("    \"{const_name}\",\n"));
+                }
             }
             in_all_block = false;
         }
@@ -196,15 +222,87 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
     Ok(())
 }
 
-/// Append TypedDict + constant names to the `__all__` list in a re-export stub.
-fn fixup_reexport_stubs(path: &std::path::Path) -> std::io::Result<()> {
-    let content = std::fs::read_to_string(path)?;
-    let mut output = String::with_capacity(content.len());
+/// Module docstring restored onto the generated top-level `__init__.py`.
+const TOPLEVEL_DOCSTRING: &str =
+    "\"\"\"Python bindings for crawlee-storage (Rust-powered filesystem storage clients).\"\"\"";
 
-    let lines: Vec<&str> = content.lines().collect();
-    append_to_all_block(&lines, &mut output);
+/// Post-process the generated top-level `crawlee_storage/__init__.py`.
+///
+/// The generator emits a runtime `__init__.py` (re-exports + `__all__`) from
+/// the native module's classes, but can't reproduce two things, so we patch
+/// them back in:
+///
+/// 1. the module docstring (placed first so it counts as `__doc__`), and
+/// 2. the `NONE_CONTENT_TYPE` constant — it's added at runtime via `m.add(...)`
+///    (see the `#[pymodule]` init), which the generator doesn't track, so it's
+///    neither imported nor listed in `__all__`.
+///
+/// TypedDict names are deliberately **not** added here: they're type-only (no
+/// runtime binding), so listing them in the runtime `__all__` would break
+/// `from crawlee_storage import *`. Type checkers see them via the companion
+/// `__init__.pyi` from `write_toplevel_pyi`.
+fn fixup_init_py(path: &std::path::Path) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+
+    let mut output = String::with_capacity(content.len() + 256);
+    // Module docstring must be the first statement to count as `__doc__`.
+    output.push_str(TOPLEVEL_DOCSTRING);
+    output.push_str("\n\n");
+
+    for line in content.lines() {
+        // Add the runtime-only constant to the native re-export import if absent.
+        if line.starts_with("from crawlee_storage._native import ")
+            && !line.contains("NONE_CONTENT_TYPE")
+        {
+            output.push_str(&line.replacen("import ", "import NONE_CONTENT_TYPE, ", 1));
+            output.push('\n');
+            continue;
+        }
+
+        // Add NONE_CONTENT_TYPE to __all__ if it's missing (the generator omits
+        // runtime `m.add` constants). Splice it just before the closing bracket.
+        if line.trim_start().starts_with(']') && !output.contains("\"NONE_CONTENT_TYPE\"") {
+            output.push_str("    \"NONE_CONTENT_TYPE\",\n");
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
 
     std::fs::write(path, output)?;
+    Ok(())
+}
+
+/// Write the top-level `crawlee_storage/__init__.pyi` type stub.
+///
+/// A `.pyi` alongside the runtime `__init__.py` lets `crawlee_storage` (not just
+/// `crawlee_storage._native`) expose the TypedDict names to type checkers. It
+/// re-exports everything from the native module — the runtime classes, the
+/// constant, and all the TypedDicts.
+fn write_toplevel_pyi(path: &std::path::Path) -> std::io::Result<()> {
+    let mut out = String::new();
+    out.push_str("# This file is automatically generated by stub_gen\n");
+    out.push_str("# ruff: noqa: E501, F401, F403, F405\n\n");
+    out.push_str("from crawlee_storage._native import *\n");
+    out.push_str("from crawlee_storage._native import NONE_CONTENT_TYPE as NONE_CONTENT_TYPE\n\n");
+
+    out.push_str("__all__ = [\n");
+    for name in [
+        "DatasetItemIterator",
+        "FileSystemDatasetClient",
+        "FileSystemKeyValueStoreClient",
+        "FileSystemRequestQueueClient",
+        "KvsKeyIterator",
+        "NONE_CONTENT_TYPE",
+    ] {
+        out.push_str(&format!("    \"{name}\",\n"));
+    }
+    for name in typed_dict_names() {
+        out.push_str(&format!("    \"{name}\",\n"));
+    }
+    out.push_str("]\n");
+
+    std::fs::write(path, out)?;
     Ok(())
 }
 
@@ -274,18 +372,23 @@ fn main() -> Result<()> {
         );
     }
 
-    // Post-process top-level __init__.pyi: add TypedDict names to __all__.
-    let toplevel_stub_path = python_dir.join("__init__.pyi");
-    if toplevel_stub_path.exists() {
-        fixup_reexport_stubs(&toplevel_stub_path).expect("Failed to post-process top-level stubs");
+    // Patch the generated runtime __init__.py (docstring + NONE_CONTENT_TYPE).
+    let toplevel_init_py = python_dir.join("__init__.py");
+    if toplevel_init_py.exists() {
+        fixup_init_py(&toplevel_init_py).expect("Failed to post-process top-level __init__.py");
         eprintln!(
-            "Post-processed stubs: added TypedDict names to __all__ in {}",
-            toplevel_stub_path.display()
+            "Post-processed top-level __init__.py (docstring, NONE_CONTENT_TYPE, __all__) at {}",
+            toplevel_init_py.display()
         );
     }
 
-    // Format the generated stubs so they match the project's ruff conventions.
-    format_stubs(&[&native_stub_path, &toplevel_stub_path]);
+    // Write the companion top-level type stub (re-exports the TypedDicts).
+    let toplevel_pyi = python_dir.join("__init__.pyi");
+    write_toplevel_pyi(&toplevel_pyi).expect("Failed to write top-level __init__.pyi");
+    eprintln!("Wrote top-level type stub {}", toplevel_pyi.display());
+
+    // Format the generated files so they match the project's ruff conventions.
+    format_stubs(&[&native_stub_path, &toplevel_init_py, &toplevel_pyi]);
 
     Ok(())
 }

@@ -14,6 +14,11 @@ features = ["extension-module"]
 python-source = "python"
 module-name = "crawlee_storage._native"
 
+# `reexport_module_members!` (see src/lib.rs) generates an __init__.py for the
+# pure-Python `crawlee_storage` package; pyo3-stub-gen requires this opt-in for it.
+[tool.pyo3-stub-gen]
+generate-init-py = ["crawlee_storage"]
+
 [tool.ruff]
 line-length = 120
 
