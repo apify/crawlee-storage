@@ -570,18 +570,18 @@ impl FileSystemRequestQueueClient {
     ///
     /// ``use_test_clock``: see ``advance_clock_for_testing`` below.
     ///
-    /// ``assume_sole_owner`` (default ``True``): controls how locks on disk
-    /// are treated at open time. With ``True`` (the default, tuned for the
-    /// common single-process crawl), the caller asserts nothing else is using
-    /// this queue and any in-progress locks are reclaimed immediately, so a
-    /// request whose previous run died is instantly re-fetchable. Set to
-    /// ``False`` when multiple processes share the same on-disk queue
+    /// ``request_queue_access`` (default ``"single"``): how the on-disk queue
+    /// is expected to be accessed. With ``"single"`` (the default, tuned for
+    /// the common single-process crawl), the caller asserts nothing else is
+    /// using this queue and any in-progress locks are reclaimed immediately,
+    /// so a request whose previous run died is instantly re-fetchable. Use
+    /// ``"shared"`` when multiple processes share the same on-disk queue
     /// concurrently: any future-dated ``orderNo`` is then respected as a
     /// potential live peer's lock, and crashed peers' locks expire naturally
     /// on the wall clock — otherwise you risk two peers processing the same
     /// request.
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, assume_sole_owner=true))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, request_queue_access="single"))]
     #[gen_stub(override_return_type(type_repr = "FileSystemRequestQueueClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -590,9 +590,19 @@ impl FileSystemRequestQueueClient {
         alias: Option<String>,
         storage_dir: &str,
         use_test_clock: bool,
-        assume_sole_owner: bool,
+        #[gen_stub(override_type(type_repr = "typing.Literal['single', 'shared']", imports = ("typing")))]
+        request_queue_access: &str,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
+        let assume_sole_owner = match request_queue_access {
+            "single" => true,
+            "shared" => false,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "request_queue_access must be 'single' or 'shared', got '{other}'"
+                )))
+            }
+        };
         let (clock, test_clock) = pick_clock(use_test_clock);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client =

@@ -126,15 +126,16 @@ export declare class FileSystemRequestQueueClient {
      *
      * `useTestClock`: see `advanceClockForTesting` below.
      *
-     * `assumeSoleOwner` (default `true`): controls how locks on disk are
-     * treated at open time. With `true` (the default, tuned for the common
-     * single-process crawl), the caller asserts nothing else is using this
-     * queue and any in-progress locks are reclaimed immediately, so a request
-     * whose previous run died is instantly re-fetchable. Set to `false` when
-     * multiple processes share the same on-disk queue concurrently: any
-     * future-dated `orderNo` is then respected as a potential live peer's
-     * lock, and crashed peers' locks expire naturally on the wall clock —
-     * otherwise you risk two peers processing the same request.
+     * `requestQueueAccess` (default `'single'`): how the on-disk queue is
+     * expected to be accessed. With `'single'` (the default, tuned for the
+     * common single-process crawl), the caller asserts nothing else is using
+     * this queue and any in-progress locks are reclaimed immediately, so a
+     * request whose previous run died is instantly re-fetchable. Use
+     * `'shared'` when multiple processes share the same on-disk queue
+     * concurrently: any future-dated `orderNo` is then respected as a
+     * potential live peer's lock, and crashed peers' locks expire naturally
+     * on the wall clock — otherwise you risk two peers processing the same
+     * request.
      */
     static open(
         id?: string | undefined | null,
@@ -142,7 +143,7 @@ export declare class FileSystemRequestQueueClient {
         alias?: string | undefined | null,
         storageDir?: string | undefined | null,
         useTestClock?: boolean | undefined | null,
-        assumeSoleOwner?: boolean | undefined | null,
+        requestQueueAccess?: 'single' | 'shared' | undefined | null,
     ): Promise<FileSystemRequestQueueClient>;
     /**
      * Advance the client's clock by `millis` milliseconds. Only usable when
