@@ -221,7 +221,26 @@ class FileSystemKeyValueStoreClient:
         limit: builtins.int | None = None,
         page_size: builtins.int | None = None,
         prefix: builtins.str | None = None,
-    ) -> KvsKeyIterator: ...
+        bare_fallbacks: typing.Sequence[tuple[builtins.str, builtins.str]] = [],
+    ) -> KvsKeyIterator:
+        r"""
+        Lazily iterate the store's keys.
+
+        `bare_fallbacks` additionally surfaces out-of-band ("bare") value files
+        that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
+        keys. Each entry is a `(name, content_type)` tuple where `name` is the
+        file's on-disk key: if that file exists with no tracked record, it is
+        listed under `name` (an empty `content_type` reports the synthesized
+        `application/octet-stream`). Pass an empty list (the default) to list only
+        tracked records.
+
+        Round-trip caveat: a surfaced bare key does NOT round-trip through the
+        strict read path. The listed key is the literal on-disk `name`, but
+        `get_value` / `record_exists` only see tracked records (value + sidecar)
+        and return `None` / `False` for a sidecar-less bare file. Read a listed
+        bare key back via `resolve_value` / `resolve_existing_key`, not
+        `get_value`.
+        """
     async def get_public_url(self, key: builtins.str) -> builtins.str | None:
         r"""
         Build a `file://` URL for `key`, or `None` if no value file exists for it

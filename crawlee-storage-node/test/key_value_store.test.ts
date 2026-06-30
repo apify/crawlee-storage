@@ -236,6 +236,36 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.recordExists('INPUT.json')).toBe(false);
     });
 
+    it('iterateKeys surfaces caller-declared bare files alongside tracked records', async () => {
+        const { writeFile } = await import('fs/promises');
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('alpha', Buffer.from('1'), 'application/json');
+        const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
+
+        // Without declaring the fallback, the bare file is invisible to listing.
+        const bareless = await client.iterateKeys(null, null, 1000);
+        const barelessKeys: string[] = [];
+        for await (const entry of bareless) {
+            barelessKeys.push(entry.key);
+        }
+        expect(barelessKeys).toEqual(['alpha']);
+
+        // Declaring the bare file by its on-disk name surfaces it under that key.
+        const fallbacks = [{ name: 'INPUT.json', contentType: 'application/json' }];
+        const iterator = await client.iterateKeys(null, null, 1000, null, fallbacks);
+        const entries: { key: string; contentType: string; size: number }[] = [];
+        for await (const entry of iterator) {
+            entries.push(entry);
+        }
+        const input = entries.find((e) => e.key === 'INPUT.json');
+        expect(input).toBeDefined();
+        expect(input!.contentType).toBe('application/json');
+        expect(input!.size).toBe(payload.length);
+        expect(entries.map((e) => e.key).sort()).toEqual(['INPUT.json', 'alpha']);
+    });
+
     it('resolveValue prefers a tracked record over bare-file fallbacks', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 

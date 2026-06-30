@@ -123,6 +123,28 @@ async def test_iterate_keys_accepts_prefix(storage_dir: str) -> None:
     assert all_keys == ["bar:1", "foo:1", "foo:2"]
 
 
+async def test_iterate_keys_surfaces_bare_fallback_files(storage_dir: str) -> None:
+    """`iterate_keys` accepts `(name, content_type)` bare fallbacks and folds
+    matching out-of-band files into the listing under their on-disk name."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    await client.set_value("alpha", b"1", "application/json")
+
+    payload = b'{"foo":"bar"}'
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(payload)
+
+    # Without declaring the fallback, the bare file is invisible to listing.
+    bareless = sorted([record["key"] async for record in client.iterate_keys()])
+    assert bareless == ["alpha"]
+
+    # Declaring the bare file by its on-disk name surfaces it under that key.
+    fallbacks = [("INPUT.json", "application/json")]
+    records = [record async for record in client.iterate_keys(bare_fallbacks=fallbacks)]
+    by_key = {record["key"]: record for record in records}
+    assert sorted(by_key) == ["INPUT.json", "alpha"]
+    assert by_key["INPUT.json"]["contentType"] == "application/json"
+    assert by_key["INPUT.json"]["size"] == len(payload)
+
+
 async def test_resolve_value_falls_back_to_bare_file(storage_dir: str) -> None:
     """`resolve_value` accepts a list of `(extension, content_type)` tuples, probes
     bare files when the tracked record is absent, applies the declared content type,

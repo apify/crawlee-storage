@@ -78,6 +78,25 @@ pub struct BareFallback {
     pub content_type: String,
 }
 
+/// One out-of-band ("bare") file to surface from `iterateKeys`: `name` is the
+/// file's on-disk key (e.g. `"INPUT.json"`) and `contentType` is what to report
+/// for it (an empty string reports the synthesized `application/octet-stream`).
+/// A bare file whose on-disk name already has a tracked record is not listed
+/// twice.
+///
+/// Round-trip caveat: the file is listed under the literal `name`, but that key
+/// does NOT round-trip through `getValue` / `recordExists` (which ignore
+/// sidecar-less files and return `null` / `false`). Read a listed bare key back
+/// via `resolveValue` / `resolveExistingKey` instead.
+///
+/// As with `resolveValue`, the core does no MIME inference — the caller declares
+/// this name→content-type policy.
+#[napi(object)]
+pub struct ListBareFallback {
+    pub name: String,
+    pub content_type: String,
+}
+
 #[napi(object)]
 pub struct DatasetMetadata {
     pub id: String,

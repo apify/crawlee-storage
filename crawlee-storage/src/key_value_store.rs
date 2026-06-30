@@ -219,12 +219,33 @@ impl FileSystemKeyValueStoreClient {
     /// `exclusive_start_key` for the next call, until `has_more` is `false`.
     ///
     /// `page_size` controls how many keys are read per call (default 1000).
+    ///
+    /// `bare_fallbacks` lets the caller surface out-of-band ("bare") value files
+    /// that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
+    /// keys. Each entry is `(name, content_type)` where `name` is the file's
+    /// on-disk key (e.g. `"INPUT.json"`): if that file exists with no tracked
+    /// sidecar, it is folded into the listing under `name` with the declared
+    /// `content_type` (an empty string keeps the synthesized
+    /// `application/octet-stream`) and a `size` stated from the file. The core
+    /// does **no** MIME inference: the "which files are input, what type a
+    /// `.json` implies" policy stays at the caller. Pass an empty slice to list
+    /// only tracked records.
+    ///
+    /// **Round-trip caveat:** a surfaced bare key does **not** round-trip through
+    /// the strict read path. The listed key is the literal on-disk `name`, but
+    /// [`get_value`](Self::get_value) / [`record_exists`](Self::record_exists)
+    /// only ever see tracked records (value file + sidecar) and therefore return
+    /// `None` / `false` for a sidecar-less bare file. To read a listed bare key
+    /// back, go through [`resolve_value`](Self::resolve_value) /
+    /// [`resolve_existing_key`](Self::resolve_existing_key) (with an empty-string
+    /// extension fallback for the literal `name`), not `get_value`.
     pub async fn iterate_keys_page(
         &self,
         exclusive_start_key: Option<&str>,
         limit: Option<usize>,
         page_size: usize,
         prefix: Option<&str>,
+        bare_fallbacks: &[(&str, &str)],
     ) -> Result<KvsKeysPage> {
         // Fetch one extra beyond the page to detect whether more keys exist.
         let fetch_limit = match limit {
@@ -233,7 +254,12 @@ impl FileSystemKeyValueStoreClient {
         };
 
         let results = self
-            .list_keys_raw(exclusive_start_key, Some(fetch_limit + 1), prefix)
+            .list_keys_raw(
+                exclusive_start_key,
+                Some(fetch_limit + 1),
+                prefix,
+                bare_fallbacks,
+            )
             .await?;
 
         let has_more =
@@ -248,37 +274,115 @@ impl FileSystemKeyValueStoreClient {
     /// returning a flat Vec. Keys are filtered by `prefix` (on the decoded key,
     /// not the encoded filename) before the cursor and limit are applied, so the
     /// page's `limit`/`has_more` accounting only ever counts matching keys.
+    ///
+    /// Tracked records (value file + sidecar) and caller-declared bare files (see
+    /// [`iterate_keys_page`](Self::iterate_keys_page) for the `(name,
+    /// content_type)` shape) are merged into a single stream, sorted by encoded
+    /// value-file name, before the prefix/cursor/limit logic runs — so pagination
+    /// treats both kinds uniformly. A bare file whose on-disk name already has a
+    /// tracked record is dropped (the tracked record wins).
     async fn list_keys_raw(
         &self,
         exclusive_start_key: Option<&str>,
         limit: Option<usize>,
         prefix: Option<&str>,
+        bare_fallbacks: &[(&str, &str)],
     ) -> Result<Vec<KeyValueStoreRecordMetadata>> {
         let mut results = Vec::new();
         let metadata_suffix = format!(".{METADATA_FILENAME}");
 
-        let mut sidecar_paths: Vec<PathBuf> = Vec::new();
+        // Each candidate carries the encoded value-file name it sorts by, plus
+        // its (already finalized) metadata. `None` metadata means "read the
+        // sidecar lazily" — only tracked records defer; bare files are resolved
+        // eagerly up front (a handful of cheap stats).
+        struct Candidate {
+            /// Encoded value-file name, used purely for deterministic ordering.
+            sort_name: String,
+            /// Sidecar path to read lazily for tracked records; `None` for bare
+            /// files whose metadata is already finalized in `meta`.
+            sidecar_path: Option<PathBuf>,
+            /// Pre-resolved metadata for bare files; `None` for tracked records.
+            meta: Option<KeyValueStoreRecordMetadata>,
+        }
 
-        let mut entries = match fs::read_dir(&self.path).await {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(results),
-            Err(e) => return Err(e.into()),
-        };
+        let mut candidates: Vec<Candidate> = Vec::new();
+        // Encoded value-file names already claimed by a tracked record, so a bare
+        // file pointing at the same on-disk name is not surfaced twice.
+        let mut tracked_value_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    // Find sidecar files (but not the store-level metadata)
+        match fs::read_dir(&self.path).await {
+            Ok(mut entries) => {
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    // Find sidecar files (but not the store-level metadata).
                     if name.ends_with(&metadata_suffix) && name != METADATA_FILENAME {
-                        sidecar_paths.push(path);
+                        let sort_name = name
+                            .strip_suffix(&metadata_suffix)
+                            .unwrap_or(name)
+                            .to_string();
+                        tracked_value_names.insert(sort_name.clone());
+                        candidates.push(Candidate {
+                            sort_name,
+                            sidecar_path: Some(path),
+                            meta: None,
+                        });
                     }
                 }
             }
+            // A missing store directory has no tracked records, but bare files
+            // are resolved by explicit path below — so don't early-return here.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
 
-        // Sort by filename for deterministic ordering
-        sidecar_paths.sort();
+        // Resolve caller-declared bare files: each `name` is the file's literal
+        // on-disk key. Probe it on disk, skip any that already have a tracked
+        // record (the tracked record wins), and dedupe by name (first declared
+        // fallback for a name wins). The surfaced key is the literal `name`.
+        let mut seen_bare_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (name, content_type) in bare_fallbacks {
+            if !seen_bare_names.insert(*name) {
+                continue;
+            }
+            let candidate_name = encode_key(name);
+            // A tracked record (value file + sidecar) for the same on-disk name
+            // takes precedence over the bare file.
+            if tracked_value_names.contains(&candidate_name) {
+                continue;
+            }
+            let value_path = self.path.join(&candidate_name);
+            let Ok(file_meta) = fs::metadata(&value_path).await else {
+                continue;
+            };
+            if !file_meta.is_file() {
+                continue;
+            }
+            let resolved_type = if content_type.is_empty() {
+                "application/octet-stream".to_string()
+            } else {
+                (*content_type).to_string()
+            };
+            candidates.push(Candidate {
+                sort_name: candidate_name,
+                sidecar_path: None,
+                meta: Some(KeyValueStoreRecordMetadata {
+                    key: (*name).to_string(),
+                    content_type: resolved_type,
+                    size: Some(file_meta.len() as usize),
+                }),
+            });
+        }
+
+        // Sort by encoded value-file name for deterministic ordering (same basis
+        // the old sidecar-path sort used, now shared with bare files).
+        candidates.sort_by(|a, b| a.sort_name.cmp(&b.sort_name));
 
         // Track whether a key exactly equal to `exclusive_start_key` was seen
         // among the (prefix-filtered) candidates. The cursor key is skipped from
@@ -286,75 +390,90 @@ impl FileSystemKeyValueStoreClient {
         // and over the *whole* candidate set, not just the keys under `limit`.
         let mut cursor_key_seen = false;
 
-        for sidecar_path in sidecar_paths {
-            let content = fs::read_to_string(&sidecar_path).await?;
-            match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
-                Ok(mut record_meta) => {
-                    // Apply prefix filter (on the decoded key)
-                    if let Some(prefix) = prefix {
-                        if !record_meta.key.starts_with(prefix) {
+        for candidate in candidates {
+            // Resolve the metadata: pre-finalized for bare files, lazily read
+            // from the sidecar for tracked records.
+            let mut record_meta = match candidate.meta {
+                Some(meta) => meta,
+                None => {
+                    let sidecar_path = candidate
+                        .sidecar_path
+                        .as_ref()
+                        .expect("tracked candidate has a sidecar path");
+                    let content = fs::read_to_string(sidecar_path).await?;
+                    match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
+                        Ok(meta) => meta,
+                        Err(e) => {
+                            warn!(
+                                "Failed to parse sidecar metadata {}: {}",
+                                sidecar_path.display(),
+                                e
+                            );
                             continue;
                         }
                     }
-
-                    // Cursor existence check: does this (prefix-scoped) key
-                    // exactly match the supplied cursor? Recorded before the
-                    // `<=` filter drops it from the page.
-                    if let Some(start_key) = exclusive_start_key {
-                        if record_meta.key.as_str() == start_key {
-                            cursor_key_seen = true;
-                        }
-                    }
-
-                    // Apply cursor filter. Note we keep scanning the remaining
-                    // candidates even once the page is full, because the cursor
-                    // key may sort after the page boundary and we still need to
-                    // confirm it exists.
-                    if let Some(start_key) = exclusive_start_key {
-                        if record_meta.key.as_str() <= start_key {
-                            continue;
-                        }
-                    }
-
-                    // Once the page is full, stop *collecting* further results,
-                    // but keep iterating to validate the cursor (unless there is
-                    // no cursor to validate, in which case we can stop now).
-                    if let Some(lim) = limit {
-                        if results.len() >= lim {
-                            if exclusive_start_key.is_some() && !cursor_key_seen {
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-
-                    // Backfill `size` for foreign/legacy sidecars that omit it
-                    // (this library always writes it, but crawlee-JS / older
-                    // Python clients may not) by stating the value file. The
-                    // value file lives at the sidecar path minus the
-                    // `.{METADATA_FILENAME}` suffix.
-                    if record_meta.size.is_none() {
-                        let value_path = sidecar_path
-                            .to_string_lossy()
-                            .strip_suffix(&metadata_suffix)
-                            .map(PathBuf::from);
-                        if let Some(value_path) = value_path {
-                            if let Ok(file_meta) = fs::metadata(&value_path).await {
-                                record_meta.size = Some(file_meta.len() as usize);
-                            }
-                        }
-                    }
-
-                    results.push(record_meta);
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse sidecar metadata {}: {}",
-                        sidecar_path.display(),
-                        e
-                    );
+            };
+
+            // Apply prefix filter (on the decoded key)
+            if let Some(prefix) = prefix {
+                if !record_meta.key.starts_with(prefix) {
+                    continue;
                 }
             }
+
+            // Cursor existence check: does this (prefix-scoped) key
+            // exactly match the supplied cursor? Recorded before the
+            // `<=` filter drops it from the page.
+            if let Some(start_key) = exclusive_start_key {
+                if record_meta.key.as_str() == start_key {
+                    cursor_key_seen = true;
+                }
+            }
+
+            // Apply cursor filter. Note we keep scanning the remaining
+            // candidates even once the page is full, because the cursor
+            // key may sort after the page boundary and we still need to
+            // confirm it exists.
+            if let Some(start_key) = exclusive_start_key {
+                if record_meta.key.as_str() <= start_key {
+                    continue;
+                }
+            }
+
+            // Once the page is full, stop *collecting* further results,
+            // but keep iterating to validate the cursor (unless there is
+            // no cursor to validate, in which case we can stop now).
+            if let Some(lim) = limit {
+                if results.len() >= lim {
+                    if exclusive_start_key.is_some() && !cursor_key_seen {
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            // Backfill `size` for foreign/legacy sidecars that omit it
+            // (this library always writes it, but crawlee-JS / older
+            // Python clients may not) by stating the value file. Bare files
+            // already carry a stated `size`, so this only ever touches
+            // tracked records. The value file is the sidecar path minus the
+            // `.{METADATA_FILENAME}` suffix.
+            if record_meta.size.is_none() {
+                if let Some(sidecar_path) = candidate.sidecar_path.as_ref() {
+                    let value_path = sidecar_path
+                        .to_string_lossy()
+                        .strip_suffix(&metadata_suffix)
+                        .map(PathBuf::from);
+                    if let Some(value_path) = value_path {
+                        if let Ok(file_meta) = fs::metadata(&value_path).await {
+                            record_meta.size = Some(file_meta.len() as usize);
+                        }
+                    }
+                }
+            }
+
+            results.push(record_meta);
         }
 
         // A supplied cursor that never matched an existing (prefix-scoped) key
@@ -885,7 +1004,7 @@ mod tests {
 
         // The list/iterate path backfills too.
         let page = client
-            .iterate_keys_page(None, None, 1000, None)
+            .iterate_keys_page(None, None, 1000, None, &[])
             .await
             .unwrap();
         let entry = page.items.iter().find(|m| m.key == key).unwrap();
@@ -1263,7 +1382,7 @@ mod tests {
 
         // Fetch all at once (large page_size)
         let page = client
-            .iterate_keys_page(None, None, 1000, None)
+            .iterate_keys_page(None, None, 1000, None, &[])
             .await
             .unwrap();
         assert_eq!(page.items.len(), 3);
@@ -1271,21 +1390,24 @@ mod tests {
 
         // With limit
         let page = client
-            .iterate_keys_page(None, Some(2), 1000, None)
+            .iterate_keys_page(None, Some(2), 1000, None, &[])
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
         assert!(!page.has_more);
 
         // Paginate with page_size=2
-        let page1 = client.iterate_keys_page(None, None, 2, None).await.unwrap();
+        let page1 = client
+            .iterate_keys_page(None, None, 2, None, &[])
+            .await
+            .unwrap();
         assert_eq!(page1.items.len(), 2);
         assert!(page1.has_more);
 
         // Second page using cursor from last key
         let last_key = &page1.items.last().unwrap().key;
         let page2 = client
-            .iterate_keys_page(Some(last_key), None, 2, None)
+            .iterate_keys_page(Some(last_key), None, 2, None, &[])
             .await
             .unwrap();
         assert_eq!(page2.items.len(), 1);
@@ -1293,7 +1415,7 @@ mod tests {
 
         // Cursor-based: exclusive_start_key
         let page = client
-            .iterate_keys_page(Some("alpha"), None, 1000, None)
+            .iterate_keys_page(Some("alpha"), None, 1000, None, &[])
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
@@ -1317,7 +1439,7 @@ mod tests {
 
         // Prefix filters to matching keys only, in lexical order.
         let page = client
-            .iterate_keys_page(None, None, 1000, Some("foo:"))
+            .iterate_keys_page(None, None, 1000, Some("foo:"), &[])
             .await
             .unwrap();
         assert_eq!(page.items.len(), 3);
@@ -1332,7 +1454,7 @@ mod tests {
 
         // Prefix + limit: has_more reflects the *filtered* set, not the whole store.
         let page = client
-            .iterate_keys_page(None, Some(2), 1000, Some("foo:"))
+            .iterate_keys_page(None, Some(2), 1000, Some("foo:"), &[])
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
@@ -1341,7 +1463,7 @@ mod tests {
 
         // Prefix + page_size smaller than the match count sets has_more.
         let page1 = client
-            .iterate_keys_page(None, None, 2, Some("foo:"))
+            .iterate_keys_page(None, None, 2, Some("foo:"), &[])
             .await
             .unwrap();
         assert_eq!(page1.items.len(), 2);
@@ -1350,7 +1472,7 @@ mod tests {
         // Prefix + cursor: continue after the last key of page1, still prefix-scoped.
         let last_key = &page1.items.last().unwrap().key;
         let page2 = client
-            .iterate_keys_page(Some(last_key), None, 1000, Some("foo:"))
+            .iterate_keys_page(Some(last_key), None, 1000, Some("foo:"), &[])
             .await
             .unwrap();
         assert_eq!(page2.items.len(), 1);
@@ -1358,11 +1480,147 @@ mod tests {
 
         // A prefix matching nothing yields an empty page.
         let page = client
-            .iterate_keys_page(None, None, 1000, Some("nope"))
+            .iterate_keys_page(None, None, 1000, Some("nope"), &[])
             .await
             .unwrap();
         assert!(page.items.is_empty());
         assert!(!page.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_includes_bare_fallback_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // One tracked record, plus a bare INPUT.json with no sidecar (as a
+        // CLI/platform writer would leave it).
+        let ct = "application/json; charset=utf-8".to_string();
+        client.set_value("alpha", b"1", ct).await.unwrap();
+        let payload = br#"{"foo":"bar"}"#;
+        tokio::fs::write(client.path().join("INPUT.json"), payload)
+            .await
+            .unwrap();
+
+        // Without declaring the fallback, the bare file is invisible to listing.
+        let page = client
+            .iterate_keys_page(None, None, 1000, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha"]
+        );
+
+        // Declaring the bare file by its on-disk name surfaces it under that
+        // literal key, with the caller-declared content type and a stated size.
+        let fallbacks = [("INPUT.json", "application/json")];
+        let page = client
+            .iterate_keys_page(None, None, 1000, None, &fallbacks)
+            .await
+            .unwrap();
+        let keys = page
+            .items
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect::<Vec<_>>();
+        // "INPUT.json" encodes lexically before "alpha", so it sorts first.
+        assert_eq!(keys, ["INPUT.json", "alpha"]);
+        let input = page.items.iter().find(|m| m.key == "INPUT.json").unwrap();
+        assert_eq!(input.content_type, "application/json");
+        assert_eq!(input.size, Some(payload.len()));
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_tracked_record_wins_over_bare_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // A tracked record literally keyed "INPUT.json" (value + sidecar) AND a
+        // bare fallback declared for the same on-disk name. The tracked record
+        // must win — "INPUT.json" appears once, with the sidecar's content type.
+        client
+            .set_value("INPUT.json", b"tracked", "application/json".to_string())
+            .await
+            .unwrap();
+
+        let fallbacks = [("INPUT.json", "text/plain")];
+        let page = client
+            .iterate_keys_page(None, None, 1000, None, &fallbacks)
+            .await
+            .unwrap();
+        let inputs = page
+            .items
+            .iter()
+            .filter(|m| m.key == "INPUT.json")
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].content_type, "application/json");
+        assert_eq!(inputs[0].size, Some(b"tracked".len()));
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_bare_fallback_respects_prefix_and_pagination() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Tracked records under a prefix, plus a bare file inside and one outside it.
+        let ct = "application/json".to_string();
+        client.set_value("foo:a", b"1", ct.clone()).await.unwrap();
+        client.set_value("foo:b", b"2", ct).await.unwrap();
+        tokio::fs::write(client.path().join("foo%3Az.json"), b"bare-in")
+            .await
+            .unwrap();
+        tokio::fs::write(client.path().join("bar.json"), b"bare-out")
+            .await
+            .unwrap();
+
+        // Bare files declared by their on-disk name; the surfaced key is that name.
+        let fallbacks = [
+            ("foo:z.json", "application/json"),
+            ("bar.json", "application/json"),
+        ];
+
+        // Prefix filter applies to bare files via their surfaced key: "bar.json"
+        // is excluded.
+        let page = client
+            .iterate_keys_page(None, None, 1000, Some("foo:"), &fallbacks)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:a", "foo:b", "foo:z.json"]
+        );
+
+        // Cursor + limit treat the bare file like any other key.
+        let page = client
+            .iterate_keys_page(Some("foo:b"), None, 1000, Some("foo:"), &fallbacks)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:z.json"]
+        );
     }
 
     #[tokio::test]
@@ -1382,7 +1640,7 @@ mod tests {
 
         // Cursor "beta" exists → keys strictly greater than it, in lexical order.
         let page = client
-            .iterate_keys_page(Some("beta"), None, 1000, None)
+            .iterate_keys_page(Some("beta"), None, 1000, None, &[])
             .await
             .unwrap();
         assert_eq!(
@@ -1413,7 +1671,7 @@ mod tests {
         // there are keys lexically greater than it (the old behavior silently
         // returned "beta").
         let err = client
-            .iterate_keys_page(Some("alfa"), None, 1000, None)
+            .iterate_keys_page(Some("alfa"), None, 1000, None, &[])
             .await
             .unwrap_err();
         match err {
@@ -1424,7 +1682,7 @@ mod tests {
         // A stale/deleted cursor (a key that once existed) errors too.
         client.delete_value("alpha").await.unwrap();
         let err = client
-            .iterate_keys_page(Some("alpha"), None, 1000, None)
+            .iterate_keys_page(Some("alpha"), None, 1000, None, &[])
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1450,7 +1708,7 @@ mod tests {
 
         // A cursor that exists AND is within the prefix → paginates fine.
         let page = client
-            .iterate_keys_page(Some("foo:1"), None, 1000, Some("foo:"))
+            .iterate_keys_page(Some("foo:1"), None, 1000, Some("foo:"), &[])
             .await
             .unwrap();
         assert_eq!(
@@ -1464,7 +1722,7 @@ mod tests {
         // A cursor that exists in the store but is OUTSIDE the prefix scope is
         // treated as not found (v4 searches within the prefix-filtered set).
         let err = client
-            .iterate_keys_page(Some("bar:1"), None, 1000, Some("foo:"))
+            .iterate_keys_page(Some("bar:1"), None, 1000, Some("foo:"), &[])
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1493,7 +1751,7 @@ mod tests {
         // fills before "z" is reached. It must NOT error, and (since nothing is
         // greater than "z") the page must be empty.
         let page = client
-            .iterate_keys_page(Some("z"), None, 2, None)
+            .iterate_keys_page(Some("z"), None, 2, None, &[])
             .await
             .unwrap();
         assert!(page.items.is_empty());
@@ -1501,7 +1759,7 @@ mod tests {
 
         // Cursor "b" exists; small page returns the next 2 keys after it.
         let page = client
-            .iterate_keys_page(Some("b"), None, 2, None)
+            .iterate_keys_page(Some("b"), None, 2, None, &[])
             .await
             .unwrap();
         assert_eq!(

@@ -177,6 +177,10 @@ pub struct KvsKeySource {
     exclusive_start_key: Option<String>,
     page_size: usize,
     prefix: Option<String>,
+    /// Caller-declared out-of-band ("bare") files to surface alongside tracked
+    /// records, as `(name, content_type)` where `name` is the file's on-disk key
+    /// — see `FileSystemKeyValueStoreClient::iterate_keys_page`.
+    bare_fallbacks: Vec<(String, String)>,
 }
 
 impl KvsKeySource {
@@ -185,12 +189,14 @@ impl KvsKeySource {
         exclusive_start_key: Option<String>,
         page_size: usize,
         prefix: Option<String>,
+        bare_fallbacks: Vec<(String, String)>,
     ) -> Self {
         Self {
             client,
             exclusive_start_key,
             page_size,
             prefix,
+            bare_fallbacks,
         }
     }
 }
@@ -202,6 +208,11 @@ impl PageSource for KvsKeySource {
         &mut self,
         remaining_limit: Option<usize>,
     ) -> Result<(Vec<KeyValueStoreRecordMetadata>, bool)> {
+        let bare_fallbacks: Vec<(&str, &str)> = self
+            .bare_fallbacks
+            .iter()
+            .map(|(name, ct)| (name.as_str(), ct.as_str()))
+            .collect();
         let page = self
             .client
             .iterate_keys_page(
@@ -209,6 +220,7 @@ impl PageSource for KvsKeySource {
                 remaining_limit,
                 self.page_size,
                 self.prefix.as_deref(),
+                &bare_fallbacks,
             )
             .await?;
         // Advance the cursor to the last key of this page so the next fetch

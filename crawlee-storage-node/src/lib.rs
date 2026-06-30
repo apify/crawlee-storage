@@ -422,6 +422,20 @@ impl FileSystemKeyValueStoreClient {
         self.inner.delete_value(&key).await.map_err(storage_err)
     }
 
+    /// Lazily iterate the store's keys.
+    ///
+    /// `bareFallbacks` additionally surfaces out-of-band ("bare") value files
+    /// that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
+    /// keys. Each entry is `{ name, contentType }` where `name` is the file's
+    /// on-disk key: if that file exists with no tracked record, it is listed
+    /// under `name`. Pass an empty array (the default) to list only tracked
+    /// records.
+    ///
+    /// Round-trip caveat: a surfaced bare key does NOT round-trip through the
+    /// strict read path. The listed key is the literal on-disk `name`, but
+    /// `getValue` / `recordExists` only see tracked records (value + sidecar) and
+    /// return `null` / `false` for a sidecar-less bare file. Read a listed bare
+    /// key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
     #[napi]
     pub async fn iterate_keys(
         &self,
@@ -429,12 +443,19 @@ impl FileSystemKeyValueStoreClient {
         limit: Option<u32>,
         page_size: Option<u32>,
         prefix: Option<String>,
+        bare_fallbacks: Option<Vec<models::ListBareFallback>>,
     ) -> napi::Result<KvsKeyIterator> {
+        let bare_fallbacks = bare_fallbacks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| (f.name, f.content_type))
+            .collect();
         let source = KvsKeySource::new(
             self.inner.clone(),
             exclusive_start_key,
             page_size.unwrap_or(1000) as usize,
             prefix,
+            bare_fallbacks,
         );
         Ok(KvsKeyIterator {
             cursor: Arc::new(Mutex::new(PageCursor::new(

@@ -100,11 +100,28 @@ export declare class FileSystemKeyValueStoreClient {
     /** Set a value from a Buffer. */
     setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
+    /**
+     * Lazily iterate the store's keys.
+     *
+     * `bareFallbacks` additionally surfaces out-of-band ("bare") value files
+     * that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
+     * keys. Each entry is `{ name, contentType }` where `name` is the file's
+     * on-disk key: if that file exists with no tracked record, it is listed
+     * under `name`. Pass an empty array (the default) to list only tracked
+     * records.
+     *
+     * Round-trip caveat: a surfaced bare key does NOT round-trip through the
+     * strict read path. The listed key is the literal on-disk `name`, but
+     * `getValue` / `recordExists` only see tracked records (value + sidecar) and
+     * return `null` / `false` for a sidecar-less bare file. Read a listed bare
+     * key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
+     */
     iterateKeys(
         exclusiveStartKey?: string | undefined | null,
         limit?: number | undefined | null,
         pageSize?: number | undefined | null,
         prefix?: string | undefined | null,
+        bareFallbacks?: Array<ListBareFallback> | undefined | null,
     ): Promise<KvsKeyIterator>;
     /**
      * Build a `file://` URL for `key`, or `null` if no value file exists for
@@ -264,6 +281,26 @@ export interface KeyValueStoreRecordMetadata {
      * `KeyValueStoreRecord::size`): exact up to 2^53 bytes, no 4 GiB ceiling.
      */
     size: number;
+}
+
+/**
+ * One out-of-band ("bare") file to surface from `iterateKeys`: `name` is the
+ * file's on-disk key (e.g. `"INPUT.json"`) and `contentType` is what to report
+ * for it (an empty string reports the synthesized `application/octet-stream`).
+ * A bare file whose on-disk name already has a tracked record is not listed
+ * twice.
+ *
+ * Round-trip caveat: the file is listed under the literal `name`, but that key
+ * does NOT round-trip through `getValue` / `recordExists` (which ignore
+ * sidecar-less files and return `null` / `false`). Read a listed bare key back
+ * via `resolveValue` / `resolveExistingKey` instead.
+ *
+ * As with `resolveValue`, the core does no MIME inference — the caller declares
+ * this name→content-type policy.
+ */
+export interface ListBareFallback {
+    name: string;
+    contentType: string;
 }
 
 /**
