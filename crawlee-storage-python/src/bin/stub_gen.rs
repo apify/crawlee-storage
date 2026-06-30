@@ -326,11 +326,7 @@ fn pyclass_names(native_stub_path: &std::path::Path) -> std::io::Result<Vec<Stri
     for line in content.lines() {
         // Match `class Foo:` / `class Foo(Base):` at column 0 (top-level only).
         if let Some(rest) = line.strip_prefix("class ") {
-            let name = rest
-                .split([':', '('])
-                .next()
-                .unwrap_or("")
-                .trim();
+            let name = rest.split([':', '(']).next().unwrap_or("").trim();
             // TypedDicts are also emitted as `class …(typing.TypedDict):` — skip
             // them (they're type-only and added to `__all__` separately).
             if !name.is_empty() && !typed_dicts.contains(name) {
