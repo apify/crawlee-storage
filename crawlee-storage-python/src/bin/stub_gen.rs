@@ -12,27 +12,88 @@
 //!
 //! 2. **`async def` markers**: methods built on
 //!    `pyo3_async_runtimes::tokio::future_into_py` appear as plain sync `fn` to
-//!    `pyo3-stub-gen`, so we rewrite them to `async def` here (everything is
-//!    async except a small, explicit sync list).
+//!    `pyo3-stub-gen`, so we rewrite them to `async def` here. Which methods are
+//!    async is derived from the binding source itself (`async_method_names`
+//!    scans `lib.rs` for the `future_into_py` return type), not from a
+//!    hand-maintained list.
 //!
 //! Plus housekeeping: inject module constants, ensure `import datetime`, append
 //! TypedDict names to `__all__`, and run `ruff` to format + PEP 604-ify
 //! (`Optional[X]` → `X | None`) the result.
 
+use std::collections::HashSet;
+
 use _crawlee_storage::models::{self, TypedDictField};
 use pyo3_stub_gen::Result;
 
-/// Method names that should remain synchronous (not marked async).
-const SYNC_METHODS: &[&str] = &[
-    "iterate_items",
-    "iterate_keys",
-    // advance_clock_for_testing is a plain sync PyO3 method — it doesn't
-    // go through `future_into_py`, so its stub must not be `async`.
-    "advance_clock_for_testing",
-];
+/// The Rust return type that uniquely marks a `#[pymethods]` method as async.
+///
+/// Every `future_into_py`-based method returns exactly this — that's what
+/// `pyo3_async_runtimes::tokio::future_into_py` hands back — and no synchronous
+/// method does (the sync ones return `PathBuf`, `PyResult<()>`, an iterator
+/// struct, or `PyRef<Self>`). So the presence of this return type in a method's
+/// signature *is* the async-ness signal, read straight from the binding source
+/// instead of duplicated into a hand-maintained name list.
+const ASYNC_RETURN_TYPE: &str = "-> PyResult<Bound<'py, pyo3::PyAny>>";
 
-/// Dunder methods that ARE async (all other dunders stay sync).
+/// Dunder methods that ARE async (all other dunders stay sync). The iterator
+/// `__anext__` bodies use `future_into_py` too, but they're matched by name
+/// here rather than by return type so the rule covers the dunder family
+/// (`__aenter__`/`__aexit__`) uniformly even if one is added later.
 const ASYNC_DUNDERS: &[&str] = &["__anext__", "__aenter__", "__aexit__"];
+
+/// Scan the binding source (`lib.rs`) for the set of method names whose
+/// signature returns [`ASYNC_RETURN_TYPE`] — i.e. the `future_into_py`-based
+/// async methods. Signatures may span multiple lines (the `'py` lifetime and
+/// args wrap), so we pair each `fn NAME` with the return arrow that follows it
+/// within the same signature (before the opening `{`).
+///
+/// This replaces the old pair of hand-maintained `SYNC_METHODS`/`ASYNC_METHODS`
+/// lists: async-ness is now derived from the one source of truth (the actual
+/// return type in `lib.rs`), so a newly-added method is classified correctly
+/// with no list to update and no panic to appease.
+fn async_method_names(lib_rs: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pending_fn: Option<String> = None;
+
+    for line in lib_rs.lines() {
+        let trimmed = line.trim_start();
+
+        // Start tracking a signature when we see `fn NAME...`.
+        if let Some(after_fn) = trimmed.strip_prefix("fn ") {
+            // Method name ends at `(`, `<` (generic/lifetime), or whitespace.
+            let name: String = after_fn
+                .chars()
+                .take_while(|c| !matches!(c, '(' | '<' | ' '))
+                .collect();
+            pending_fn = Some(name);
+        }
+
+        if let Some(name) = &pending_fn {
+            if line.contains(ASYNC_RETURN_TYPE) {
+                names.insert(name.clone());
+                pending_fn = None;
+            } else if line.contains('{') {
+                // Body started without the async return type → sync method.
+                pending_fn = None;
+            }
+        }
+    }
+
+    names
+}
+
+/// Whether a method in the generated stub should be marked `async def`, given
+/// the set of async method names derived from the binding source.
+fn classify_method(method_name: &str, is_property: bool, async_methods: &HashSet<String>) -> bool {
+    if is_property {
+        return false;
+    }
+    if method_name.starts_with("__") {
+        return ASYNC_DUNDERS.contains(&method_name);
+    }
+    async_methods.contains(method_name)
+}
 
 /// Module-level constants exported via `m.add(...)` in the `#[pymodule]` init.
 /// pyo3-stub-gen does not track runtime `m.add` calls, so the generated `.pyi`
@@ -134,7 +195,11 @@ fn append_to_all_block(lines: &[&str], output: &mut String) {
 ///
 /// PEP 604 rewriting (`Optional[X]` → `X | None`) and formatting are handled by
 /// `ruff` in `format_stubs`, not here.
-fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()> {
+fn fixup_stubs(
+    path: &std::path::Path,
+    typed_dicts: &str,
+    async_methods: &HashSet<String>,
+) -> std::io::Result<()> {
     let content = std::fs::read_to_string(path)?;
 
     let lines: Vec<&str> = content.lines().collect();
@@ -188,12 +253,7 @@ fn fixup_stubs(path: &std::path::Path, typed_dicts: &str) -> std::io::Result<()>
                 .find(|&j| !lines[j].trim().is_empty())
                 .is_some_and(|j| lines[j].trim() == "@property");
 
-            let is_dunder = method_name.starts_with("__");
-            let is_sync = SYNC_METHODS.contains(&method_name)
-                || (is_dunder && !ASYNC_DUNDERS.contains(&method_name))
-                || is_property;
-
-            if !is_sync {
+            if classify_method(method_name, is_property, async_methods) {
                 // Replace "def " with "async def ", preserving indentation.
                 let indent = &line[..line.len() - trimmed.len()];
                 pass1.push_str(indent);
@@ -279,7 +339,40 @@ fn fixup_init_py(path: &std::path::Path) -> std::io::Result<()> {
 /// `crawlee_storage._native`) expose the TypedDict names to type checkers. It
 /// re-exports everything from the native module — the runtime classes, the
 /// constant, and all the TypedDicts.
-fn write_toplevel_pyi(path: &std::path::Path) -> std::io::Result<()> {
+/// Extract the runtime `#[pyclass]` names from the already-generated native
+/// stub: every top-level `class X:` definition that isn't one of the injected
+/// `TypedDict`s. This replaces a hand-maintained class list (which silently
+/// went stale whenever a client class was added/removed) with a read off the
+/// generator's own output, so the top-level re-export stays in lockstep with
+/// `m.add_class::<…>()` automatically.
+fn pyclass_names(native_stub_path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(native_stub_path)?;
+    let typed_dicts: std::collections::HashSet<&str> = typed_dict_names().into_iter().collect();
+
+    let mut names = Vec::new();
+    for line in content.lines() {
+        // Match `class Foo:` / `class Foo(Base):` at column 0 (top-level only).
+        if let Some(rest) = line.strip_prefix("class ") {
+            let name = rest
+                .split([':', '('])
+                .next()
+                .unwrap_or("")
+                .trim();
+            // TypedDicts are also emitted as `class …(typing.TypedDict):` — skip
+            // them (they're type-only and added to `__all__` separately).
+            if !name.is_empty() && !typed_dicts.contains(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort_unstable();
+    Ok(names)
+}
+
+fn write_toplevel_pyi(
+    path: &std::path::Path,
+    native_stub_path: &std::path::Path,
+) -> std::io::Result<()> {
     let mut out = String::new();
     out.push_str("# This file is automatically generated by stub_gen\n");
     out.push_str("# ruff: noqa: E501, F401, F403, F405\n\n");
@@ -287,15 +380,13 @@ fn write_toplevel_pyi(path: &std::path::Path) -> std::io::Result<()> {
     out.push_str("from crawlee_storage._native import NONE_CONTENT_TYPE as NONE_CONTENT_TYPE\n\n");
 
     out.push_str("__all__ = [\n");
-    for name in [
-        "DatasetItemIterator",
-        "FileSystemDatasetClient",
-        "FileSystemKeyValueStoreClient",
-        "FileSystemRequestQueueClient",
-        "KvsKeyIterator",
-        "NONE_CONTENT_TYPE",
-    ] {
+    // Runtime pyclasses, read off the native stub (no hand-maintained list).
+    for name in pyclass_names(native_stub_path)? {
         out.push_str(&format!("    \"{name}\",\n"));
+    }
+    // Module constants added via `m.add(...)` (not tracked by the generator).
+    for (const_name, _) in MODULE_CONSTANTS {
+        out.push_str(&format!("    \"{const_name}\",\n"));
     }
     for name in typed_dict_names() {
         out.push_str(&format!("    \"{name}\",\n"));
@@ -362,10 +453,18 @@ fn main() -> Result<()> {
     let manifest_dir: &std::path::Path = env!("CARGO_MANIFEST_DIR").as_ref();
     let python_dir = manifest_dir.join("python").join("crawlee_storage");
 
+    // Derive the async method set from the binding source (the `future_into_py`
+    // methods, identified by their return type) so the stub's `async def`
+    // markers track the code, not a hand-maintained list.
+    let lib_rs = std::fs::read_to_string(manifest_dir.join("src").join("lib.rs"))
+        .expect("Failed to read src/lib.rs to derive async method set");
+    let async_methods = async_method_names(&lib_rs);
+
     // Post-process _native/__init__.pyi: inject TypedDicts and async markers.
     let native_stub_path = python_dir.join("_native").join("__init__.pyi");
     if native_stub_path.exists() {
-        fixup_stubs(&native_stub_path, &typed_dicts).expect("Failed to post-process native stubs");
+        fixup_stubs(&native_stub_path, &typed_dicts, &async_methods)
+            .expect("Failed to post-process native stubs");
         eprintln!(
             "Post-processed stubs: injected TypedDicts and async markers into {}",
             native_stub_path.display()
@@ -384,7 +483,8 @@ fn main() -> Result<()> {
 
     // Write the companion top-level type stub (re-exports the TypedDicts).
     let toplevel_pyi = python_dir.join("__init__.pyi");
-    write_toplevel_pyi(&toplevel_pyi).expect("Failed to write top-level __init__.pyi");
+    write_toplevel_pyi(&toplevel_pyi, &native_stub_path)
+        .expect("Failed to write top-level __init__.pyi");
     eprintln!("Wrote top-level type stub {}", toplevel_pyi.display());
 
     // Format the generated files so they match the project's ruff conventions.
