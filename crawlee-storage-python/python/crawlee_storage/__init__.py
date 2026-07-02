@@ -9,7 +9,6 @@ from crawlee_storage._native import (
     FileSystemDatasetClient,
     FileSystemKeyValueStoreClient,
     FileSystemRequestQueueClient,
-    KvsKeyIterator,
 )
 
 __all__ = [
@@ -18,5 +17,4 @@ __all__ = [
     "FileSystemDatasetClient",
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
-    "KvsKeyIterator",
 ]

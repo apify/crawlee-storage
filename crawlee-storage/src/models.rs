@@ -247,6 +247,43 @@ pub struct KvsKeysPage {
     pub has_more: bool,
 }
 
+// ─── KVS List Keys Result (single self-describing page) ─────────────────────
+
+/// A single self-describing page of key-value store keys returned by
+/// `list_keys`.
+///
+/// This mirrors crawlee's `KeyValueStoreListKeysResult` contract (upstream
+/// crawlee PR #3800): rather than a flat `Vec` plus an out-of-band `has_more`
+/// bool (as [`KvsKeysPage`] carries), it bundles the page's items together with
+/// all the metadata a caller needs to paginate — the echoed request cursor and
+/// limit, the truncation flag, and the derived next cursor — so the binding
+/// wrappers can emit the crawlee shape without re-deriving anything.
+///
+/// Field derivation (see [`FileSystemKeyValueStoreClient::list_keys`]):
+/// - `count` = `items.len()`.
+/// - `limit` = the caller's requested per-page limit (echoed).
+/// - `exclusive_start_key` = the caller's supplied cursor, echoed back.
+/// - `is_truncated` = whether more keys exist beyond this page.
+/// - `next_exclusive_start_key` = the last item's key when `is_truncated` is
+///   `true`, else `None` (the cursor to feed the next `list_keys` call).
+#[derive(Debug, Clone)]
+pub struct KvsListKeysResult {
+    /// The key metadata entries in this page.
+    pub items: Vec<KeyValueStoreRecordMetadata>,
+    /// Number of items in this page (`items.len()`).
+    pub count: usize,
+    /// The per-page limit the caller requested for this page.
+    pub limit: usize,
+    /// The `exclusive_start_key` the caller supplied, echoed back (`None` if the
+    /// caller started from the beginning).
+    pub exclusive_start_key: Option<String>,
+    /// Whether more keys exist beyond this page.
+    pub is_truncated: bool,
+    /// Cursor for the next `list_keys` call — the last item's key. Set iff
+    /// `is_truncated` is `true`.
+    pub next_exclusive_start_key: Option<String>,
+}
+
 // ─── Request Queue Operation Results ────────────────────────────────────────
 
 /// These structs are never deserialized from disk — they're constructed in Rust

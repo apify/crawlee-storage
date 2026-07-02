@@ -15,10 +15,10 @@ __all__ = [
     "FileSystemDatasetClient",
     "FileSystemKeyValueStoreClient",
     "FileSystemRequestQueueClient",
+    "KeyValueStoreListKeysResult",
     "KeyValueStoreMetadata",
     "KeyValueStoreRecord",
     "KeyValueStoreRecordMetadata",
-    "KvsKeyIterator",
     "ProcessedRequest",
     "RequestQueueMetadata",
     "UnprocessedRequest",
@@ -43,6 +43,14 @@ class DatasetMetadata(typing.TypedDict):
     createdAt: datetime.datetime
     modifiedAt: datetime.datetime
     itemCount: builtins.int
+
+class KeyValueStoreListKeysResult(typing.TypedDict):
+    items: builtins.list[KeyValueStoreRecordMetadata]
+    count: builtins.int
+    limit: builtins.int
+    exclusiveStartKey: builtins.str | None
+    isTruncated: builtins.bool
+    nextExclusiveStartKey: builtins.str | None
 
 class KeyValueStoreMetadata(typing.TypedDict):
     id: builtins.str
@@ -214,16 +222,26 @@ class FileSystemKeyValueStoreClient:
         r"""
         Delete a single value (and its metadata sidecar) by key.
         """
-    def iterate_keys(
+    async def list_keys(
         self,
         exclusive_start_key: builtins.str | None = None,
         limit: builtins.int | None = None,
-        page_size: builtins.int | None = None,
         prefix: builtins.str | None = None,
         bare_fallbacks: typing.Sequence[tuple[builtins.str, builtins.str]] = [],
-    ) -> KvsKeyIterator:
+    ) -> KeyValueStoreListKeysResult:
         r"""
-        Lazily iterate the store's keys.
+        List a single self-describing page of keys.
+
+        Returns a `KeyValueStoreListKeysResult` dict matching crawlee's
+        `KeyValueStoreListKeysResult` contract: the page's `items` bundled with
+        the echoed `exclusiveStartKey`/`limit`, an `isTruncated` flag, and the
+        derived `nextExclusiveStartKey` (the cursor for the next call, set iff
+        `isTruncated`). Call it repeatedly, feeding `nextExclusiveStartKey` back
+        as `exclusive_start_key`, to stream every key one page at a time.
+
+        `limit` bounds the page size (defaults to 1000) and is echoed back on
+        the result. A bare file (declared via `bare_fallbacks`) whose on-disk
+        value-file name collides with a tracked record is dropped.
 
         `bare_fallbacks` additionally surfaces out-of-band ("bare") value files
         that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
@@ -315,8 +333,3 @@ class FileSystemRequestQueueClient:
     async def is_finished(self) -> builtins.bool: ...
     async def set_expected_request_processing_time(self, duration: datetime.timedelta) -> None: ...
     async def persist_state(self) -> None: ...
-
-@typing.final
-class KvsKeyIterator:
-    def __aiter__(self) -> KvsKeyIterator: ...
-    async def __anext__(self) -> KeyValueStoreRecordMetadata: ...

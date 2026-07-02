@@ -4,15 +4,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crawlee_storage::clock::{ClockRef, TestClock};
-use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
+use crawlee_storage::pagination::{DatasetItemSource, PageCursor};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 use models::{
-    AddRequestsResponse, DatasetItemsListPage, DatasetMetadata, KeyValueStoreMetadata,
-    KeyValueStoreRecord, KeyValueStoreRecordMetadata, ProcessedRequest, RequestQueueMetadata,
+    AddRequestsResponse, DatasetItemsListPage, DatasetMetadata, KeyValueStoreListKeysResult,
+    KeyValueStoreMetadata, KeyValueStoreRecord, ProcessedRequest, RequestQueueMetadata,
 };
 
 fn storage_err(e: crawlee_storage::utils::StorageError) -> napi::Error {
@@ -422,7 +422,18 @@ impl FileSystemKeyValueStoreClient {
         self.inner.delete_value(&key).await.map_err(storage_err)
     }
 
-    /// Lazily iterate the store's keys.
+    /// List a single self-describing page of keys.
+    ///
+    /// Returns a `KeyValueStoreListKeysResult` matching crawlee's
+    /// `KeyValueStoreListKeysResult` contract: the page's `items` bundled with
+    /// the echoed `exclusiveStartKey`/`limit`, an `isTruncated` flag, and the
+    /// derived `nextExclusiveStartKey` (the cursor for the next call, set iff
+    /// `isTruncated`). Call it repeatedly, feeding `nextExclusiveStartKey` back
+    /// as `exclusiveStartKey`, to stream every key one page at a time.
+    ///
+    /// `limit` bounds the page size (defaults to 1000) and is echoed back on
+    /// the result. A bare file (declared via `bareFallbacks`) whose on-disk
+    /// value-file name collides with a tracked record is dropped.
     ///
     /// `bareFallbacks` additionally surfaces out-of-band ("bare") value files
     /// that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
@@ -437,32 +448,33 @@ impl FileSystemKeyValueStoreClient {
     /// return `null` / `false` for a sidecar-less bare file. Read a listed bare
     /// key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
     #[napi]
-    pub async fn iterate_keys(
+    pub async fn list_keys(
         &self,
         exclusive_start_key: Option<String>,
         limit: Option<u32>,
-        page_size: Option<u32>,
         prefix: Option<String>,
         bare_fallbacks: Option<Vec<models::ListBareFallback>>,
-    ) -> napi::Result<KvsKeyIterator> {
-        let bare_fallbacks = bare_fallbacks
+    ) -> napi::Result<KeyValueStoreListKeysResult> {
+        let bare_fallbacks: Vec<(String, String)> = bare_fallbacks
             .unwrap_or_default()
             .into_iter()
             .map(|f| (f.name, f.content_type))
             .collect();
-        let source = KvsKeySource::new(
-            self.inner.clone(),
-            exclusive_start_key,
-            page_size.unwrap_or(1000) as usize,
-            prefix,
-            bare_fallbacks,
-        );
-        Ok(KvsKeyIterator {
-            cursor: Arc::new(Mutex::new(PageCursor::new(
-                source,
+        let bare_refs: Vec<(&str, &str)> = bare_fallbacks
+            .iter()
+            .map(|(name, ct)| (name.as_str(), ct.as_str()))
+            .collect();
+        let result = self
+            .inner
+            .list_keys(
+                exclusive_start_key.as_deref(),
                 limit.map(|l| l as usize),
-            ))),
-        })
+                prefix.as_deref(),
+                &bare_refs,
+            )
+            .await
+            .map_err(storage_err)?;
+        Ok(KeyValueStoreListKeysResult::from(result))
     }
 
     /// Build a `file://` URL for `key`, or `null` if no value file exists for
@@ -479,25 +491,6 @@ impl FileSystemKeyValueStoreClient {
     #[napi]
     pub async fn record_exists(&self, key: String) -> bool {
         self.inner.record_exists(&key, true).await
-    }
-}
-
-// ─── KVS Key Iterator ──────────────────────────────────────────────────────
-
-#[napi]
-pub struct KvsKeyIterator {
-    cursor: Arc<Mutex<PageCursor<KvsKeySource>>>,
-}
-
-#[napi]
-impl KvsKeyIterator {
-    /// Fetch the next key metadata entry. Returns null when iteration is exhausted.
-    #[napi]
-    pub async fn next(&self) -> napi::Result<Option<KeyValueStoreRecordMetadata>> {
-        match self.cursor.lock().await.next().await.map_err(storage_err)? {
-            Some(meta) => Ok(Some(KeyValueStoreRecordMetadata::from(meta))),
-            None => Ok(None),
-        }
     }
 }
 

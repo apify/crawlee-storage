@@ -101,7 +101,18 @@ export declare class FileSystemKeyValueStoreClient {
     setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
     /**
-     * Lazily iterate the store's keys.
+     * List a single self-describing page of keys.
+     *
+     * Returns a `KeyValueStoreListKeysResult` matching crawlee's
+     * `KeyValueStoreListKeysResult` contract: the page's `items` bundled with
+     * the echoed `exclusiveStartKey`/`limit`, an `isTruncated` flag, and the
+     * derived `nextExclusiveStartKey` (the cursor for the next call, set iff
+     * `isTruncated`). Call it repeatedly, feeding `nextExclusiveStartKey` back
+     * as `exclusiveStartKey`, to stream every key one page at a time.
+     *
+     * `limit` bounds the page size (defaults to 1000) and is echoed back on
+     * the result. A bare file (declared via `bareFallbacks`) whose on-disk
+     * value-file name collides with a tracked record is dropped.
      *
      * `bareFallbacks` additionally surfaces out-of-band ("bare") value files
      * that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
@@ -116,13 +127,12 @@ export declare class FileSystemKeyValueStoreClient {
      * return `null` / `false` for a sidecar-less bare file. Read a listed bare
      * key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
      */
-    iterateKeys(
+    listKeys(
         exclusiveStartKey?: string | undefined | null,
         limit?: number | undefined | null,
-        pageSize?: number | undefined | null,
         prefix?: string | undefined | null,
         bareFallbacks?: Array<ListBareFallback> | undefined | null,
-    ): Promise<KvsKeyIterator>;
+    ): Promise<KeyValueStoreListKeysResult>;
     /**
      * Build a `file://` URL for `key`, or `null` if no value file exists for
      * it. Stats the encoded path; does not probe bare-file extensions, so the
@@ -193,11 +203,6 @@ export declare class FileSystemRequestQueueClient {
     persistState(): Promise<void>;
 }
 
-export declare class KvsKeyIterator {
-    /** Fetch the next key metadata entry. Returns null when iteration is exhausted. */
-    next(): Promise<KeyValueStoreRecordMetadata | null>;
-}
-
 /** Response from `addBatchOfRequests`. Mirrors the core's `AddRequestsResponse`. */
 export interface AddRequestsResponse {
     processedRequests: Array<ProcessedRequest>;
@@ -242,6 +247,33 @@ export interface DatasetMetadata {
     itemCount: number;
 }
 
+/**
+ * A single self-describing page of keys returned by `listKeys`. Mirrors the
+ * core's `KvsListKeysResult` and crawlee's `KeyValueStoreListKeysResult`
+ * contract (upstream crawlee PR #3800): the page's `items` plus the metadata a
+ * caller needs to paginate.
+ *
+ * `exclusiveStartKey` and `nextExclusiveStartKey` are optional (omitting
+ * `use_nullable` keeps them as `foo?: string` rather than `foo: string | null`,
+ * matching how `UnprocessedRequest.method` is handled): `exclusiveStartKey` is
+ * absent when the caller listed from the beginning, and `nextExclusiveStartKey`
+ * is set iff `isTruncated` is `true`.
+ */
+export interface KeyValueStoreListKeysResult {
+    items: Array<KeyValueStoreRecordMetadata>;
+    /**
+     * Number of items in this page (`items.length`). Typed `f64` (same
+     * rationale as `KeyValueStoreRecordMetadata::size`) so it crosses the FFI
+     * as a JS `number`.
+     */
+    count: number;
+    /** The per-page limit the caller requested for this page. */
+    limit: number;
+    exclusiveStartKey?: string;
+    isTruncated: boolean;
+    nextExclusiveStartKey?: string;
+}
+
 export interface KeyValueStoreMetadata {
     id: string;
     name?: string;
@@ -269,9 +301,9 @@ export interface KeyValueStoreRecord {
 }
 
 /**
- * Metadata for a single KVS record, as yielded by the key iterator
- * (`KvsKeyIterator.next`) and `iterateKeys`. Mirrors the core's
- * `KeyValueStoreRecordMetadata` with `size` finalized to a non-optional value.
+ * Metadata for a single KVS record, as listed by `listKeys`. Mirrors the
+ * core's `KeyValueStoreRecordMetadata` with `size` finalized to a non-optional
+ * value.
  */
 export interface KeyValueStoreRecordMetadata {
     key: string;
@@ -284,7 +316,7 @@ export interface KeyValueStoreRecordMetadata {
 }
 
 /**
- * One out-of-band ("bare") file to surface from `iterateKeys`: `name` is the
+ * One out-of-band ("bare") file to surface from `listKeys`: `name` is the
  * file's on-disk key (e.g. `"INPUT.json"`) and `contentType` is what to report
  * for it (an empty string reports the synthesized `application/octet-stream`).
  * A bare file whose on-disk name already has a tracked record is not listed

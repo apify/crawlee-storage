@@ -1,14 +1,13 @@
 //! Generic lazy paging cursor shared by the language bindings.
 //!
-//! Both the dataset item iterator and the KVS key iterator need the exact same
-//! buffering state machine on top of the core's `iterate_*_page` methods: fetch
-//! a page, hand out its items one at a time, then fetch the next page until the
-//! source reports no more. Only two things actually differ between them — how
-//! the on-disk cursor advances (dataset: an integer `offset`; KVS: the last key
-//! string) and what type of item is yielded. Everything else (the buffer, the
-//! `remaining_limit` accounting, the "page came back empty / `has_more` was
-//! false → we're done" logic) was previously copy-pasted into all four binding
-//! iterators (dataset + KVS, Python + Node).
+//! The dataset item iterator needs a buffering state machine on top of the
+//! core's `iterate_*_page` methods: fetch a page, hand out its items one at a
+//! time, then fetch the next page until the source reports no more. The parts
+//! that vary per source are how the on-disk cursor advances (dataset: an
+//! integer `offset`) and what type of item is yielded. Everything else (the
+//! buffer, the `remaining_limit` accounting, the "page came back empty /
+//! `has_more` was false → we're done" logic) was previously copy-pasted into
+//! the binding iterators (Python + Node).
 //!
 //! [`PageCursor`] owns that shared loop once; [`PageSource`] is the small,
 //! per-iterator hook that knows how to fetch one page and advance its own
@@ -17,8 +16,6 @@
 //! end-of-stream into `StopAsyncIteration` (Python) / `null` (Node).
 
 use crate::dataset::FileSystemDatasetClient;
-use crate::key_value_store::FileSystemKeyValueStoreClient;
-use crate::models::KeyValueStoreRecordMetadata;
 use crate::utils::Result;
 
 use std::sync::Arc;
@@ -165,69 +162,6 @@ impl PageSource for DatasetItemSource {
             .await?;
         // Advance past the items we just consumed.
         self.offset += page.items.len();
-        Ok((page.items, page.has_more))
-    }
-}
-
-// ─── KVS key source ─────────────────────────────────────────────────────────
-
-/// [`PageSource`] over a KVS's keys, advancing by the last key seen.
-pub struct KvsKeySource {
-    client: Arc<FileSystemKeyValueStoreClient>,
-    exclusive_start_key: Option<String>,
-    page_size: usize,
-    prefix: Option<String>,
-    /// Caller-declared out-of-band ("bare") files to surface alongside tracked
-    /// records, as `(name, content_type)` where `name` is the file's on-disk key
-    /// — see `FileSystemKeyValueStoreClient::iterate_keys_page`.
-    bare_fallbacks: Vec<(String, String)>,
-}
-
-impl KvsKeySource {
-    pub fn new(
-        client: Arc<FileSystemKeyValueStoreClient>,
-        exclusive_start_key: Option<String>,
-        page_size: usize,
-        prefix: Option<String>,
-        bare_fallbacks: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            client,
-            exclusive_start_key,
-            page_size,
-            prefix,
-            bare_fallbacks,
-        }
-    }
-}
-
-impl PageSource for KvsKeySource {
-    type Item = KeyValueStoreRecordMetadata;
-
-    async fn fetch_page(
-        &mut self,
-        remaining_limit: Option<usize>,
-    ) -> Result<(Vec<KeyValueStoreRecordMetadata>, bool)> {
-        let bare_fallbacks: Vec<(&str, &str)> = self
-            .bare_fallbacks
-            .iter()
-            .map(|(name, ct)| (name.as_str(), ct.as_str()))
-            .collect();
-        let page = self
-            .client
-            .iterate_keys_page(
-                self.exclusive_start_key.as_deref(),
-                remaining_limit,
-                self.page_size,
-                self.prefix.as_deref(),
-                &bare_fallbacks,
-            )
-            .await?;
-        // Advance the cursor to the last key of this page so the next fetch
-        // continues strictly after it.
-        if let Some(last) = page.items.last() {
-            self.exclusive_start_key = Some(last.key.clone());
-        }
         Ok((page.items, page.has_more))
     }
 }

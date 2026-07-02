@@ -246,6 +246,34 @@ typed_dict_model! {
     }
 }
 
+// ─── KVS list-keys result (single self-describing page) ─────────────────────
+//
+// Mirrors the core's `KvsListKeysResult` and crawlee's
+// `KeyValueStoreListKeysResult` (upstream crawlee PR #3800). Built via the
+// `to_py` builder (not `serde_to_py`) because its `items` are a list of nested
+// `KeyValueStoreRecordMetadata` dicts that we build with that model's own
+// `to_py`. `exclusiveStartKey` / `nextExclusiveStartKey` are `str | None`
+// (`None` when absent / not truncated).
+
+typed_dict_model! {
+    KvsListKeysResult<'a>(models::KvsListKeysResult),
+    "KeyValueStoreListKeysResult",
+    {
+        "items": "builtins.list[KeyValueStoreRecordMetadata]" => |this, py| {
+            let items = pyo3::types::PyList::empty(py);
+            for meta in &this.items {
+                items.append(KeyValueStoreRecordMetadata(meta).to_py(py)?)?;
+            }
+            items
+        },
+        "count": "builtins.int" => |this, _py| this.count,
+        "limit": "builtins.int" => |this, _py| this.limit,
+        "exclusiveStartKey": "builtins.str | None" => |this, _py| this.exclusive_start_key.clone(),
+        "isTruncated": "builtins.bool" => |this, _py| this.is_truncated,
+        "nextExclusiveStartKey": "builtins.str | None" => |this, _py| this.next_exclusive_start_key.clone(),
+    }
+}
+
 // ─── KVS record (full value) ────────────────────────────────────────────────
 
 typed_dict_model! {

@@ -5,8 +5,6 @@
 // `Symbol.asyncIterator` glue on the iterators — which have no Rust counterpart,
 // then re-exports everything from `./index.js`.
 
-import type { KeyValueStoreRecordMetadata } from './index.js';
-
 export * from './index.js';
 
 /**
@@ -25,10 +23,6 @@ export interface KeyValueStoreStreamRecord {
 declare module './index.js' {
     interface DatasetItemIterator {
         [Symbol.asyncIterator](): AsyncIterator<Record<string, unknown>>;
-    }
-
-    interface KvsKeyIterator {
-        [Symbol.asyncIterator](): AsyncIterator<KeyValueStoreRecordMetadata>;
     }
 
     interface FileSystemKeyValueStoreClient {
