@@ -53,13 +53,13 @@ export declare class FileSystemKeyValueStoreClient {
     purge(keep?: Array<string> | undefined | null): Promise<void>;
     /**
      * Get a tracked record (value file + metadata sidecar) by key. Returns the
-     * raw value bytes as a Buffer, or `null` if there is no such tracked record.
+     * raw value bytes as a Buffer, or `undefined` if there is no such tracked record.
      *
      * To read out-of-band files that have no metadata sidecar (e.g. a
      * CLI-written `INPUT.json`), use `resolveValue`, which probes the
      * conventional bare-file extensions.
      */
-    getValue(key: string): Promise<KeyValueStoreRecord | null>;
+    getValue(key: string): Promise<KeyValueStoreRecord | undefined>;
     /**
      * Resolve a key to a record, transparently falling back to out-of-band
      * ("bare") value files that have no metadata sidecar.
@@ -68,7 +68,7 @@ export declare class FileSystemKeyValueStoreClient {
      * comes verbatim from the sidecar), then probes each `bareFallbacks` entry
      * as a bare `key + extension` file, reporting the declared content type on
      * a match. The first match wins; the returned record is always keyed by
-     * the requested `key`. Returns `null` if nothing resolves.
+     * the requested `key`. Returns `undefined` if nothing resolves.
      *
      * Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
      * instead of hand-rolling the extension probing in JS.
@@ -76,15 +76,15 @@ export declare class FileSystemKeyValueStoreClient {
     resolveValue(
         key: string,
         bareFallbacks: Array<BareFallback>,
-    ): Promise<KeyValueStoreRecord | null>;
+    ): Promise<KeyValueStoreRecord | undefined>;
     /**
      * Resolve a key to the on-disk key that actually exists, using the same
      * fallback probe order as `resolveValue` but without reading the value.
      * Returns the matched key (the literal key or `key + extension`), or
-     * `null` if nothing exists. Pass the result to `getPublicUrl` so the URL
+     * `undefined` if nothing exists. Pass the result to `getPublicUrl` so the URL
      * points at the file that exists.
      */
-    resolveExistingKey(key: string, bareFallbacks: Array<string>): Promise<string | null>;
+    resolveExistingKey(key: string, bareFallbacks: Array<string>): Promise<string | undefined>;
     /** Set a value from a Buffer. */
     setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
     deleteValue(key: string): Promise<void>;
@@ -122,11 +122,11 @@ export declare class FileSystemKeyValueStoreClient {
         bareFallbacks?: Array<ListBareFallback> | undefined | null,
     ): Promise<KeyValueStoreListKeysResult>;
     /**
-     * Build a `file://` URL for `key`, or `null` if no value file exists for
+     * Build a `file://` URL for `key`, or `undefined` if no value file exists for
      * it. Stats the encoded path; does not probe bare-file extensions, so the
      * caller resolves the on-disk key via `resolveExistingKey` first if needed.
      */
-    getPublicUrl(key: string): Promise<string | null>;
+    getPublicUrl(key: string): Promise<string | undefined>;
     /**
      * Check whether a tracked record (value file + metadata sidecar) exists for
      * `key`. To also match out-of-band files with no sidecar, use
@@ -178,13 +178,13 @@ export declare class FileSystemRequestQueueClient {
         requests: Record<string, unknown>[],
         forefront?: boolean | undefined | null,
     ): Promise<AddRequestsResponse>;
-    getRequest(uniqueKey: string): Promise<Record<string, unknown> | null>;
-    fetchNextRequest(): Promise<Record<string, unknown> | null>;
-    markRequestAsHandled(request: Record<string, unknown>): Promise<ProcessedRequest | null>;
+    getRequest(uniqueKey: string): Promise<Record<string, unknown> | undefined>;
+    fetchNextRequest(): Promise<Record<string, unknown> | undefined>;
+    markRequestAsHandled(request: Record<string, unknown>): Promise<ProcessedRequest | undefined>;
     reclaimRequest(
         request: Record<string, unknown>,
         forefront?: boolean | undefined | null,
-    ): Promise<ProcessedRequest | null>;
+    ): Promise<ProcessedRequest | undefined>;
     isEmpty(): Promise<boolean>;
     isFinished(): Promise<boolean>;
     setExpectedRequestProcessingTime(secs: number): Promise<void>;

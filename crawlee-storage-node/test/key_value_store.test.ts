@@ -24,7 +24,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('my-key', data, 'application/json');
 
         const record = await client.getValue('my-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.key).toBe('my-key');
         expect(record!.contentType).toBe('application/json');
         expect(Buffer.isBuffer(record!.value)).toBe(true);
@@ -37,7 +37,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('greeting', Buffer.from('hello'), 'text/plain');
 
         const record = await client.getValue('greeting');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('text/plain');
         expect(record!.value.toString()).toBe('hello');
     });
@@ -49,7 +49,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('binary-key', data, 'application/octet-stream');
 
         const record = await client.getValue('binary-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(Buffer.isBuffer(record!.value)).toBe(true);
         expect(record!.value).toEqual(data);
@@ -62,7 +62,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('binary-key', data);
 
         const record = await client.getValue('binary-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(record!.value).toEqual(data);
     });
@@ -77,11 +77,11 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.recordExists('key1')).toBe(false);
     });
 
-    it('should return null for missing keys', async () => {
+    it('should return undefined for missing keys', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const record = await client.getValue('nonexistent');
-        expect(record).toBeNull();
+        expect(record).toBeUndefined();
     });
 
     it('should list keys across pages via listKeys', async () => {
@@ -178,8 +178,8 @@ describe('FileSystemKeyValueStoreClient', () => {
     it('should get public URL', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
-        // getPublicUrl is existence-aware: a missing record yields null.
-        expect(await client.getPublicUrl('my-key')).toBeNull();
+        // getPublicUrl is existence-aware: a missing record yields undefined.
+        expect(await client.getPublicUrl('my-key')).toBeUndefined();
 
         // Once the record exists, it returns a file:// URL.
         await client.setValue('my-key', Buffer.from('v'));
@@ -225,7 +225,7 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         // getValue / recordExists only ever see tracked records (value + sidecar),
         // so a bare file is invisible to them — reaching it is resolveValue's job.
-        expect(await client.getValue('INPUT.json')).toBeNull();
+        expect(await client.getValue('INPUT.json')).toBeUndefined();
         expect(await client.recordExists('INPUT.json')).toBe(false);
     });
 
@@ -262,7 +262,7 @@ describe('FileSystemKeyValueStoreClient', () => {
             { extension: '.json', contentType: 'application/json; charset=utf-8' },
         ];
         const record = await client.resolveValue('INPUT', fallbacks);
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.key).toBe('INPUT');
         // The tracked sidecar content type wins — fallback types are NOT applied.
         expect(record!.contentType).toBe('application/json');
@@ -281,14 +281,14 @@ describe('FileSystemKeyValueStoreClient', () => {
             { extension: '.bin', contentType: '' },
         ];
         const record = await client.resolveValue('INPUT', fallbacks);
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         // Re-keyed to the requested key, not the on-disk "INPUT.json".
         expect(record!.key).toBe('INPUT');
         expect(record!.contentType).toBe('application/json; charset=utf-8');
         expect(record!.value.equals(payload)).toBe(true);
 
-        // Nothing resolves → null.
-        expect(await client.resolveValue('missing', fallbacks)).toBeNull();
+        // Nothing resolves → undefined.
+        expect(await client.resolveValue('missing', fallbacks)).toBeUndefined();
     });
 
     it('resolveExistingKey returns the matched on-disk key', async () => {
@@ -303,7 +303,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await writeFile(join(client.pathToKvs, 'INPUT.json'), Buffer.from('{}'));
         expect(await client.resolveExistingKey('INPUT', extensions)).toBe('INPUT.json');
 
-        expect(await client.resolveExistingKey('nope', extensions)).toBeNull();
+        expect(await client.resolveExistingKey('nope', extensions)).toBeUndefined();
     });
 
     it('should drop storage entirely', async () => {
@@ -321,7 +321,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('path/to/key with spaces', Buffer.from('value'), 'text/plain');
 
         const record = await client.getValue('path/to/key with spaces');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.value.toString()).toBe('value');
     });
 
@@ -396,7 +396,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValueStream('stream-write-key', stream, 'text/plain');
 
         const record = await client.getValue('stream-write-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('text/plain');
         expect(record!.value.toString()).toBe('hello from a stream');
     });
@@ -417,7 +417,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValueStream('binary-stream', stream, 'application/octet-stream');
 
         const record = await client.getValue('binary-stream');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(record!.value).toEqual(Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]));
     });

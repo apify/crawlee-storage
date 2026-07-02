@@ -250,16 +250,22 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Get a tracked record (value file + metadata sidecar) by key. Returns the
-    /// raw value bytes as a Buffer, or `null` if there is no such tracked record.
+    /// raw value bytes as a Buffer, or `undefined` if there is no such tracked record.
     ///
     /// To read out-of-band files that have no metadata sidecar (e.g. a
     /// CLI-written `INPUT.json`), use `resolveValue`, which probes the
     /// conventional bare-file extensions.
     #[napi]
-    pub async fn get_value(&self, key: String) -> napi::Result<Option<KeyValueStoreRecord>> {
+    pub async fn get_value(
+        &self,
+        key: String,
+    ) -> napi::Result<Either<KeyValueStoreRecord, Undefined>> {
         let inner = self.inner.clone();
         let result = inner.read_value(&key).await.map_err(storage_err)?;
-        Ok(result.map(KeyValueStoreRecord::from))
+        Ok(match result {
+            Some(r) => Either::A(r.into()),
+            None => Either::B(()),
+        })
     }
 
     /// Resolve a key to a record, transparently falling back to out-of-band
@@ -269,7 +275,7 @@ impl FileSystemKeyValueStoreClient {
     /// comes verbatim from the sidecar), then probes each `bareFallbacks` entry
     /// as a bare `key + extension` file, reporting the declared content type on
     /// a match. The first match wins; the returned record is always keyed by
-    /// the requested `key`. Returns `null` if nothing resolves.
+    /// the requested `key`. Returns `undefined` if nothing resolves.
     ///
     /// Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
     /// instead of hand-rolling the extension probing in JS.
@@ -278,7 +284,7 @@ impl FileSystemKeyValueStoreClient {
         &self,
         key: String,
         bare_fallbacks: Vec<models::BareFallback>,
-    ) -> napi::Result<Option<KeyValueStoreRecord>> {
+    ) -> napi::Result<Either<KeyValueStoreRecord, Undefined>> {
         let fallbacks: Vec<(&str, &str)> = bare_fallbacks
             .iter()
             .map(|f| (f.extension.as_str(), f.content_type.as_str()))
@@ -288,23 +294,29 @@ impl FileSystemKeyValueStoreClient {
             .resolve_and_read_value(&key, &fallbacks)
             .await
             .map_err(storage_err)?;
-        Ok(result.map(KeyValueStoreRecord::from))
+        Ok(match result {
+            Some(r) => Either::A(r.into()),
+            None => Either::B(()),
+        })
     }
 
     /// Resolve a key to the on-disk key that actually exists, using the same
     /// fallback probe order as `resolveValue` but without reading the value.
     /// Returns the matched key (the literal key or `key + extension`), or
-    /// `null` if nothing exists. Pass the result to `getPublicUrl` so the URL
+    /// `undefined` if nothing exists. Pass the result to `getPublicUrl` so the URL
     /// points at the file that exists.
     #[napi]
     pub async fn resolve_existing_key(
         &self,
         key: String,
         bare_fallbacks: Vec<String>,
-    ) -> napi::Result<Option<String>> {
+    ) -> napi::Result<Either<String, Undefined>> {
         let fallbacks: Vec<&str> = bare_fallbacks.iter().map(String::as_str).collect();
         let inner = self.inner.clone();
-        Ok(inner.resolve_existing_key(&key, &fallbacks).await)
+        Ok(match inner.resolve_existing_key(&key, &fallbacks).await {
+            Some(k) => Either::A(k),
+            None => Either::B(()),
+        })
     }
 
     /// Set a value from a Buffer.
@@ -433,12 +445,15 @@ impl FileSystemKeyValueStoreClient {
         Ok(KeyValueStoreListKeysResult::from(result))
     }
 
-    /// Build a `file://` URL for `key`, or `null` if no value file exists for
+    /// Build a `file://` URL for `key`, or `undefined` if no value file exists for
     /// it. Stats the encoded path; does not probe bare-file extensions, so the
     /// caller resolves the on-disk key via `resolveExistingKey` first if needed.
     #[napi]
-    pub async fn get_public_url(&self, key: String) -> Option<String> {
-        self.inner.get_public_url(&key).await
+    pub async fn get_public_url(&self, key: String) -> Either<String, Undefined> {
+        match self.inner.get_public_url(&key).await {
+            Some(url) => Either::A(url),
+            None => Either::B(()),
+        }
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for
@@ -557,30 +572,42 @@ impl FileSystemRequestQueueClient {
         Ok(AddRequestsResponse::from(response))
     }
 
-    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
-    pub async fn get_request(&self, unique_key: String) -> napi::Result<Option<Value>> {
-        self.inner
+    #[napi(ts_return_type = "Promise<Record<string, unknown> | undefined>")]
+    pub async fn get_request(&self, unique_key: String) -> napi::Result<Either<Value, Undefined>> {
+        let result = self
+            .inner
             .get_request(&unique_key)
             .await
-            .map_err(storage_err)
+            .map_err(storage_err)?;
+        Ok(match result {
+            Some(v) => Either::A(v),
+            None => Either::B(()),
+        })
     }
 
-    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
-    pub async fn fetch_next_request(&self) -> napi::Result<Option<Value>> {
-        self.inner.fetch_next_request().await.map_err(storage_err)
+    #[napi(ts_return_type = "Promise<Record<string, unknown> | undefined>")]
+    pub async fn fetch_next_request(&self) -> napi::Result<Either<Value, Undefined>> {
+        let result = self.inner.fetch_next_request().await.map_err(storage_err)?;
+        Ok(match result {
+            Some(v) => Either::A(v),
+            None => Either::B(()),
+        })
     }
 
     #[napi(ts_args_type = "request: Record<string, unknown>")]
     pub async fn mark_request_as_handled(
         &self,
         request: Value,
-    ) -> napi::Result<Option<ProcessedRequest>> {
+    ) -> napi::Result<Either<ProcessedRequest, Undefined>> {
         let result = self
             .inner
             .mark_request_as_handled(request)
             .await
             .map_err(storage_err)?;
-        Ok(result.map(ProcessedRequest::from))
+        Ok(match result {
+            Some(r) => Either::A(r.into()),
+            None => Either::B(()),
+        })
     }
 
     #[napi(
@@ -590,13 +617,16 @@ impl FileSystemRequestQueueClient {
         &self,
         request: Value,
         forefront: Option<bool>,
-    ) -> napi::Result<Option<ProcessedRequest>> {
+    ) -> napi::Result<Either<ProcessedRequest, Undefined>> {
         let result = self
             .inner
             .reclaim_request(request, forefront.unwrap_or(false))
             .await
             .map_err(storage_err)?;
-        Ok(result.map(ProcessedRequest::from))
+        Ok(match result {
+            Some(r) => Either::A(r.into()),
+            None => Either::B(()),
+        })
     }
 
     #[napi]
