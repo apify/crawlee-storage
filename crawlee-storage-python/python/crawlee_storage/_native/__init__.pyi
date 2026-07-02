@@ -74,7 +74,6 @@ class RequestQueueMetadata(typing.TypedDict):
     accessedAt: datetime.datetime
     createdAt: datetime.datetime
     modifiedAt: datetime.datetime
-    hadMultipleClients: builtins.bool
     handledRequestCount: builtins.int
     pendingRequestCount: builtins.int
     totalRequestCount: builtins.int

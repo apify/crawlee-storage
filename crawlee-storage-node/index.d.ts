@@ -327,7 +327,6 @@ export interface RequestQueueMetadata {
     accessedAt: Date;
     createdAt: Date;
     modifiedAt: Date;
-    hadMultipleClients: boolean;
     handledRequestCount: number;
     pendingRequestCount: number;
     totalRequestCount: number;

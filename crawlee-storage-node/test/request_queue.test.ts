@@ -321,7 +321,6 @@ describe('FileSystemRequestQueueClient', () => {
         expect(meta.modifiedAt).toBeInstanceOf(Date);
         expect(meta.accessedAt).toBeInstanceOf(Date);
         expect(Number.isNaN(meta.createdAt.getTime())).toBe(false);
-        expect(meta.hadMultipleClients).toBe(false);
         expect(meta.handledRequestCount).toBe(0);
         expect(meta.pendingRequestCount).toBe(0);
         expect(meta.totalRequestCount).toBe(0);

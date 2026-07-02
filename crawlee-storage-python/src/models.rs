@@ -226,7 +226,6 @@ typed_dict_model! {
     "RequestQueueMetadata",
     @base(base),
     {
-        "hadMultipleClients": "builtins.bool" => |this, _py| this.had_multiple_clients,
         "handledRequestCount": "builtins.int" => |this, _py| this.handled_request_count,
         "pendingRequestCount": "builtins.int" => |this, _py| this.pending_request_count,
         "totalRequestCount": "builtins.int" => |this, _py| this.total_request_count,
