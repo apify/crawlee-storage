@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 ### 🚜 Refactor
 
 - [**breaking**] Assume_sole_owner flag -&gt; request_queue_access enum ([#68](https://github.com/apify/crawlee-storage/pull/68)) ([5b03441](https://github.com/apify/crawlee-storage/commit/5b03441a7f1aa7d34e6cd01e675b58c40bf15c0a)) by [@janbuchar](https://github.com/janbuchar)
+- [**breaking**] Make public interface more consistent and idiomatic ([#70](https://github.com/apify/crawlee-storage/pull/70)) ([a0dfa25](https://github.com/apify/crawlee-storage/commit/a0dfa25757500d7a298a3a34fe5445ce61a7e4ac)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
