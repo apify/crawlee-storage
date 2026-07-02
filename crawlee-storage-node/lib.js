@@ -2,34 +2,7 @@ import { createReadStream, createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { Readable, Writable } from 'stream';
 
-import { DatasetItemIterator, FileSystemKeyValueStoreClient, KvsKeyIterator } from './index.js';
-
-// Add Symbol.asyncIterator to DatasetItemIterator so users can write:
-//   for await (const item of client.iterateItems()) { ... }
-DatasetItemIterator.prototype[Symbol.asyncIterator] = function () {
-    return {
-        next: async () => {
-            const value = await this.next();
-            if (value === null) {
-                return { done: true, value: undefined };
-            }
-            return { done: false, value };
-        },
-    };
-};
-
-// Same for KvsKeyIterator.
-KvsKeyIterator.prototype[Symbol.asyncIterator] = function () {
-    return {
-        next: async () => {
-            const value = await this.next();
-            if (value === null) {
-                return { done: true, value: undefined };
-            }
-            return { done: false, value };
-        },
-    };
-};
+import { FileSystemKeyValueStoreClient } from './index.js';
 
 // getValueStream: returns { key, contentType, size, stream } or null.
 // The stream is a Web ReadableStream<Uint8Array> created from the file on disk.

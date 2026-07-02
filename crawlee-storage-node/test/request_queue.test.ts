@@ -37,12 +37,12 @@ describe('FileSystemRequestQueueClient', () => {
 
         // Fetch the request
         const fetched = await client.fetchNextRequest();
-        expect(fetched).not.toBeNull();
+        expect(fetched).not.toBeUndefined();
         expect(fetched!.url).toBe('https://example.com');
 
         // Queue should have no more requests to fetch
         const next = await client.fetchNextRequest();
-        expect(next).toBeNull();
+        expect(next).toBeUndefined();
     });
 
     it('should deduplicate requests', async () => {
@@ -75,10 +75,10 @@ describe('FileSystemRequestQueueClient', () => {
         );
 
         const request = await client.fetchNextRequest();
-        expect(request).not.toBeNull();
+        expect(request).not.toBeUndefined();
 
         const result = await client.markRequestAsHandled(request!);
-        expect(result).not.toBeNull();
+        expect(result).not.toBeUndefined();
 
         expect(await client.isEmpty()).toBe(true);
     });
@@ -98,15 +98,15 @@ describe('FileSystemRequestQueueClient', () => {
         );
 
         const request = await client.fetchNextRequest();
-        expect(request).not.toBeNull();
+        expect(request).not.toBeUndefined();
 
         // Reclaim it
         const result = await client.reclaimRequest(request!, false);
-        expect(result).not.toBeNull();
+        expect(result).not.toBeUndefined();
 
         // Should be fetchable again
         const refetched = await client.fetchNextRequest();
-        expect(refetched).not.toBeNull();
+        expect(refetched).not.toBeUndefined();
     });
 
     it('should handle forefront requests', async () => {
@@ -156,12 +156,12 @@ describe('FileSystemRequestQueueClient', () => {
         );
 
         const request = await client.getRequest('req1');
-        expect(request).not.toBeNull();
+        expect(request).not.toBeUndefined();
         expect(request!.url).toBe('https://example.com/1');
 
         // Non-existent request
         const missing = await client.getRequest('nonexistent');
-        expect(missing).toBeNull();
+        expect(missing).toBeUndefined();
     });
 
     it('should report isEmpty / isFinished correctly', async () => {
@@ -231,7 +231,7 @@ describe('FileSystemRequestQueueClient', () => {
 
         // getRequest must not leak orderNo to callers, but must keep id.
         const returned = await client.getRequest('req1');
-        expect(returned).not.toBeNull();
+        expect(returned).not.toBeUndefined();
         expect(typeof returned!.id).toBe('string');
         expect(returned!.orderNo).toBeUndefined();
     });
@@ -321,7 +321,6 @@ describe('FileSystemRequestQueueClient', () => {
         expect(meta.modifiedAt).toBeInstanceOf(Date);
         expect(meta.accessedAt).toBeInstanceOf(Date);
         expect(Number.isNaN(meta.createdAt.getTime())).toBe(false);
-        expect(meta.hadMultipleClients).toBe(false);
         expect(meta.handledRequestCount).toBe(0);
         expect(meta.pendingRequestCount).toBe(0);
         expect(meta.totalRequestCount).toBe(0);
@@ -358,17 +357,17 @@ describe('FileSystemRequestQueueClient', () => {
             );
 
             const first = await client.fetchNextRequest();
-            expect(first).not.toBeNull();
+            expect(first).not.toBeUndefined();
 
             // Without advancing the clock, the request is still locked.
             const blocked = await client.fetchNextRequest();
-            expect(blocked).toBeNull();
+            expect(blocked).toBeUndefined();
 
             // Jump past the default 3-minute lock window.
             client.advanceClockForTesting(4 * 60 * 1000);
 
             const again = await client.fetchNextRequest();
-            expect(again).not.toBeNull();
+            expect(again).not.toBeUndefined();
             expect(again!.uniqueKey).toBe('req1');
         });
 
@@ -406,12 +405,12 @@ describe('FileSystemRequestQueueClient', () => {
 
             // B has its own clock at offset 0; the lock is in the future on disk.
             const blocked = await clientB.fetchNextRequest();
-            expect(blocked).toBeNull();
+            expect(blocked).toBeUndefined();
 
             // Advance B's clock past the lock window — B can now fetch.
             clientB.advanceClockForTesting(4 * 60 * 1000);
             const fetched = await clientB.fetchNextRequest();
-            expect(fetched).not.toBeNull();
+            expect(fetched).not.toBeUndefined();
         });
     });
 
@@ -450,7 +449,7 @@ describe('FileSystemRequestQueueClient', () => {
                 'shared', // requestQueueAccess
             );
             const blocked = await reopened.fetchNextRequest();
-            expect(blocked).toBeNull();
+            expect(blocked).toBeUndefined();
         });
 
         it("'single' (default) reclaims stale locks on open so they are immediately fetchable", async () => {
@@ -478,7 +477,7 @@ describe('FileSystemRequestQueueClient', () => {
                 'single', // requestQueueAccess
             );
             const fetched = await reopened.fetchNextRequest();
-            expect(fetched).not.toBeNull();
+            expect(fetched).not.toBeUndefined();
             expect(fetched!.uniqueKey).toBe('r1');
         });
     });

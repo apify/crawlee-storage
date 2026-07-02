@@ -108,23 +108,36 @@ async def test_advance_clock_for_testing_rejects_non_timedelta(storage_dir: str)
         client.advance_clock_for_testing(1000)  # type: ignore[arg-type]
 
 
-async def test_iterate_keys_accepts_prefix(storage_dir: str) -> None:
-    """`iterate_keys` accepts a `prefix` kwarg and filters on the decoded key."""
+async def _drain_keys(client: FileSystemKeyValueStoreClient, **kwargs: object) -> list[dict]:
+    """Drain every key across `list_keys` pages, following `nextExclusiveStartKey`."""
+    items: list[dict] = []
+    cursor: str | None = None
+    while True:
+        result = await client.list_keys(exclusive_start_key=cursor, **kwargs)  # type: ignore[arg-type]
+        items.extend(result["items"])
+        if not result["isTruncated"]:
+            break
+        cursor = result["nextExclusiveStartKey"]
+    return items
+
+
+async def test_list_keys_accepts_prefix(storage_dir: str) -> None:
+    """`list_keys` accepts a `prefix` kwarg and filters on the decoded key."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
     await client.set_value("foo:1", b"1", "text/plain")
     await client.set_value("foo:2", b"2", "text/plain")
     await client.set_value("bar:1", b"3", "text/plain")
 
-    keys = [record["key"] async for record in client.iterate_keys(prefix="foo:")]
+    keys = [record["key"] for record in await _drain_keys(client, prefix="foo:")]
     assert keys == ["foo:1", "foo:2"]
 
     # No prefix still returns everything.
-    all_keys = sorted([record["key"] async for record in client.iterate_keys()])
+    all_keys = sorted([record["key"] for record in await _drain_keys(client)])
     assert all_keys == ["bar:1", "foo:1", "foo:2"]
 
 
-async def test_iterate_keys_surfaces_bare_fallback_files(storage_dir: str) -> None:
-    """`iterate_keys` accepts `(name, content_type)` bare fallbacks and folds
+async def test_list_keys_surfaces_bare_fallback_files(storage_dir: str) -> None:
+    """`list_keys` accepts `(name, content_type)` bare fallbacks and folds
     matching out-of-band files into the listing under their on-disk name."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
     await client.set_value("alpha", b"1", "application/json")
@@ -133,12 +146,12 @@ async def test_iterate_keys_surfaces_bare_fallback_files(storage_dir: str) -> No
     (Path(client.path_to_kvs) / "INPUT.json").write_bytes(payload)
 
     # Without declaring the fallback, the bare file is invisible to listing.
-    bareless = sorted([record["key"] async for record in client.iterate_keys()])
+    bareless = sorted([record["key"] for record in await _drain_keys(client)])
     assert bareless == ["alpha"]
 
     # Declaring the bare file by its on-disk name surfaces it under that key.
     fallbacks = [("INPUT.json", "application/json")]
-    records = [record async for record in client.iterate_keys(bare_fallbacks=fallbacks)]
+    records = await _drain_keys(client, bare_fallbacks=fallbacks)
     by_key = {record["key"]: record for record in records}
     assert sorted(by_key) == ["INPUT.json", "alpha"]
     assert by_key["INPUT.json"]["contentType"] == "application/json"
@@ -192,26 +205,52 @@ async def test_resolve_existing_key_returns_matched_key(storage_dir: str) -> Non
     assert await client.resolve_existing_key("nope", extensions) is None
 
 
-async def test_iterate_keys_valid_cursor_paginates(storage_dir: str) -> None:
+async def test_list_keys_valid_cursor_paginates(storage_dir: str) -> None:
     """A valid, existing `exclusive_start_key` still paginates correctly."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
     await client.set_value("alpha", b"1", "text/plain")
     await client.set_value("beta", b"2", "text/plain")
     await client.set_value("gamma", b"3", "text/plain")
 
-    keys = [record["key"] async for record in client.iterate_keys(exclusive_start_key="beta")]
+    result = await client.list_keys(exclusive_start_key="beta")
+    keys = [record["key"] for record in result["items"]]
     assert keys == ["gamma"]
 
 
-async def test_iterate_keys_unknown_cursor_raises(storage_dir: str) -> None:
+async def test_list_keys_returns_self_describing_pages(storage_dir: str) -> None:
+    """`list_keys` returns a single crawlee `KeyValueStoreListKeysResult` page:
+    a truncated first page carrying `nextExclusiveStartKey`, then a final one."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    await client.set_value("alpha", b"1", "text/plain")
+    await client.set_value("beta", b"2", "text/plain")
+    await client.set_value("gamma", b"3", "text/plain")
+
+    # Truncated first page: limit 2 of 3 keys.
+    page1 = await client.list_keys(limit=2)
+    assert [item["key"] for item in page1["items"]] == ["alpha", "beta"]
+    assert page1["count"] == 2
+    assert page1["limit"] == 2
+    assert page1["exclusiveStartKey"] is None
+    assert page1["isTruncated"] is True
+    assert page1["nextExclusiveStartKey"] == "beta"
+
+    # Final page via the returned cursor: no truncation, no next cursor.
+    page2 = await client.list_keys(exclusive_start_key=page1["nextExclusiveStartKey"], limit=2)
+    assert [item["key"] for item in page2["items"]] == ["gamma"]
+    assert page2["count"] == 1
+    assert page2["exclusiveStartKey"] == "beta"
+    assert page2["isTruncated"] is False
+    assert page2["nextExclusiveStartKey"] is None
+
+
+async def test_list_keys_unknown_cursor_raises(storage_dir: str) -> None:
     """A nonexistent `exclusive_start_key` raises ValueError with the crawlee
     contract message (so the consumer can drop its preflight existence guard)."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
     await client.set_value("alpha", b"1", "text/plain")
 
     with pytest.raises(ValueError, match='exclusiveStartKey "nope" was not found in the key-value store'):
-        # The error surfaces when the first page is fetched.
-        _ = [record async for record in client.iterate_keys(exclusive_start_key="nope")]
+        await client.list_keys(exclusive_start_key="nope")
 
 
 async def test_get_public_url_is_existence_aware(storage_dir: str) -> None:

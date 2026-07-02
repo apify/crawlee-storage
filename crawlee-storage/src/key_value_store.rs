@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::clock::{system_clock, ClockRef};
 use crate::models::{
     KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata,
-    KeyValueStoreValueFileInfo, KvsKeysPage,
+    KeyValueStoreValueFileInfo, KvsKeysPage, KvsListKeysResult,
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps_value,
@@ -268,6 +268,86 @@ impl FileSystemKeyValueStoreClient {
             results.into_iter().take(fetch_limit).collect();
 
         Ok(KvsKeysPage { items, has_more })
+    }
+
+    /// List a single self-describing page of keys.
+    ///
+    /// Returns a [`KvsListKeysResult`] mirroring crawlee's
+    /// `KeyValueStoreListKeysResult` contract (upstream crawlee PR #3800): the
+    /// page's `items` bundled with the echoed request cursor/limit, a
+    /// truncation flag, and the derived next cursor. Unlike
+    /// [`iterate_keys_page`](Self::iterate_keys_page) (which is the primitive
+    /// behind lazy cursor iteration and returns a bare `Vec` + `has_more`), this
+    /// hands the binding layer everything it needs to emit the crawlee page
+    /// shape in one shot, so the JS/Python wrappers don't have to re-derive the
+    /// next cursor or re-count.
+    ///
+    /// `limit` bounds the page size (defaults to 1000 when `None`). It is both
+    /// the fetch size for this single page *and* the value echoed back as
+    /// `KvsListKeysResult::limit`.
+    ///
+    /// `prefix` and `bare_fallbacks` behave exactly as in
+    /// [`iterate_keys_page`](Self::iterate_keys_page) — the same shared
+    /// pagination + bare-file dedup logic in
+    /// [`list_keys_raw`](Self::list_keys_raw) backs both. In particular, a bare
+    /// file whose *encoded on-disk value-file name* collides with a tracked
+    /// record is dropped (the tracked record wins). Note this is a
+    /// name-for-name collision: a tracked record under the logical key `INPUT`
+    /// does **not** shadow a bare `INPUT.json` (different on-disk names) — that
+    /// policy, if desired, is expressed by which `bare_fallbacks` the caller
+    /// passes, not by the core (which does no MIME/extension inference).
+    ///
+    /// Field derivation:
+    /// - `count` = `items.len()`.
+    /// - `limit` = the resolved per-page limit (echoed).
+    /// - `exclusive_start_key` = the caller's supplied cursor, echoed back.
+    /// - `is_truncated` = whether more keys exist beyond this page (from
+    ///   [`iterate_keys_page`](Self::iterate_keys_page)'s `has_more`).
+    /// - `next_exclusive_start_key` = the last item's key when `is_truncated`,
+    ///   else `None`.
+    pub async fn list_keys(
+        &self,
+        exclusive_start_key: Option<&str>,
+        limit: Option<usize>,
+        prefix: Option<&str>,
+        bare_fallbacks: &[(&str, &str)],
+    ) -> Result<KvsListKeysResult> {
+        let page_limit = limit.unwrap_or(1000);
+
+        // Reuse the shared pagination + bare-file dedup with `page_size` set to
+        // the requested limit and no overall `limit` budget: we want a single
+        // page bounded by `page_limit`, whose `has_more` means "keys exist
+        // beyond this page". (Passing `limit == page_size` instead would make
+        // `iterate_keys_page` treat the limit as an exhausted total budget and
+        // report `has_more = false` on an exactly-full page — the wrong signal
+        // for a truncation flag.)
+        let page = self
+            .iterate_keys_page(
+                exclusive_start_key,
+                None,
+                page_limit,
+                prefix,
+                bare_fallbacks,
+            )
+            .await?;
+
+        let is_truncated = page.has_more;
+        // The next cursor is the last key of this page, but only when there is
+        // a next page to fetch.
+        let next_exclusive_start_key = if is_truncated {
+            page.items.last().map(|m| m.key.clone())
+        } else {
+            None
+        };
+
+        Ok(KvsListKeysResult {
+            count: page.items.len(),
+            items: page.items,
+            limit: page_limit,
+            exclusive_start_key: exclusive_start_key.map(str::to_string),
+            is_truncated,
+            next_exclusive_start_key,
+        })
     }
 
     /// Internal helper: list keys with cursor, limit and optional prefix,
@@ -1769,6 +1849,143 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["c", "d"]
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_result_shape() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        // Empty store: no items, not truncated, no next cursor. `limit` echoes
+        // the caller's request; `exclusive_start_key` echoes the (absent) input.
+        let result = client.list_keys(None, Some(10), None, &[]).await.unwrap();
+        assert!(result.items.is_empty());
+        assert_eq!(result.count, 0);
+        assert_eq!(result.limit, 10);
+        assert_eq!(result.exclusive_start_key, None);
+        assert!(!result.is_truncated);
+        assert_eq!(result.next_exclusive_start_key, None);
+
+        let ct = "application/json; charset=utf-8".to_string();
+        for key in ["alpha", "beta", "gamma"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // Full listing (limit larger than the store): all items, not truncated,
+        // no next cursor. count == items.len(); limit echoed.
+        let result = client.list_keys(None, Some(100), None, &[]).await.unwrap();
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta", "gamma"]
+        );
+        assert_eq!(result.count, 3);
+        assert_eq!(result.limit, 100);
+        assert_eq!(result.exclusive_start_key, None);
+        assert!(!result.is_truncated);
+        assert_eq!(result.next_exclusive_start_key, None);
+
+        // Truncated first page: limit=2 leaves a third key behind, so
+        // is_truncated is set and next_exclusive_start_key is this page's last
+        // key ("beta").
+        let page1 = client.list_keys(None, Some(2), None, &[]).await.unwrap();
+        assert_eq!(
+            page1
+                .items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert_eq!(page1.count, 2);
+        assert_eq!(page1.limit, 2);
+        assert_eq!(page1.exclusive_start_key, None);
+        assert!(page1.is_truncated);
+        assert_eq!(page1.next_exclusive_start_key.as_deref(), Some("beta"));
+
+        // Final page via the returned cursor: the remaining key, not truncated,
+        // no next cursor. The supplied cursor is echoed in exclusive_start_key.
+        let cursor = page1.next_exclusive_start_key.clone().unwrap();
+        let page2 = client
+            .list_keys(Some(&cursor), Some(2), None, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            page2
+                .items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma"]
+        );
+        assert_eq!(page2.count, 1);
+        assert_eq!(page2.exclusive_start_key.as_deref(), Some("beta"));
+        assert!(!page2.is_truncated);
+        assert_eq!(page2.next_exclusive_start_key, None);
+
+        // Default limit (None → 1000) surfaces everything without truncation.
+        let result = client.list_keys(None, None, None, &[]).await.unwrap();
+        assert_eq!(result.count, 3);
+        assert_eq!(result.limit, 1000);
+        assert!(!result.is_truncated);
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_prefix_and_limit_interaction() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json".to_string();
+        for key in ["foo:1", "foo:2", "foo:3", "bar:1"] {
+            client.set_value(key, b"x", ct.clone()).await.unwrap();
+        }
+
+        // Prefix + limit: truncation and count reflect only the matching
+        // ("foo:") subset, and the next cursor is the last matched key.
+        let page = client
+            .list_keys(None, Some(2), Some("foo:"), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:1", "foo:2"]
+        );
+        assert_eq!(page.count, 2);
+        assert_eq!(page.limit, 2);
+        assert!(page.is_truncated);
+        assert_eq!(page.next_exclusive_start_key.as_deref(), Some("foo:2"));
+
+        // Continuing with the cursor within the same prefix yields the last
+        // matching key, no truncation.
+        let cursor = page.next_exclusive_start_key.clone().unwrap();
+        let page2 = client
+            .list_keys(Some(&cursor), Some(2), Some("foo:"), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            page2
+                .items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["foo:3"]
+        );
+        assert!(!page2.is_truncated);
+        assert_eq!(page2.next_exclusive_start_key, None);
     }
 
     #[tokio::test]

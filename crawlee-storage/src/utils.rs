@@ -19,9 +19,10 @@ pub enum StorageError {
     #[error("Storage not found: {0}")]
     NotFound(String),
 
-    /// A paginated `list_keys`/`iterate_keys` call supplied an
-    /// `exclusive_start_key` cursor that does not correspond to any existing
-    /// key (after prefix scoping). The payload carries the offending key so the binding can format the message.
+    /// A paginated `list_keys` call (or the core `iterate_keys_page` primitive)
+    /// supplied an `exclusive_start_key` cursor that does not correspond to any
+    /// existing key (after prefix scoping). The payload carries the offending
+    /// key so the binding can format the message.
     #[error(
         "exclusiveStartKey \"{0}\" was not found in the key-value store. \
          This is likely a bug — the key may have been deleted between paginated listKeys calls."

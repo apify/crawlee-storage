@@ -5,15 +5,11 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
-use crawlee_storage::pagination::{DatasetItemSource, KvsKeySource, PageCursor};
-use pyo3::exceptions::{
-    PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError,
-};
+use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 /// Pick a clock for a client given the `use_test_clock` flag passed across the
 /// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
@@ -96,67 +92,6 @@ fn serde_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyA
 // The metadata/record → Python dict builders now live next to their field
 // specs in `models.rs` (`models::DatasetMetadata::to_py`, etc.), so the dict a
 // caller receives and the `TypedDict` the stub promises are defined together.
-
-// ─── Dataset Item Iterator ──────────────────────────────────────────────────
-
-const DEFAULT_PAGE_SIZE: usize = 1000;
-
-#[gen_stub_pyclass]
-#[pyclass]
-struct DatasetItemIterator {
-    // The shared core cursor owns the page-buffering state machine; this
-    // wrapper only converts each yielded item to a Python dict and turns
-    // exhaustion into `StopAsyncIteration`.
-    cursor: Arc<Mutex<crawlee_storage::pagination::PageCursor<DatasetItemSource>>>,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl DatasetItemIterator {
-    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
-    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let cursor = self.cursor.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            match cursor.lock().await.next().await.map_err(storage_err)? {
-                Some(item) => Python::attach(|py| value_to_py(py, &item)),
-                None => Err(PyStopAsyncIteration::new_err(())),
-            }
-        })
-    }
-}
-
-// ─── KVS Key Iterator ──────────────────────────────────────────────────────
-
-#[gen_stub_pyclass]
-#[pyclass]
-struct KvsKeyIterator {
-    cursor: Arc<Mutex<crawlee_storage::pagination::PageCursor<KvsKeySource>>>,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl KvsKeyIterator {
-    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecordMetadata"))]
-    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let cursor = self.cursor.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            match cursor.lock().await.next().await.map_err(storage_err)? {
-                Some(meta) => {
-                    Python::attach(|py| models::KeyValueStoreRecordMetadata(&meta).to_py(py))
-                }
-                None => Err(PyStopAsyncIteration::new_err(())),
-            }
-        })
-    }
-}
 
 // ─── Dataset Client ─────────────────────────────────────────────────────────
 
@@ -278,27 +213,6 @@ impl FileSystemDatasetClient {
                 .map_err(storage_err)?;
             Python::attach(|py| serde_to_py(py, &page))
         })
-    }
-
-    #[pyo3(signature = (offset=0, limit=None, desc=false, skip_empty=false, page_size=None))]
-    fn iterate_items(
-        &self,
-        offset: usize,
-        limit: Option<usize>,
-        desc: bool,
-        skip_empty: bool,
-        page_size: Option<usize>,
-    ) -> DatasetItemIterator {
-        let source = DatasetItemSource::new(
-            self.inner.clone(),
-            offset,
-            page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-            desc,
-            skip_empty,
-        );
-        DatasetItemIterator {
-            cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
-        }
     }
 }
 
@@ -503,7 +417,18 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    /// Lazily iterate the store's keys.
+    /// List a single self-describing page of keys.
+    ///
+    /// Returns a `KeyValueStoreListKeysResult` dict matching crawlee's
+    /// `KeyValueStoreListKeysResult` contract: the page's `items` bundled with
+    /// the echoed `exclusiveStartKey`/`limit`, an `isTruncated` flag, and the
+    /// derived `nextExclusiveStartKey` (the cursor for the next call, set iff
+    /// `isTruncated`). Call it repeatedly, feeding `nextExclusiveStartKey` back
+    /// as `exclusive_start_key`, to stream every key one page at a time.
+    ///
+    /// `limit` bounds the page size (defaults to 1000) and is echoed back on
+    /// the result. A bare file (declared via `bare_fallbacks`) whose on-disk
+    /// value-file name collides with a tracked record is dropped.
     ///
     /// `bare_fallbacks` additionally surfaces out-of-band ("bare") value files
     /// that have no metadata sidecar (e.g. a CLI-written `INPUT.json`) as regular
@@ -519,25 +444,33 @@ impl FileSystemKeyValueStoreClient {
     /// and return `None` / `False` for a sidecar-less bare file. Read a listed
     /// bare key back via `resolve_value` / `resolve_existing_key`, not
     /// `get_value`.
-    #[pyo3(signature = (exclusive_start_key=None, limit=None, page_size=None, prefix=None, bare_fallbacks=vec![]))]
-    fn iterate_keys(
+    #[gen_stub(override_return_type(type_repr = "KeyValueStoreListKeysResult"))]
+    #[pyo3(signature = (exclusive_start_key=None, limit=None, prefix=None, bare_fallbacks=vec![]))]
+    fn list_keys<'py>(
         &self,
+        py: Python<'py>,
         exclusive_start_key: Option<String>,
         limit: Option<usize>,
-        page_size: Option<usize>,
         prefix: Option<String>,
         bare_fallbacks: Vec<(String, String)>,
-    ) -> KvsKeyIterator {
-        let source = KvsKeySource::new(
-            self.inner.clone(),
-            exclusive_start_key,
-            page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-            prefix,
-            bare_fallbacks,
-        );
-        KvsKeyIterator {
-            cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
-        }
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let bare_refs: Vec<(&str, &str)> = bare_fallbacks
+                .iter()
+                .map(|(name, ct)| (name.as_str(), ct.as_str()))
+                .collect();
+            let result = client
+                .list_keys(
+                    exclusive_start_key.as_deref(),
+                    limit,
+                    prefix.as_deref(),
+                    &bare_refs,
+                )
+                .await
+                .map_err(storage_err)?;
+            Python::attach(|py| models::KvsListKeysResult(&result).to_py(py))
+        })
     }
 
     /// Build a `file://` URL for `key`, or `None` if no value file exists for it
@@ -831,8 +764,6 @@ fn _crawlee_storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FileSystemDatasetClient>()?;
     m.add_class::<FileSystemKeyValueStoreClient>()?;
     m.add_class::<FileSystemRequestQueueClient>()?;
-    m.add_class::<DatasetItemIterator>()?;
-    m.add_class::<KvsKeyIterator>()?;
     // The content-type sentinel for null KVS values (empty file on disk).
     // Exported so consumers reference the shared constant from the core crate
     // instead of hardcoding the `application/x-none` literal.

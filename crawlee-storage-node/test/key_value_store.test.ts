@@ -24,7 +24,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('my-key', data, 'application/json');
 
         const record = await client.getValue('my-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.key).toBe('my-key');
         expect(record!.contentType).toBe('application/json');
         expect(Buffer.isBuffer(record!.value)).toBe(true);
@@ -37,7 +37,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('greeting', Buffer.from('hello'), 'text/plain');
 
         const record = await client.getValue('greeting');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('text/plain');
         expect(record!.value.toString()).toBe('hello');
     });
@@ -49,7 +49,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('binary-key', data, 'application/octet-stream');
 
         const record = await client.getValue('binary-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(Buffer.isBuffer(record!.value)).toBe(true);
         expect(record!.value).toEqual(data);
@@ -62,7 +62,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('binary-key', data);
 
         const record = await client.getValue('binary-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(record!.value).toEqual(data);
     });
@@ -77,80 +77,55 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.recordExists('key1')).toBe(false);
     });
 
-    it('should return null for missing keys', async () => {
+    it('should return undefined for missing keys', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const record = await client.getValue('nonexistent');
-        expect(record).toBeNull();
+        expect(record).toBeUndefined();
     });
 
-    it('should iterate keys', async () => {
+    it('should list keys across pages via listKeys', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('alpha', Buffer.from('1'));
         await client.setValue('beta', Buffer.from('2'));
         await client.setValue('gamma', Buffer.from('3'));
 
-        const iterator = await client.iterateKeys(null, null, 2);
+        // Drain every key one page at a time, following nextExclusiveStartKey.
         const keys: string[] = [];
-        let entry;
-        while ((entry = await iterator.next()) !== null) {
-            keys.push(entry.key);
-        }
+        let cursor: string | null | undefined = null;
+        do {
+            const page = await client.listKeys(cursor, 2);
+            keys.push(...page.items.map((i) => i.key));
+            cursor = page.isTruncated ? page.nextExclusiveStartKey : undefined;
+        } while (cursor);
 
         expect(keys.length).toBe(3);
         expect(keys).toEqual([...keys].sort());
     });
 
-    it('should support for-await-of on key iterator', async () => {
+    it('should honor a limit on listKeys', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('alpha', Buffer.from('1'));
         await client.setValue('beta', Buffer.from('2'));
         await client.setValue('gamma', Buffer.from('3'));
 
-        const iterator = await client.iterateKeys(null, null, 2);
-        const keys: string[] = [];
-        for await (const entry of iterator) {
-            keys.push(entry.key);
-        }
-
-        expect(keys.length).toBe(3);
-        expect(keys).toEqual([...keys].sort());
+        // A single page capped at 2 keys.
+        const page = await client.listKeys(null, 2);
+        expect(page.items.length).toBe(2);
     });
 
-    it('should iterate keys with limit', async () => {
-        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
-
-        await client.setValue('alpha', Buffer.from('1'));
-        await client.setValue('beta', Buffer.from('2'));
-        await client.setValue('gamma', Buffer.from('3'));
-
-        const iterator = await client.iterateKeys(null, 2, 1000);
-        const keys: string[] = [];
-        let entry;
-        while ((entry = await iterator.next()) !== null) {
-            keys.push(entry.key);
-        }
-
-        expect(keys.length).toBe(2);
-    });
-
-    it('should iterate keys filtered by prefix', async () => {
+    it('should list keys filtered by prefix', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('foo:1', Buffer.from('1'));
         await client.setValue('foo:2', Buffer.from('2'));
         await client.setValue('bar:1', Buffer.from('3'));
 
-        // prefix is the 4th positional arg (exclusiveStartKey, limit, pageSize, prefix).
-        const iterator = await client.iterateKeys(null, null, 1000, 'foo:');
-        const keys: string[] = [];
-        for await (const entry of iterator) {
-            keys.push(entry.key);
-        }
-
-        expect(keys).toEqual(['foo:1', 'foo:2']);
+        // prefix is the 3rd positional arg (exclusiveStartKey, limit, prefix).
+        const page = await client.listKeys(null, 1000, 'foo:');
+        expect(page.items.map((i) => i.key)).toEqual(['foo:1', 'foo:2']);
     });
 
     it('should paginate from a valid exclusiveStartKey', async () => {
@@ -160,13 +135,8 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('beta', Buffer.from('2'));
         await client.setValue('gamma', Buffer.from('3'));
 
-        const iterator = await client.iterateKeys('beta', null, 1000);
-        const keys: string[] = [];
-        for await (const entry of iterator) {
-            keys.push(entry.key);
-        }
-
-        expect(keys).toEqual(['gamma']);
+        const page = await client.listKeys('beta', 1000);
+        expect(page.items.map((i) => i.key)).toEqual(['gamma']);
     });
 
     it('should throw the crawlee contract error for an unknown exclusiveStartKey', async () => {
@@ -174,19 +144,42 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         await client.setValue('alpha', Buffer.from('1'));
 
-        // The error surfaces when the first page is fetched (on first next()).
-        const iterator = await client.iterateKeys('does-not-exist', null, 1000);
-        await expect(iterator.next()).rejects.toThrow(
+        await expect(client.listKeys('does-not-exist', 1000)).rejects.toThrow(
             'exclusiveStartKey "does-not-exist" was not found in the key-value store. ' +
                 'This is likely a bug — the key may have been deleted between paginated listKeys calls.',
         );
     });
 
+    it('listKeys returns a truncated page carrying nextExclusiveStartKey, then a final page', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await client.setValue('alpha', Buffer.from('1'));
+        await client.setValue('beta', Buffer.from('2'));
+        await client.setValue('gamma', Buffer.from('3'));
+
+        // Truncated first page: limit 2 of 3 keys.
+        const page1 = await client.listKeys(null, 2);
+        expect(page1.items.map((i) => i.key)).toEqual(['alpha', 'beta']);
+        expect(page1.count).toBe(2);
+        expect(page1.limit).toBe(2);
+        expect(page1.exclusiveStartKey).toBeUndefined();
+        expect(page1.isTruncated).toBe(true);
+        expect(page1.nextExclusiveStartKey).toBe('beta');
+
+        // Final page via the returned cursor: no truncation, no next cursor.
+        const page2 = await client.listKeys(page1.nextExclusiveStartKey, 2);
+        expect(page2.items.map((i) => i.key)).toEqual(['gamma']);
+        expect(page2.count).toBe(1);
+        expect(page2.exclusiveStartKey).toBe('beta');
+        expect(page2.isTruncated).toBe(false);
+        expect(page2.nextExclusiveStartKey).toBeUndefined();
+    });
+
     it('should get public URL', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
-        // getPublicUrl is existence-aware: a missing record yields null.
-        expect(await client.getPublicUrl('my-key')).toBeNull();
+        // getPublicUrl is existence-aware: a missing record yields undefined.
+        expect(await client.getPublicUrl('my-key')).toBeUndefined();
 
         // Once the record exists, it returns a file:// URL.
         await client.setValue('my-key', Buffer.from('v'));
@@ -232,11 +225,11 @@ describe('FileSystemKeyValueStoreClient', () => {
 
         // getValue / recordExists only ever see tracked records (value + sidecar),
         // so a bare file is invisible to them — reaching it is resolveValue's job.
-        expect(await client.getValue('INPUT.json')).toBeNull();
+        expect(await client.getValue('INPUT.json')).toBeUndefined();
         expect(await client.recordExists('INPUT.json')).toBe(false);
     });
 
-    it('iterateKeys surfaces caller-declared bare files alongside tracked records', async () => {
+    it('listKeys surfaces caller-declared bare files alongside tracked records', async () => {
         const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
@@ -245,20 +238,13 @@ describe('FileSystemKeyValueStoreClient', () => {
         await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
 
         // Without declaring the fallback, the bare file is invisible to listing.
-        const bareless = await client.iterateKeys(null, null, 1000);
-        const barelessKeys: string[] = [];
-        for await (const entry of bareless) {
-            barelessKeys.push(entry.key);
-        }
-        expect(barelessKeys).toEqual(['alpha']);
+        const bareless = await client.listKeys(null, 1000);
+        expect(bareless.items.map((e) => e.key)).toEqual(['alpha']);
 
         // Declaring the bare file by its on-disk name surfaces it under that key.
         const fallbacks = [{ name: 'INPUT.json', contentType: 'application/json' }];
-        const iterator = await client.iterateKeys(null, null, 1000, null, fallbacks);
-        const entries: { key: string; contentType: string; size: number }[] = [];
-        for await (const entry of iterator) {
-            entries.push(entry);
-        }
+        const page = await client.listKeys(null, 1000, null, fallbacks);
+        const entries = page.items;
         const input = entries.find((e) => e.key === 'INPUT.json');
         expect(input).toBeDefined();
         expect(input!.contentType).toBe('application/json');
@@ -276,7 +262,7 @@ describe('FileSystemKeyValueStoreClient', () => {
             { extension: '.json', contentType: 'application/json; charset=utf-8' },
         ];
         const record = await client.resolveValue('INPUT', fallbacks);
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.key).toBe('INPUT');
         // The tracked sidecar content type wins — fallback types are NOT applied.
         expect(record!.contentType).toBe('application/json');
@@ -295,14 +281,14 @@ describe('FileSystemKeyValueStoreClient', () => {
             { extension: '.bin', contentType: '' },
         ];
         const record = await client.resolveValue('INPUT', fallbacks);
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         // Re-keyed to the requested key, not the on-disk "INPUT.json".
         expect(record!.key).toBe('INPUT');
         expect(record!.contentType).toBe('application/json; charset=utf-8');
         expect(record!.value.equals(payload)).toBe(true);
 
-        // Nothing resolves → null.
-        expect(await client.resolveValue('missing', fallbacks)).toBeNull();
+        // Nothing resolves → undefined.
+        expect(await client.resolveValue('missing', fallbacks)).toBeUndefined();
     });
 
     it('resolveExistingKey returns the matched on-disk key', async () => {
@@ -317,7 +303,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await writeFile(join(client.pathToKvs, 'INPUT.json'), Buffer.from('{}'));
         expect(await client.resolveExistingKey('INPUT', extensions)).toBe('INPUT.json');
 
-        expect(await client.resolveExistingKey('nope', extensions)).toBeNull();
+        expect(await client.resolveExistingKey('nope', extensions)).toBeUndefined();
     });
 
     it('should drop storage entirely', async () => {
@@ -335,7 +321,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValue('path/to/key with spaces', Buffer.from('value'), 'text/plain');
 
         const record = await client.getValue('path/to/key with spaces');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.value.toString()).toBe('value');
     });
 
@@ -410,7 +396,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValueStream('stream-write-key', stream, 'text/plain');
 
         const record = await client.getValue('stream-write-key');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('text/plain');
         expect(record!.value.toString()).toBe('hello from a stream');
     });
@@ -431,7 +417,7 @@ describe('FileSystemKeyValueStoreClient', () => {
         await client.setValueStream('binary-stream', stream, 'application/octet-stream');
 
         const record = await client.getValue('binary-stream');
-        expect(record).not.toBeNull();
+        expect(record).not.toBeUndefined();
         expect(record!.contentType).toBe('application/octet-stream');
         expect(record!.value).toEqual(Buffer.from([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]));
     });

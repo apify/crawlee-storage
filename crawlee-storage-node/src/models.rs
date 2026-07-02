@@ -41,9 +41,9 @@ impl From<crawlee_storage::models::KeyValueStoreRecord> for KeyValueStoreRecord 
     }
 }
 
-/// Metadata for a single KVS record, as yielded by the key iterator
-/// (`KvsKeyIterator.next`) and `iterateKeys`. Mirrors the core's
-/// `KeyValueStoreRecordMetadata` with `size` finalized to a non-optional value.
+/// Metadata for a single KVS record, as listed by `listKeys`. Mirrors the
+/// core's `KeyValueStoreRecordMetadata` with `size` finalized to a non-optional
+/// value.
 #[napi(object)]
 pub struct KeyValueStoreRecordMetadata {
     pub key: String,
@@ -78,7 +78,44 @@ pub struct BareFallback {
     pub content_type: String,
 }
 
-/// One out-of-band ("bare") file to surface from `iterateKeys`: `name` is the
+/// A single self-describing page of keys returned by `listKeys`. Mirrors the
+/// core's `KvsListKeysResult` and crawlee's `KeyValueStoreListKeysResult`
+/// contract (upstream crawlee PR #3800): the page's `items` plus the metadata a
+/// caller needs to paginate.
+///
+/// `exclusiveStartKey` and `nextExclusiveStartKey` are optional (omitting
+/// `use_nullable` keeps them as `foo?: string` rather than `foo: string | null`,
+/// matching how `UnprocessedRequest.method` is handled): `exclusiveStartKey` is
+/// absent when the caller listed from the beginning, and `nextExclusiveStartKey`
+/// is set iff `isTruncated` is `true`.
+#[napi(object)]
+pub struct KeyValueStoreListKeysResult {
+    pub items: Vec<KeyValueStoreRecordMetadata>,
+    /// Number of items in this page (`items.length`). Typed `f64` (same
+    /// rationale as `KeyValueStoreRecordMetadata::size`) so it crosses the FFI
+    /// as a JS `number`.
+    pub count: f64,
+    /// The per-page limit the caller requested for this page.
+    pub limit: f64,
+    pub exclusive_start_key: Option<String>,
+    pub is_truncated: bool,
+    pub next_exclusive_start_key: Option<String>,
+}
+
+impl From<crawlee_storage::models::KvsListKeysResult> for KeyValueStoreListKeysResult {
+    fn from(r: crawlee_storage::models::KvsListKeysResult) -> Self {
+        Self {
+            items: r.items.into_iter().map(Into::into).collect(),
+            count: r.count as f64,
+            limit: r.limit as f64,
+            exclusive_start_key: r.exclusive_start_key,
+            is_truncated: r.is_truncated,
+            next_exclusive_start_key: r.next_exclusive_start_key,
+        }
+    }
+}
+
+/// One out-of-band ("bare") file to surface from `listKeys`: `name` is the
 /// file's on-disk key (e.g. `"INPUT.json"`) and `contentType` is what to report
 /// for it (an empty string reports the synthesized `application/octet-stream`).
 /// A bare file whose on-disk name already has a tracked record is not listed
@@ -148,7 +185,6 @@ pub struct RequestQueueMetadata {
     pub accessed_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub had_multiple_clients: bool,
     pub handled_request_count: u32,
     pub pending_request_count: u32,
     pub total_request_count: u32,
@@ -162,7 +198,6 @@ impl From<&crawlee_storage::models::RequestQueueMetadata> for RequestQueueMetada
             accessed_at: m.base.accessed_at,
             created_at: m.base.created_at,
             modified_at: m.base.modified_at,
-            had_multiple_clients: m.had_multiple_clients,
             handled_request_count: m.handled_request_count as u32,
             pending_request_count: m.pending_request_count as u32,
             total_request_count: m.total_request_count as u32,

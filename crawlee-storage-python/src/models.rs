@@ -226,7 +226,6 @@ typed_dict_model! {
     "RequestQueueMetadata",
     @base(base),
     {
-        "hadMultipleClients": "builtins.bool" => |this, _py| this.had_multiple_clients,
         "handledRequestCount": "builtins.int" => |this, _py| this.handled_request_count,
         "pendingRequestCount": "builtins.int" => |this, _py| this.pending_request_count,
         "totalRequestCount": "builtins.int" => |this, _py| this.total_request_count,
@@ -244,6 +243,34 @@ typed_dict_model! {
         // The core backfills a missing `size` from the value-file length on
         // read, so it is always populated by the time it reaches Python.
         "size": "builtins.int" => |this, _py| this.size.unwrap_or(0),
+    }
+}
+
+// ─── KVS list-keys result (single self-describing page) ─────────────────────
+//
+// Mirrors the core's `KvsListKeysResult` and crawlee's
+// `KeyValueStoreListKeysResult` (upstream crawlee PR #3800). Built via the
+// `to_py` builder (not `serde_to_py`) because its `items` are a list of nested
+// `KeyValueStoreRecordMetadata` dicts that we build with that model's own
+// `to_py`. `exclusiveStartKey` / `nextExclusiveStartKey` are `str | None`
+// (`None` when absent / not truncated).
+
+typed_dict_model! {
+    KvsListKeysResult<'a>(models::KvsListKeysResult),
+    "KeyValueStoreListKeysResult",
+    {
+        "items": "builtins.list[KeyValueStoreRecordMetadata]" => |this, py| {
+            let items = pyo3::types::PyList::empty(py);
+            for meta in &this.items {
+                items.append(KeyValueStoreRecordMetadata(meta).to_py(py)?)?;
+            }
+            items
+        },
+        "count": "builtins.int" => |this, _py| this.count,
+        "limit": "builtins.int" => |this, _py| this.limit,
+        "exclusiveStartKey": "builtins.str | None" => |this, _py| this.exclusive_start_key.clone(),
+        "isTruncated": "builtins.bool" => |this, _py| this.is_truncated,
+        "nextExclusiveStartKey": "builtins.str | None" => |this, _py| this.next_exclusive_start_key.clone(),
     }
 }
 
