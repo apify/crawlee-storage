@@ -7,7 +7,6 @@ from crawlee_storage._native import NONE_CONTENT_TYPE as NONE_CONTENT_TYPE
 __all__ = [
     "NONE_CONTENT_TYPE",
     "AddRequestsResponse",
-    "DatasetItemIterator",
     "DatasetItemsListPage",
     "DatasetMetadata",
     "FileSystemDatasetClient",

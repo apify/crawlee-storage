@@ -21,10 +21,6 @@ export interface KeyValueStoreStreamRecord {
 // Augment the napi-generated classes in `./index.d.ts` with the wrappers
 // defined in `./lib.js` (which `./index.d.ts` knows nothing about).
 declare module './index.js' {
-    interface DatasetItemIterator {
-        [Symbol.asyncIterator](): AsyncIterator<Record<string, unknown>>;
-    }
-
     interface FileSystemKeyValueStoreClient {
         /**
          * Get a tracked record's value as a ReadableStream of bytes. Returns null if

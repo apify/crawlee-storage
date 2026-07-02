@@ -784,13 +784,11 @@ if (!nativeBinding) {
 }
 
 const {
-    DatasetItemIterator,
     FileSystemDatasetClient,
     FileSystemKeyValueStoreClient,
     FileSystemRequestQueueClient,
     NONE_CONTENT_TYPE,
 } = nativeBinding;
-export { DatasetItemIterator };
 export { FileSystemDatasetClient };
 export { FileSystemKeyValueStoreClient };
 export { FileSystemRequestQueueClient };

@@ -5,15 +5,11 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use crawlee_storage::clock::{ClockRef, TestClock};
-use crawlee_storage::pagination::{DatasetItemSource, PageCursor};
-use pyo3::exceptions::{
-    PyFileNotFoundError, PyOSError, PyRuntimeError, PyStopAsyncIteration, PyTypeError, PyValueError,
-};
+use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 /// Pick a clock for a client given the `use_test_clock` flag passed across the
 /// FFI. Returns the abstract `ClockRef` to hand to the core client, plus the
@@ -96,38 +92,6 @@ fn serde_to_py<T: serde::Serialize>(py: Python<'_>, meta: &T) -> PyResult<Py<PyA
 // The metadata/record → Python dict builders now live next to their field
 // specs in `models.rs` (`models::DatasetMetadata::to_py`, etc.), so the dict a
 // caller receives and the `TypedDict` the stub promises are defined together.
-
-// ─── Dataset Item Iterator ──────────────────────────────────────────────────
-
-const DEFAULT_PAGE_SIZE: usize = 1000;
-
-#[gen_stub_pyclass]
-#[pyclass]
-struct DatasetItemIterator {
-    // The shared core cursor owns the page-buffering state machine; this
-    // wrapper only converts each yielded item to a Python dict and turns
-    // exhaustion into `StopAsyncIteration`.
-    cursor: Arc<Mutex<crawlee_storage::pagination::PageCursor<DatasetItemSource>>>,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl DatasetItemIterator {
-    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    #[gen_stub(override_return_type(type_repr = "dict[str, typing.Any]", imports = ("typing")))]
-    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let cursor = self.cursor.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            match cursor.lock().await.next().await.map_err(storage_err)? {
-                Some(item) => Python::attach(|py| value_to_py(py, &item)),
-                None => Err(PyStopAsyncIteration::new_err(())),
-            }
-        })
-    }
-}
 
 // ─── Dataset Client ─────────────────────────────────────────────────────────
 
@@ -249,27 +213,6 @@ impl FileSystemDatasetClient {
                 .map_err(storage_err)?;
             Python::attach(|py| serde_to_py(py, &page))
         })
-    }
-
-    #[pyo3(signature = (offset=0, limit=None, desc=false, skip_empty=false, page_size=None))]
-    fn iterate_items(
-        &self,
-        offset: usize,
-        limit: Option<usize>,
-        desc: bool,
-        skip_empty: bool,
-        page_size: Option<usize>,
-    ) -> DatasetItemIterator {
-        let source = DatasetItemSource::new(
-            self.inner.clone(),
-            offset,
-            page_size.unwrap_or(DEFAULT_PAGE_SIZE),
-            desc,
-            skip_empty,
-        );
-        DatasetItemIterator {
-            cursor: Arc::new(Mutex::new(PageCursor::new(source, limit))),
-        }
     }
 }
 
@@ -821,7 +764,6 @@ fn _crawlee_storage(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FileSystemDatasetClient>()?;
     m.add_class::<FileSystemKeyValueStoreClient>()?;
     m.add_class::<FileSystemRequestQueueClient>()?;
-    m.add_class::<DatasetItemIterator>()?;
     // The content-type sentinel for null KVS values (empty file on disk).
     // Exported so consumers reference the shared constant from the core crate
     // instead of hardcoding the `application/x-none` literal.

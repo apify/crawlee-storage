@@ -122,18 +122,25 @@ describe('FileSystemDatasetClient', () => {
         );
     });
 
-    it('should iterate items with iterator', async () => {
+    it('should page through items with getData', async () => {
         const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });
         }
 
-        const iterator = await client.iterateItems(0, null, false, false, 2);
+        // Drain every item by paging with a fixed page size, feeding the
+        // offset forward until a page comes back empty.
         const items: Record<string, unknown>[] = [];
-        let item;
-        while ((item = await iterator.next()) !== null) {
-            items.push(item);
+        let offset = 0;
+        const pageSize = 2;
+        for (;;) {
+            const page = await client.getData(offset, pageSize, false, false);
+            if (page.items.length === 0) {
+                break;
+            }
+            items.push(...page.items);
+            offset += page.items.length;
         }
 
         expect(items.length).toBe(5);
@@ -141,39 +148,31 @@ describe('FileSystemDatasetClient', () => {
         expect(items[4].index).toBe(5);
     });
 
-    it('should support for-await-of on item iterator', async () => {
+    it('should return items in order with a single getData call', async () => {
         const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });
         }
 
-        const iterator = await client.iterateItems(0, null, false, false, 2);
-        const items: Record<string, unknown>[] = [];
-        for await (const item of iterator) {
-            items.push(item);
-        }
+        const page = await client.getData(0, undefined, false, false);
+        const items = page.items;
 
         expect(items.length).toBe(5);
         expect(items[0].index).toBe(1);
         expect(items[4].index).toBe(5);
     });
 
-    it('should iterate items with limit', async () => {
+    it('should respect limit with getData', async () => {
         const client = await FileSystemDatasetClient.open(null, null, null, storageDir);
 
         for (let i = 1; i <= 5; i++) {
             await client.pushData({ index: i });
         }
 
-        const iterator = await client.iterateItems(0, 3, false, false, 2);
-        const items: Record<string, unknown>[] = [];
-        let item;
-        while ((item = await iterator.next()) !== null) {
-            items.push(item);
-        }
+        const page = await client.getData(0, 3, false, false);
 
-        expect(items.length).toBe(3);
+        expect(page.items.length).toBe(3);
     });
 
     it('should use default storage dir', async () => {

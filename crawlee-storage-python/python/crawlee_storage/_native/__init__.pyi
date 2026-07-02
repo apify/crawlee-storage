@@ -9,7 +9,6 @@ import typing
 __all__ = [
     "NONE_CONTENT_TYPE",
     "AddRequestsResponse",
-    "DatasetItemIterator",
     "DatasetItemsListPage",
     "DatasetMetadata",
     "FileSystemDatasetClient",
@@ -94,11 +93,6 @@ class UnprocessedRequest(typing.TypedDict):
 NONE_CONTENT_TYPE: builtins.str
 
 @typing.final
-class DatasetItemIterator:
-    def __aiter__(self) -> DatasetItemIterator: ...
-    async def __anext__(self) -> dict[str, typing.Any]: ...
-
-@typing.final
 class FileSystemDatasetClient:
     @property
     def path_to_dataset(self) -> pathlib.Path:
@@ -134,14 +128,6 @@ class FileSystemDatasetClient:
         desc: builtins.bool = False,
         skip_empty: builtins.bool = False,
     ) -> DatasetItemsListPage: ...
-    def iterate_items(
-        self,
-        offset: builtins.int = 0,
-        limit: builtins.int | None = None,
-        desc: builtins.bool = False,
-        skip_empty: builtins.bool = False,
-        page_size: builtins.int | None = None,
-    ) -> DatasetItemIterator: ...
 
 @typing.final
 class FileSystemKeyValueStoreClient:

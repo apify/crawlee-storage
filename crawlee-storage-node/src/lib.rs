@@ -4,11 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crawlee_storage::clock::{ClockRef, TestClock};
-use crawlee_storage::pagination::{DatasetItemSource, PageCursor};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use models::{
     AddRequestsResponse, DatasetItemsListPage, DatasetMetadata, KeyValueStoreListKeysResult,
@@ -172,48 +170,6 @@ impl FileSystemDatasetClient {
             .await
             .map_err(storage_err)?;
         Ok(DatasetItemsListPage::from(page))
-    }
-
-    #[napi]
-    pub async fn iterate_items(
-        &self,
-        offset: Option<u32>,
-        limit: Option<u32>,
-        desc: Option<bool>,
-        skip_empty: Option<bool>,
-        page_size: Option<u32>,
-    ) -> napi::Result<DatasetItemIterator> {
-        let source = DatasetItemSource::new(
-            self.inner.clone(),
-            offset.unwrap_or(0) as usize,
-            page_size.unwrap_or(1000) as usize,
-            desc.unwrap_or(false),
-            skip_empty.unwrap_or(false),
-        );
-        Ok(DatasetItemIterator {
-            cursor: Arc::new(Mutex::new(PageCursor::new(
-                source,
-                limit.map(|l| l as usize),
-            ))),
-        })
-    }
-}
-
-// ─── Dataset Item Iterator ──────────────────────────────────────────────────
-
-#[napi]
-pub struct DatasetItemIterator {
-    // The shared core cursor owns the page-buffering state machine; this
-    // wrapper only translates exhaustion into `null` for JS.
-    cursor: Arc<Mutex<PageCursor<DatasetItemSource>>>,
-}
-
-#[napi]
-impl DatasetItemIterator {
-    /// Fetch the next item. Returns null when iteration is exhausted.
-    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
-    pub async fn next(&self) -> napi::Result<Option<Value>> {
-        self.cursor.lock().await.next().await.map_err(storage_err)
     }
 }
 
