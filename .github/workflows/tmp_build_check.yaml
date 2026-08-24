@@ -1,0 +1,119 @@
+name: TEMP build matrix check
+
+# Temporary workflow: mirrors the build job of publish_to_npm.yaml (without
+# publishing) to prove all 8 targets actually build on GitHub runners before
+# this PR merges. It will be removed from the branch in a follow-up commit
+# once all builds are verified green.
+
+env:
+  DEBUG: napi:*
+  APP_NAME: fs-storage-native
+  MACOSX_DEPLOYMENT_TARGET: "10.13"
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+
+jobs:
+  build:
+    name: Build - ${{ matrix.settings.target }}
+    defaults:
+      run:
+        working-directory: crawlee-storage-node
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu
+          - host: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            build: npm run build -- --target aarch64-unknown-linux-gnu
+          - host: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            build: |-
+              set -e
+              cd crawlee-storage-node
+              npm ci
+              npm run build -- --target x86_64-unknown-linux-musl
+          - host: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            build: |-
+              set -e
+              rustup target add aarch64-unknown-linux-musl
+              cd crawlee-storage-node
+              npm ci
+              npm run build -- --target aarch64-unknown-linux-musl
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: npm run build -- --target aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Set up Rust
+        if: ${{ !matrix.settings.docker }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            crawlee-storage-node/target/
+          key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+
+      - name: Install dependencies
+        if: ${{ !matrix.settings.docker }}
+        run: npm ci
+
+      - name: Build
+        if: ${{ !matrix.settings.docker }}
+        shell: bash
+        run: ${{ matrix.settings.build }}
+
+      # The host cargo cache dirs are mounted into the image's CARGO_HOME so
+      # the "Cache cargo" step covers Docker builds too.
+      - name: Build in Docker
+        if: ${{ matrix.settings.docker }}
+        working-directory: .
+        run: |
+          docker run --rm --user 0:0 \
+            -v "$HOME/.cargo/git/db:/usr/local/cargo/git/db" \
+            -v "$HOME/.cargo/registry/cache:/usr/local/cargo/registry/cache" \
+            -v "$HOME/.cargo/registry/index:/usr/local/cargo/registry/index" \
+            -v "$GITHUB_WORKSPACE:/build" \
+            -w /build \
+            "${{ matrix.settings.docker }}" \
+            sh -c "${{ matrix.settings.build }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crawlee-storage-node/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
