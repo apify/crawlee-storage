@@ -55,6 +55,10 @@ jobs:
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
               export PATH="/usr/local/cargo/bin:$PATH"
               export RUSTFLAGS="-C target-feature=-crt-static"
+              # napi defaults the linker to the cross-toolchain name
+              # aarch64-linux-musl-gcc; in a native arm64 Alpine container the
+              # right linker is plain gcc.
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc
               cd crawlee-storage-node
               npm ci
               npm run build -- --target aarch64-unknown-linux-musl
