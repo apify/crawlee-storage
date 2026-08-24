@@ -45,26 +45,38 @@ jobs:
           - host: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             build: npm run build -- --target aarch64-unknown-linux-gnu
-          # The musl builds run inside the napi-rs Alpine builder image, which
-          # ships the Rust toolchain, the aarch64 musl cross toolchain, and the
-          # RUSTFLAGS=-C target-feature=-crt-static env required for cdylibs on
-          # musl. Paths in these scripts are relative to the repo root (the
-          # image's /build mount), and npm ci runs inside the container so that
+          # The musl builds run inside plain Alpine node containers, natively
+          # on each architecture's runner, with the stable Rust toolchain
+          # installed at build time (the napi-rs builder images are stale —
+          # their Node is too old for napi CLI v3). RUSTFLAGS=-C
+          # target-feature=-crt-static is required for cdylibs on musl.
+          # CARGO_HOME is pointed at /usr/local/cargo so the cache mounts in
+          # the "Build in Docker" step apply. Paths are relative to the repo
+          # root (the /build mount), and npm ci runs inside the container so
           # platform-specific optional deps (oxfmt, oxlint) resolve for musl.
           - host: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            docker: node:22-alpine
             build: |-
               set -e
+              apk add --no-cache build-base curl
+              export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="/usr/local/cargo/bin:$PATH"
+              export RUSTFLAGS="-C target-feature=-crt-static"
               cd crawlee-storage-node
               npm ci
               npm run build -- --target x86_64-unknown-linux-musl
-          - host: ubuntu-22.04
+          - host: ubuntu-22.04-arm
             target: aarch64-unknown-linux-musl
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            docker: node:22-alpine
             build: |-
               set -e
-              rustup target add aarch64-unknown-linux-musl
+              apk add --no-cache build-base curl
+              export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="/usr/local/cargo/bin:$PATH"
+              export RUSTFLAGS="-C target-feature=-crt-static"
               cd crawlee-storage-node
               npm ci
               npm run build -- --target aarch64-unknown-linux-musl
@@ -122,6 +134,8 @@ jobs:
       - name: Build in Docker
         if: ${{ matrix.settings.docker }}
         working-directory: .
+        env:
+          BUILD_SCRIPT: ${{ matrix.settings.build }}
         run: |
           docker run --rm --user 0:0 \
             -v "$HOME/.cargo/git/db:/usr/local/cargo/git/db" \
@@ -130,7 +144,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/build" \
             -w /build \
             "${{ matrix.settings.docker }}" \
-            sh -c "${{ matrix.settings.build }}"
+            sh -c "$BUILD_SCRIPT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
