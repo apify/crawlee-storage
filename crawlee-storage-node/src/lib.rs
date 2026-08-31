@@ -445,15 +445,13 @@ impl FileSystemKeyValueStoreClient {
         Ok(KeyValueStoreListKeysResult::from(result))
     }
 
-    /// Build a `file://` URL for `key`, or `undefined` if no value file exists for
-    /// it. Stats the encoded path; does not probe bare-file extensions, so the
-    /// caller resolves the on-disk key via `resolveExistingKey` first if needed.
+    /// Build a `file://` URL for `key`'s value file. Derived from the key alone —
+    /// the file need not exist, and bare-file extensions are not probed, so a
+    /// caller that needs the URL to point at the file on disk resolves the key
+    /// via `resolveExistingKey` first.
     #[napi]
-    pub async fn get_public_url(&self, key: String) -> Either<String, Undefined> {
-        match self.inner.get_public_url(&key).await {
-            Some(url) => Either::A(url),
-            None => Either::B(()),
-        }
+    pub async fn get_public_url(&self, key: String) -> String {
+        self.inner.get_public_url(&key)
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for

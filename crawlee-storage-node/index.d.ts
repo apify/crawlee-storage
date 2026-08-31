@@ -122,11 +122,12 @@ export declare class FileSystemKeyValueStoreClient {
         bareFallbacks?: Array<ListBareFallback> | undefined | null,
     ): Promise<KeyValueStoreListKeysResult>;
     /**
-     * Build a `file://` URL for `key`, or `undefined` if no value file exists for
-     * it. Stats the encoded path; does not probe bare-file extensions, so the
-     * caller resolves the on-disk key via `resolveExistingKey` first if needed.
+     * Build a `file://` URL for `key`'s value file. Derived from the key alone —
+     * the file need not exist, and bare-file extensions are not probed, so a
+     * caller that needs the URL to point at the file on disk resolves the key
+     * via `resolveExistingKey` first.
      */
-    getPublicUrl(key: string): Promise<string | undefined>;
+    getPublicUrl(key: string): Promise<string>;
     /**
      * Check whether a tracked record (value file + metadata sidecar) exists for
      * `key`. To also match out-of-band files with no sidecar, use

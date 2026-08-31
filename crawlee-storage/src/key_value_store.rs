@@ -569,21 +569,15 @@ impl FileSystemKeyValueStoreClient {
         Ok(results)
     }
 
-    /// Get a `file://` URL for a key, or `None` if no value file exists for it
-    /// (a single existence `stat` on the encoded path).
+    /// Build a `file://` URL for a key's value file.
     ///
-    /// Does **not** probe the conventional bare-file extensions: that *policy*
-    /// lives at the caller, which resolves the on-disk key via
-    /// [`resolve_existing_key`](Self::resolve_existing_key) and hands the matched
-    /// key here, preserving the "core = mechanism, caller = policy" split.
-    pub async fn get_public_url(&self, key: &str) -> Option<String> {
-        let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        if fs::metadata(&value_path).await.is_ok() {
-            Some(format!("file://{}", value_path.display()))
-        } else {
-            None
-        }
+    /// Does not stat the path: the URL is derived from the key alone, so it is
+    /// returned whether or not a file is there yet. Callers that care which
+    /// on-disk file a key maps to (the bare-file `INPUT` -> `INPUT.json` case)
+    /// resolve it via [`resolve_existing_key`](Self::resolve_existing_key) first
+    /// and hand the matched key here.
+    pub fn get_public_url(&self, key: &str) -> String {
+        format!("file://{}", self.path.join(encode_key(key)).display())
     }
 
     /// Get the file path and metadata for a record, without reading its contents.
@@ -803,7 +797,7 @@ impl FileSystemKeyValueStoreClient {
     ///
     /// The matched key is what a caller should pass to
     /// [`get_public_url`](Self::get_public_url) so the URL points at the file
-    /// that actually exists.
+    /// that exists.
     pub async fn resolve_existing_key(&self, key: &str, bare_fallbacks: &[&str]) -> Option<String> {
         if self.record_exists(key, true).await {
             return Some(key.to_string());
@@ -1989,9 +1983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_public_url_existence_aware() {
-        // (d) get_public_url returns Some(url) for an existing key, None for a
-        // missing one.
+    async fn test_get_public_url() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
@@ -1999,31 +1991,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Missing key → None.
-        assert_eq!(client.get_public_url("missing").await, None);
+        let expected = |key: &str| format!("file://{}", client.path().join(key).display());
 
-        // Existing tracked record → Some(url) that points at the encoded path.
+        // The URL is derived from the key, so it is returned for a key with no
+        // file on disk too.
+        assert_eq!(client.get_public_url("missing"), expected("missing"));
+
         client
             .set_value("my-key", b"v", "text/plain".to_string())
             .await
             .unwrap();
-        let url = client.get_public_url("my-key").await.unwrap();
-        let expected = format!(
-            "file://{}",
-            client.path().join(encode_key("my-key")).display()
+        assert_eq!(client.get_public_url("my-key"), expected("my-key"));
+
+        // Keys are percent-encoded the same way as the on-disk filename.
+        assert_eq!(
+            client.get_public_url("path/to/key"),
+            expected(&encode_key("path/to/key"))
         );
-        assert_eq!(url, expected);
 
-        // A bare value file (no sidecar) still has its file present, so a URL
-        // for the on-disk key (as resolve_existing_key would return) resolves.
-        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
-            .await
-            .unwrap();
-        assert!(client.get_public_url("INPUT.json").await.is_some());
-
-        // After delete, the URL is gone.
+        // Deleting the record does not invalidate the URL.
         client.delete_value("my-key").await.unwrap();
-        assert_eq!(client.get_public_url("my-key").await, None);
+        assert_eq!(client.get_public_url("my-key"), expected("my-key"));
     }
 
     #[tokio::test]

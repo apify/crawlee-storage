@@ -85,12 +85,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-android-arm64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -108,12 +108,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-android-arm-eabi/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -143,12 +143,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-win32-x64-gnu/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -166,12 +166,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-win32-x64-msvc/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -190,12 +190,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-win32-ia32-msvc/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -213,12 +213,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-win32-arm64-msvc/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -239,12 +239,12 @@ function requireNative() {
             const bindingPackageVersion =
                 require('@crawlee/fs-storage-native-darwin-universal/package.json').version;
             if (
-                bindingPackageVersion !== '0.1.5' &&
+                bindingPackageVersion !== '0.2.0' &&
                 process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                 process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
             ) {
                 throw new Error(
-                    `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                    `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                 );
             }
             return binding;
@@ -262,12 +262,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-darwin-x64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -285,12 +285,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-darwin-arm64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -312,12 +312,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-freebsd-x64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -335,12 +335,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-freebsd-arm64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -363,12 +363,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-x64-musl/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -386,12 +386,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-x64-gnu/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -411,12 +411,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-arm64-musl/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -434,12 +434,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-arm64-gnu/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -459,12 +459,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-arm-musleabihf/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -482,12 +482,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-arm-gnueabihf/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -507,12 +507,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-loong64-musl/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -530,12 +530,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-loong64-gnu/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -555,12 +555,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-riscv64-musl/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -578,12 +578,12 @@ function requireNative() {
                     const bindingPackageVersion =
                         require('@crawlee/fs-storage-native-linux-riscv64-gnu/package.json').version;
                     if (
-                        bindingPackageVersion !== '0.1.5' &&
+                        bindingPackageVersion !== '0.2.0' &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                         process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                     ) {
                         throw new Error(
-                            `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                            `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                         );
                     }
                     return binding;
@@ -602,12 +602,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-linux-ppc64-gnu/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -625,12 +625,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-linux-s390x-gnu/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -652,12 +652,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-openharmony-arm64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -675,12 +675,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-openharmony-x64/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;
@@ -698,12 +698,12 @@ function requireNative() {
                 const bindingPackageVersion =
                     require('@crawlee/fs-storage-native-openharmony-arm/package.json').version;
                 if (
-                    bindingPackageVersion !== '0.1.5' &&
+                    bindingPackageVersion !== '0.2.0' &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
                     process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0'
                 ) {
                     throw new Error(
-                        `Native binding package version mismatch, expected 0.1.5 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
+                        `Native binding package version mismatch, expected 0.2.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
                     );
                 }
                 return binding;

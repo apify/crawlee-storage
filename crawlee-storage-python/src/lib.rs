@@ -473,20 +473,21 @@ impl FileSystemKeyValueStoreClient {
         })
     }
 
-    /// Build a `file://` URL for `key`, or `None` if no value file exists for it
-    /// (matching the crawlee `str | None` contract). For the bare-file
-    /// (`INPUT` -> `INPUT.json`) case the caller resolves the on-disk key via
-    /// `resolve_existing_key` first and passes that key here.
-    #[gen_stub(override_return_type(type_repr = "builtins.str | None"))]
+    /// Build a `file://` URL for `key`'s value file. Derived from the key alone —
+    /// the file need not exist, and bare-file extensions are not probed, so a
+    /// caller that needs the URL to point at the file on disk resolves the key
+    /// via `resolve_existing_key` first.
+    #[gen_stub(override_return_type(type_repr = "builtins.str"))]
     fn get_public_url<'py>(
         &self,
         py: Python<'py>,
         key: String,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(client.get_public_url(&key).await)
-        })
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { Ok(client.get_public_url(&key)) },
+        )
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for

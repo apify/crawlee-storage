@@ -244,12 +244,12 @@ class FileSystemKeyValueStoreClient:
         bare key back via `resolve_value` / `resolve_existing_key`, not
         `get_value`.
         """
-    async def get_public_url(self, key: builtins.str) -> builtins.str | None:
+    async def get_public_url(self, key: builtins.str) -> builtins.str:
         r"""
-        Build a `file://` URL for `key`, or `None` if no value file exists for it
-        (matching the crawlee `str | None` contract). For the bare-file
-        (`INPUT` -> `INPUT.json`) case the caller resolves the on-disk key via
-        `resolve_existing_key` first and passes that key here.
+        Build a `file://` URL for `key`'s value file. Derived from the key alone —
+        the file need not exist, and bare-file extensions are not probed, so a
+        caller that needs the URL to point at the file on disk resolves the key
+        via `resolve_existing_key` first.
         """
     async def record_exists(self, key: builtins.str) -> builtins.bool:
         r"""

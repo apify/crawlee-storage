@@ -253,18 +253,17 @@ async def test_list_keys_unknown_cursor_raises(storage_dir: str) -> None:
         await client.list_keys(exclusive_start_key="nope")
 
 
-async def test_get_public_url_is_existence_aware(storage_dir: str) -> None:
-    """`get_public_url` returns a file:// URL for an existing key and None for a
-    missing one (matching the crawlee `str | None` contract)."""
+async def test_get_public_url_does_not_require_the_file(storage_dir: str) -> None:
+    """`get_public_url` derives the URL from the key alone, so it never returns
+    None and does not change once the record is written."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
 
-    assert await client.get_public_url("missing") is None
-
-    await client.set_value("my-key", b"v", "text/plain")
     url = await client.get_public_url("my-key")
-    assert url is not None
     assert url.startswith("file://")
     assert "my-key" in url
+
+    await client.set_value("my-key", b"v", "text/plain")
+    assert await client.get_public_url("my-key") == url
 
 
 async def test_rq_open_assumes_single_access_by_default(storage_dir: str) -> None:

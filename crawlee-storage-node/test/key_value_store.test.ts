@@ -178,16 +178,16 @@ describe('FileSystemKeyValueStoreClient', () => {
     it('should get public URL', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
-        // getPublicUrl is existence-aware: a missing record yields undefined.
-        expect(await client.getPublicUrl('my-key')).toBeUndefined();
-
-        // Once the record exists, it returns a file:// URL.
-        await client.setValue('my-key', Buffer.from('v'));
+        // The URL is derived from the key, so it is returned before the record
+        // exists and stays the same afterwards.
         const url = await client.getPublicUrl('my-key');
         expect(url).toMatch(/^file:\/\//);
         // Hyphen is in the unreserved set (quote(safe='') keeps `. - _ ~`), so it
         // is preserved verbatim rather than encoded to %2D.
         expect(url).toContain('my-key');
+
+        await client.setValue('my-key', Buffer.from('v'));
+        expect(await client.getPublicUrl('my-key')).toBe(url);
     });
 
     it('should purge all values but keep metadata', async () => {
