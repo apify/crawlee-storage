@@ -12,8 +12,8 @@ permissions:
 on:
   # Dispatch only. This is the single workflow configured in npm OIDC trusted
   # publishing, and it is invoked by the release orchestrators (manual_release_node.yaml
-  # and on_master.yaml) via apify/actions/execute-workflow. It expects the version in
-  # package.json at `ref` to already be set.
+  # and on_main.yaml) via apify/actions/execute-workflow. It expects package.json at `ref`
+  # to carry the final version, pre-release suffix included.
   workflow_dispatch:
     inputs:
       ref:
@@ -157,6 +157,16 @@ jobs:
           path: crawlee-storage-node/${{ env.APP_NAME }}.*.node
           if-no-files-found: error
 
+      # index.js is generated rather than committed, because it bakes in the package version.
+      # Every target produces an identical copy; the gnu build is an arbitrary pick.
+      - name: Upload JS binding
+        if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: js-binding
+          path: crawlee-storage-node/index.js
+          if-no-files-found: error
+
   publish:
     name: Publish
     needs: [build]
@@ -182,10 +192,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Download all artifacts
+      - name: Download native binaries
         uses: actions/download-artifact@v8
         with:
+          pattern: bindings-*
           path: artifacts
+
+      - name: Download JS binding
+        uses: actions/download-artifact@v8
+        with:
+          name: js-binding
+          path: crawlee-storage-node
 
       - name: Move artifacts
         run: npm run artifacts
@@ -193,17 +210,6 @@ jobs:
       - name: List packages
         run: ls -R ./npm
         shell: bash
-
-      # Tack on a `-beta.N` suffix for prerelease publishes. The upstream
-      # git-cliff-release action emits bare versions (e.g. 0.1.5) for
-      # `release_type: prerelease`, so we patch the version here right before
-      # publishing. The committed package.json keeps the bare version.
-      # See .github/scripts/before-beta-release.js for the gory details.
-      - name: Bump prerelease version
-        if: ${{ inputs.tag == 'next' }}
-        run: |
-          node ../.github/scripts/before-beta-release.js
-          npm run copy-version
 
       - name: Publish to npm
         run: npm publish --access public --provenance --tag ${{ inputs.tag }}

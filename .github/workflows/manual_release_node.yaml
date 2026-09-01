@@ -45,13 +45,18 @@ jobs:
       changelog: ${{ steps.metadata.outputs.changelog }}
       is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
       npm_dist_tag: ${{ steps.metadata.outputs.is_prerelease == 'true' && 'next' || 'latest' }}
+      package_version: ${{ steps.metadata.outputs.is_prerelease == 'true' && steps.metadata.outputs.prerelease_version || steps.metadata.outputs.version_number }}
     steps:
-      - uses: apify/actions/git-cliff-release@v1.2.0
+      - uses: apify/actions/git-cliff-release@v1.5.0
         id: metadata
         name: Prepare release metadata
         with:
           release_type: ${{ github.event.inputs.release_type }}
           custom_version: ${{ github.event.inputs.custom_version }}
+          # Only consulted for release_type: prerelease. The published version has to be known
+          # before the release commit, because the generated index.js bakes it in.
+          prerelease_registry: npm
+          prerelease_package: "@crawlee/fs-storage-native"
           existing_changelog_path: CHANGELOG.md
 
   update_changelog:
@@ -78,7 +83,7 @@ jobs:
       - name: Bump package version
         working-directory: crawlee-storage-node
         run: |
-          npm version --no-git-tag-version --allow-same-version "${{ needs.release_metadata.outputs.version_number }}"
+          npm version --no-git-tag-version --allow-same-version "${{ needs.release_metadata.outputs.package_version }}"
           npm run copy-version
 
       - name: Write changelog
@@ -93,15 +98,15 @@ jobs:
         id: commit
         uses: apify/actions/signed-commit@v1.2.0
         with:
-          message: "chore(release): Set package version to ${{ needs.release_metadata.outputs.version_number }}${{ needs.release_metadata.outputs.is_prerelease == 'true' && '' || ' and update changelog' }} [skip ci]"
+          message: "chore(release): Set package version to ${{ needs.release_metadata.outputs.package_version }}${{ needs.release_metadata.outputs.is_prerelease == 'true' && '' || ' and update changelog' }} [skip ci]"
           pull: "--rebase --autostash"
           github-token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
   github_release:
     name: GitHub release
-    # No GitHub release for prereleases — the committed version (e.g. 0.1.6)
-    # doesn't match the actual npm-published version (e.g. 0.1.6-beta.0), and
-    # creating a v0.1.6 tag here would block the next stable release.
+    # No GitHub release for prereleases — tag_name is the bare version (e.g. v0.1.6) while the
+    # published version is 0.1.6-beta.N, and creating that tag here would block the next stable
+    # release.
     if: needs.release_metadata.outputs.is_prerelease != 'true'
     needs: [release_metadata, update_changelog]
     runs-on: ubuntu-latest

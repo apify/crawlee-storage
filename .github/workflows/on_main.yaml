@@ -31,14 +31,18 @@ jobs:
     needs: [code_checks]
     runs-on: ubuntu-latest
     outputs:
-      version_number: ${{ steps.metadata.outputs.version_number }}
+      prerelease_version: ${{ steps.metadata.outputs.prerelease_version }}
       changelog: ${{ steps.metadata.outputs.changelog }}
     steps:
-      - uses: apify/actions/git-cliff-release@v1.2.0
+      - uses: apify/actions/git-cliff-release@v1.5.0
         id: metadata
         name: Prepare release metadata
         with:
           release_type: prerelease
+          # The published version has to be known before the release commit, because the
+          # generated index.js bakes it in and is built from that commit.
+          prerelease_registry: npm
+          prerelease_package: "@crawlee/fs-storage-native"
           existing_changelog_path: CHANGELOG.md
 
   update_changelog:
@@ -67,7 +71,7 @@ jobs:
       - name: Bump package version
         working-directory: crawlee-storage-node
         run: |
-          npm version --no-git-tag-version --allow-same-version "${{ needs.release_metadata.outputs.version_number }}"
+          npm version --no-git-tag-version --allow-same-version "${{ needs.release_metadata.outputs.prerelease_version }}"
           npm run copy-version
 
       - name: Write changelog
@@ -81,7 +85,7 @@ jobs:
         id: commit
         uses: apify/actions/signed-commit@v1.2.0
         with:
-          message: "chore(release): Set pre-release version to ${{ needs.release_metadata.outputs.version_number }} and update changelog [skip ci]"
+          message: "chore(release): Set pre-release version to ${{ needs.release_metadata.outputs.prerelease_version }} and update changelog [skip ci]"
           pull: "--rebase --autostash"
           github-token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
