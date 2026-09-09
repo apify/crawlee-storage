@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - Do not check existence in get_public_url ([#75](https://github.com/apify/crawlee-storage/pull/75)) ([730d905](https://github.com/apify/crawlee-storage/commit/730d905b86388c08f131c2fede6fb329015c06a0)) by [@janbuchar](https://github.com/janbuchar)
+- Fix ordering after key decoding in KeyValueStore ([#77](https://github.com/apify/crawlee-storage/pull/77)) ([dbaf891](https://github.com/apify/crawlee-storage/commit/dbaf89101c8a8a36e9f856ca209b232074d6590e)) by [@janbuchar](https://github.com/janbuchar)
 
 
 <!-- git-cliff-unreleased-end -->
