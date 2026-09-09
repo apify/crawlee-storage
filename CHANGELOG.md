@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 <!-- git-cliff-unreleased-start -->
 ## 0.2.1 - **not yet released**
 
+### 🚀 Features
+
+- Allow storing the filename in key-value store item metadata to override the default one ([#78](https://github.com/apify/crawlee-storage/pull/78)) ([1373316](https://github.com/apify/crawlee-storage/commit/13733161a3b6ecacdbc4255d334b632ede9b40cf)) by [@janbuchar](https://github.com/janbuchar)
+
 ### 🐛 Bug Fixes
 
 - Do not check existence in get_public_url ([#75](https://github.com/apify/crawlee-storage/pull/75)) ([730d905](https://github.com/apify/crawlee-storage/commit/730d905b86388c08f131c2fede6fb329015c06a0)) by [@janbuchar](https://github.com/janbuchar)
