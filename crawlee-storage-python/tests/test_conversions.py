@@ -205,6 +205,32 @@ async def test_resolve_existing_key_returns_matched_key(storage_dir: str) -> Non
     assert await client.resolve_existing_key("nope", extensions) is None
 
 
+async def test_set_value_binds_key_to_a_filename(storage_dir: str) -> None:
+    """`filename` binds a key to a file whose name doesn't match it, and the read
+    paths follow the binding rather than the key's own encoded name."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    kvs_path = Path(client.path_to_kvs)
+
+    payload = b'{"x":1}'
+    await client.set_value("INPUT", payload, "application/json", "input.json")
+
+    assert (kvs_path / "input.json").read_bytes() == payload
+    assert not (kvs_path / "INPUT").exists()
+
+    record = await client.get_value("INPUT")
+    assert record is not None
+    assert record["key"] == "INPUT"
+    assert record["value"] == payload
+    assert record["contentType"] == "application/json"
+    assert await client.record_exists("INPUT")
+    assert await client.get_public_url("INPUT") == f"file://{kvs_path / 'input.json'}"
+
+    assert [entry["key"] for entry in await _drain_keys(client)] == ["INPUT"]
+
+    with pytest.raises(ValueError, match="single path component"):
+        await client.set_value("INPUT", payload, "application/json", "../escape")
+
+
 async def test_list_keys_valid_cursor_paginates(storage_dir: str) -> None:
     """A valid, existing `exclusive_start_key` still paginates correctly."""
     client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)

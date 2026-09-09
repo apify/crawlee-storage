@@ -134,6 +134,20 @@ pub struct KeyValueStoreRecordMetadata {
     pub content_type: String,
     #[serde(default)]
     pub size: Option<usize>,
+    /// On-disk name of the value file, when it is not the encoded `key`.
+    ///
+    /// Binds a key to a file whose name doesn't match it 1:1 (`INPUT` →
+    /// `input.json`). The sidecar itself is always named after the key, so a
+    /// key lookup stays a single stat. Absent for the ordinary case where the
+    /// value file *is* the encoded key, and never written then, so sidecars
+    /// stay byte-identical to what older versions produced.
+    ///
+    /// Used verbatim: unlike `key`, it is never percent-encoded, since the
+    /// point is to name a file someone else already named. Constrained to a
+    /// single path component that is not itself a metadata filename — see
+    /// [`crate::utils::validate_filename`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 /// A fully-read KVS record: metadata with a *guaranteed* non-optional `size`

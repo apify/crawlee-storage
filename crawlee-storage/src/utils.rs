@@ -185,6 +185,33 @@ pub const METADATA_FILENAME: &str = "__metadata__.json";
 /// hardcoding the literal string.
 pub const NONE_CONTENT_TYPE: &str = "application/x-none";
 
+/// Validate the on-disk `filename` a KVS record binds its key to.
+///
+/// Must be a single normal path component, so neither a `set_value` argument
+/// nor a sidecar written by another tool can point a key at a file outside the
+/// store directory. Metadata filenames are rejected too: a record bound to
+/// `__metadata__.json` would overwrite the store's own metadata, and one bound
+/// to `{anything}.__metadata__.json` would masquerade as a sidecar in
+/// directory listings.
+pub fn validate_filename(filename: &str) -> Result<&str> {
+    let mut components = Path::new(filename).components();
+    let single_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !single_component {
+        return Err(StorageError::InvalidArgs(format!(
+            "Record filename must be a single path component, got '{filename}'"
+        )));
+    }
+    if filename == METADATA_FILENAME || filename.ends_with(&format!(".{METADATA_FILENAME}")) {
+        return Err(StorageError::InvalidArgs(format!(
+            "Record filename must not be a metadata filename, got '{filename}'"
+        )));
+    }
+    Ok(filename)
+}
+
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
 pub fn validate_exclusive_args(
