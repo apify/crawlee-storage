@@ -649,6 +649,21 @@ impl FileSystemRequestQueueClient {
     }
 
     #[napi]
+    pub async fn prolong_request_lock(&self, request_id: String, secs: f64) -> napi::Result<bool> {
+        let millis = secs * 1000.0;
+        if !secs.is_finite() || millis < 1.0 || millis > i64::MAX as f64 {
+            return Err(napi::Error::from_reason(
+                "secs must be a finite positive duration of at least one millisecond".to_string(),
+            ));
+        }
+
+        self.inner
+            .prolong_request_lock(&request_id, chrono::Duration::milliseconds(millis as i64))
+            .await
+            .map_err(storage_err)
+    }
+
+    #[napi]
     pub async fn persist_state(&self) {
         self.inner.persist_state().await;
     }

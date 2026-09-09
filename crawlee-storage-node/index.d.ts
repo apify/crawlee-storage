@@ -189,6 +189,7 @@ export declare class FileSystemRequestQueueClient {
     isEmpty(): Promise<boolean>;
     isFinished(): Promise<boolean>;
     setExpectedRequestProcessingTime(secs: number): Promise<void>;
+    prolongRequestLock(requestId: string, secs: number): Promise<boolean>;
     persistState(): Promise<void>;
 }
 
