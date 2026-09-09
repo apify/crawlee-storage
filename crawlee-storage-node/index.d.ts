@@ -85,8 +85,21 @@ export declare class FileSystemKeyValueStoreClient {
      * points at the file that exists.
      */
     resolveExistingKey(key: string, bareFallbacks: Array<string>): Promise<string | undefined>;
-    /** Set a value from a Buffer. */
-    setValue(key: string, value: Buffer, contentType?: string | undefined | null): Promise<void>;
+    /**
+     * Set a value from a Buffer.
+     *
+     * `filename` binds the key to that on-disk name instead of the key itself
+     * (`INPUT` → `input.json`), recorded in the sidecar so every read path
+     * finds it. It is used as-is — unlike the key, it is not percent-encoded —
+     * and must be a plain filename directly inside the store directory.
+     * Re-binding a key deletes the file it was bound to before.
+     */
+    setValue(
+        key: string,
+        value: Buffer,
+        contentType?: string | undefined | null,
+        filename?: string | undefined | null,
+    ): Promise<void>;
     deleteValue(key: string): Promise<void>;
     /**
      * List a single self-describing page of keys.
@@ -122,10 +135,11 @@ export declare class FileSystemKeyValueStoreClient {
         bareFallbacks?: Array<ListBareFallback> | undefined | null,
     ): Promise<KeyValueStoreListKeysResult>;
     /**
-     * Build a `file://` URL for `key`'s value file. Derived from the key alone —
-     * the file need not exist, and bare-file extensions are not probed, so a
-     * caller that needs the URL to point at the file on disk resolves the key
-     * via `resolveExistingKey` first.
+     * Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
+     * `filename`, but does not stat the file, so the URL is returned whether
+     * or not anything is there yet. Bare-file extensions are not probed — a
+     * caller chasing a sidecar-less file resolves the key via
+     * `resolveExistingKey` first.
      */
     getPublicUrl(key: string): Promise<string>;
     /**

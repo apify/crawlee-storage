@@ -320,16 +320,26 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Set a value from a Buffer.
+    ///
+    /// `filename` binds the key to that on-disk name instead of the key itself
+    /// (`INPUT` → `input.json`), recorded in the sidecar so every read path
+    /// finds it. It is used as-is — unlike the key, it is not percent-encoded —
+    /// and must be a plain filename directly inside the store directory.
+    /// Re-binding a key deletes the file it was bound to before.
     #[napi]
     pub async fn set_value(
         &self,
         key: String,
         value: Buffer,
         content_type: Option<String>,
+        filename: Option<String>,
     ) -> napi::Result<()> {
         let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
         let inner = self.inner.clone();
-        inner.set_value(&key, &value, ct).await.map_err(storage_err)
+        inner
+            .set_value(&key, &value, ct, filename.as_deref())
+            .await
+            .map_err(storage_err)
     }
 
     /// Internal: get file info for a record (path + metadata), used by the JS
@@ -372,6 +382,7 @@ impl FileSystemKeyValueStoreClient {
         temp_path: String,
         size: u32,
         content_type: String,
+        filename: Option<String>,
     ) -> napi::Result<()> {
         let inner = self.inner.clone();
         inner
@@ -380,6 +391,7 @@ impl FileSystemKeyValueStoreClient {
                 std::path::Path::new(&temp_path),
                 size as usize,
                 content_type,
+                filename.as_deref(),
             )
             .await
             .map_err(storage_err)
@@ -445,13 +457,14 @@ impl FileSystemKeyValueStoreClient {
         Ok(KeyValueStoreListKeysResult::from(result))
     }
 
-    /// Build a `file://` URL for `key`'s value file. Derived from the key alone —
-    /// the file need not exist, and bare-file extensions are not probed, so a
-    /// caller that needs the URL to point at the file on disk resolves the key
-    /// via `resolveExistingKey` first.
+    /// Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
+    /// `filename`, but does not stat the file, so the URL is returned whether
+    /// or not anything is there yet. Bare-file extensions are not probed — a
+    /// caller chasing a sidecar-less file resolves the key via
+    /// `resolveExistingKey` first.
     #[napi]
     pub async fn get_public_url(&self, key: String) -> String {
-        self.inner.get_public_url(&key)
+        self.inner.get_public_url(&key).await
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for

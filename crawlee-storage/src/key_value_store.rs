@@ -11,8 +11,8 @@ use crate::models::{
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, decode_key, encode_key, find_storage_by_id,
-    json_dumps_value, validate_exclusive_args, validate_subdirectory, Result, StorageError,
-    METADATA_FILENAME,
+    json_dumps_value, validate_exclusive_args, validate_filename, validate_subdirectory, Result,
+    StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -30,6 +30,11 @@ const DEFAULT_NAME: &str = "default";
 /// ├── {encoded_key}.__metadata__.json    (record metadata sidecar)
 /// └── ...
 /// ```
+///
+/// A record's sidecar is always named after its key, but the value file need
+/// not be: a sidecar carrying
+/// [`filename`](KeyValueStoreRecordMetadata::filename) binds its key to that
+/// name instead (`INPUT` → `input.json`).
 pub struct FileSystemKeyValueStoreClient {
     metadata: Mutex<KeyValueStoreMetadata>,
     path: PathBuf,
@@ -129,6 +134,32 @@ impl FileSystemKeyValueStoreClient {
         self.path.join(METADATA_FILENAME)
     }
 
+    /// Path of the metadata sidecar for an encoded key.
+    ///
+    /// Always derived from the key, never from the value file's name, so a key
+    /// lookup stays a single stat even when the record binds a `filename`.
+    fn sidecar_path(&self, encoded_key: &str) -> PathBuf {
+        self.path.join(format!("{encoded_key}.{METADATA_FILENAME}"))
+    }
+
+    /// Read a key's sidecar, or `None` when it has none.
+    async fn read_sidecar(&self, encoded_key: &str) -> Result<Option<KeyValueStoreRecordMetadata>> {
+        match fs::read_to_string(self.sidecar_path(encoded_key)).await {
+            Ok(content) => Ok(Some(serde_json::from_str(&content)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The value file a record lives in: its bound `filename` when it has one,
+    /// else the encoded key.
+    fn value_path(&self, encoded_key: &str, filename: Option<&str>) -> Result<PathBuf> {
+        Ok(match filename {
+            Some(filename) => self.path.join(validate_filename(filename)?),
+            None => self.path.join(encoded_key),
+        })
+    }
+
     /// Delete the entire store directory.
     pub async fn drop_storage(&self) -> Result<()> {
         if self.path.exists() {
@@ -139,11 +170,12 @@ impl FileSystemKeyValueStoreClient {
 
     /// Delete all value files but keep store metadata.
     ///
-    /// Any key listed in `keep` is spared: both its value file and its metadata
-    /// sidecar are left on disk. Matching is by exact key (encoded to its on-disk
-    /// filename via [`encode_key`]) — no extension globbing or stem matching. A
-    /// caller wanting to preserve, say, both `INPUT` and `INPUT.json` must pass
-    /// both as separate keys. The store-level `__metadata__.json` is always kept.
+    /// Any key listed in `keep` is spared: its value file (wherever its sidecar
+    /// binds it) and its metadata sidecar are left on disk. Matching is by exact
+    /// key (encoded to its on-disk filename via [`encode_key`]) — no extension
+    /// globbing or stem matching. A caller wanting to preserve, say, both
+    /// `INPUT` and `INPUT.json` must pass both as separate keys. The
+    /// store-level `__metadata__.json` is always kept.
     pub async fn purge(&self, keep: &[String]) -> Result<()> {
         let mut meta = self.metadata.lock().await;
 
@@ -153,6 +185,13 @@ impl FileSystemKeyValueStoreClient {
         keep_files.insert(METADATA_FILENAME.to_string());
         for key in keep {
             let encoded = encode_key(key);
+            // A bound value file lives under a name the key alone doesn't
+            // reveal; an unreadable sidecar just means we can't spare it.
+            if let Ok(Some(record_meta)) = self.read_sidecar(&encoded).await {
+                if let Some(Ok(filename)) = record_meta.filename.as_deref().map(validate_filename) {
+                    keep_files.insert(filename.to_string());
+                }
+            }
             keep_files.insert(format!("{encoded}.{METADATA_FILENAME}"));
             keep_files.insert(encoded);
         }
@@ -189,8 +228,16 @@ impl FileSystemKeyValueStoreClient {
     /// Delete a value by key.
     pub async fn delete_value(&self, key: &str) -> Result<()> {
         let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+        let sidecar_path = self.sidecar_path(&encoded);
+        // A corrupt or invalid sidecar must not block deletion: fall back to the
+        // key's own file and drop the sidecar either way.
+        let value_path = self
+            .read_sidecar(&encoded)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|meta| self.value_path(&encoded, meta.filename.as_deref()).ok())
+            .unwrap_or_else(|| self.path.join(&encoded));
 
         if value_path.exists() {
             fs::remove_file(&value_path).await?;
@@ -359,10 +406,12 @@ impl FileSystemKeyValueStoreClient {
     /// Tracked records (value file + sidecar) and caller-declared bare files (see
     /// [`iterate_keys_page`](Self::iterate_keys_page) for the `(name,
     /// content_type)` shape) are merged into one stream sorted by key — not by
-    /// encoded filename, which puts `%XX` escapes before every character
     /// `encode_key` leaves safe and would let a cursor skip keys. A bare file
     /// whose on-disk name already has a tracked record is dropped (the tracked
-    /// record wins).
+    /// record wins) — matched by name, so a record that *binds* that name via
+    /// its sidecar's `filename` does not suppress it, and the file is listed
+    /// both under the binding key and under its own name. Detecting that would
+    /// mean reading every sidecar in the store on every page.
     async fn list_keys_raw(
         &self,
         exclusive_start_key: Option<&str>,
@@ -377,9 +426,10 @@ impl FileSystemKeyValueStoreClient {
             /// Ordering basis; decoded from the filename so sorting reads no
             /// sidecars.
             sort_key: String,
-            /// Sidecar path to read lazily for tracked records; `None` for bare
-            /// files whose metadata is already finalized in `meta`.
-            sidecar_path: Option<PathBuf>,
+            /// Encoded key of a tracked record, whose sidecar is read lazily;
+            /// `None` for bare files whose metadata is already finalized in
+            /// `meta`.
+            encoded_key: Option<String>,
             /// Pre-resolved metadata for bare files; `None` for tracked records.
             meta: Option<KeyValueStoreRecordMetadata>,
         }
@@ -408,7 +458,7 @@ impl FileSystemKeyValueStoreClient {
                             .to_string();
                         candidates.push(Candidate {
                             sort_key: decode_key(&encoded_name),
-                            sidecar_path: Some(path),
+                            encoded_key: Some(encoded_name.clone()),
                             meta: None,
                         });
                         tracked_value_names.insert(encoded_name);
@@ -450,11 +500,12 @@ impl FileSystemKeyValueStoreClient {
             };
             candidates.push(Candidate {
                 sort_key: (*name).to_string(),
-                sidecar_path: None,
+                encoded_key: None,
                 meta: Some(KeyValueStoreRecordMetadata {
                     key: (*name).to_string(),
                     content_type: resolved_type,
                     size: Some(file_meta.len() as usize),
+                    filename: None,
                 }),
             });
         }
@@ -473,17 +524,19 @@ impl FileSystemKeyValueStoreClient {
             let mut record_meta = match candidate.meta {
                 Some(meta) => meta,
                 None => {
-                    let sidecar_path = candidate
-                        .sidecar_path
-                        .as_ref()
-                        .expect("tracked candidate has a sidecar path");
-                    let content = fs::read_to_string(sidecar_path).await?;
-                    match serde_json::from_str::<KeyValueStoreRecordMetadata>(&content) {
-                        Ok(meta) => meta,
+                    let encoded_key = candidate
+                        .encoded_key
+                        .as_deref()
+                        .expect("tracked candidate has an encoded key");
+                    // A sidecar that vanished or won't parse mid-listing is
+                    // skipped rather than failing the whole page.
+                    match self.read_sidecar(encoded_key).await {
+                        Ok(Some(meta)) => meta,
+                        Ok(None) => continue,
                         Err(e) => {
                             warn!(
-                                "Failed to parse sidecar metadata {}: {}",
-                                sidecar_path.display(),
+                                "Failed to read sidecar metadata {}: {}",
+                                self.sidecar_path(encoded_key).display(),
                                 e
                             );
                             continue;
@@ -534,15 +587,12 @@ impl FileSystemKeyValueStoreClient {
             // (this library always writes it, but crawlee-JS / older
             // Python clients may not) by stating the value file. Bare files
             // already carry a stated `size`, so this only ever touches
-            // tracked records. The value file is the sidecar path minus the
-            // `.{METADATA_FILENAME}` suffix.
+            // tracked records.
             if record_meta.size.is_none() {
-                if let Some(sidecar_path) = candidate.sidecar_path.as_ref() {
-                    let value_path = sidecar_path
-                        .to_string_lossy()
-                        .strip_suffix(&metadata_suffix)
-                        .map(PathBuf::from);
-                    if let Some(value_path) = value_path {
+                if let Some(encoded_key) = candidate.encoded_key.as_deref() {
+                    if let Ok(value_path) =
+                        self.value_path(encoded_key, record_meta.filename.as_deref())
+                    {
                         if let Ok(file_meta) = fs::metadata(&value_path).await {
                             record_meta.size = Some(file_meta.len() as usize);
                         }
@@ -568,13 +618,24 @@ impl FileSystemKeyValueStoreClient {
 
     /// Build a `file://` URL for a key's value file.
     ///
-    /// Does not stat the path: the URL is derived from the key alone, so it is
-    /// returned whether or not a file is there yet. Callers that care which
-    /// on-disk file a key maps to (the bare-file `INPUT` -> `INPUT.json` case)
-    /// resolve it via [`resolve_existing_key`](Self::resolve_existing_key) first
-    /// and hand the matched key here.
-    pub fn get_public_url(&self, key: &str) -> String {
-        format!("file://{}", self.path.join(encode_key(key)).display())
+    /// Honors the sidecar's bound `filename`, but does not stat the value file
+    /// itself: the URL is returned whether or not anything is there yet.
+    /// Callers chasing a *bare* file (the sidecar-less `INPUT` -> `INPUT.json`
+    /// case) resolve it via [`resolve_existing_key`](Self::resolve_existing_key)
+    /// first and hand the matched key here.
+    pub async fn get_public_url(&self, key: &str) -> String {
+        let encoded = encode_key(key);
+        let filename = self
+            .read_sidecar(&encoded)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.filename)
+            .filter(|filename| validate_filename(filename).is_ok());
+        format!(
+            "file://{}",
+            self.path.join(filename.unwrap_or(encoded)).display()
+        )
     }
 
     /// Get the file path and metadata for a record, without reading its contents.
@@ -586,6 +647,9 @@ impl FileSystemKeyValueStoreClient {
     /// The client is a pure byte transport: it returns the raw value bytes (via
     /// the path) and the verbatim `content_type` from the sidecar. Parsing and
     /// value semantics live at the `KeyValueStore` frontend.
+    ///
+    /// The returned path is the sidecar's bound `filename` when it has one,
+    /// else the encoded key.
     ///
     /// When `require_record_metadata` is `true` (the normal case), a record is
     /// only returned if it has a metadata sidecar; a value file without one is
@@ -601,8 +665,6 @@ impl FileSystemKeyValueStoreClient {
         require_record_metadata: bool,
     ) -> Result<Option<(PathBuf, KeyValueStoreRecordMetadata)>> {
         let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
 
         // Always update accessed_at on read, even for missing keys
         {
@@ -612,43 +674,40 @@ impl FileSystemKeyValueStoreClient {
             atomic_write(&self.metadata_path(), json.as_bytes()).await?;
         }
 
-        // The value file is always required.
-        if !value_path.exists() {
-            return Ok(None);
-        }
-
-        if sidecar_path.exists() {
-            let sidecar_content = fs::read_to_string(&sidecar_path).await?;
-            let mut record_meta: KeyValueStoreRecordMetadata =
-                serde_json::from_str(&sidecar_content)?;
-
-            // Backfill `size` for foreign/legacy sidecars that omit it (this
-            // library always writes it, but crawlee-JS / older Python clients may
-            // not) by stating the value file.
-            if record_meta.size.is_none() {
-                if let Ok(file_meta) = fs::metadata(&value_path).await {
-                    record_meta.size = Some(file_meta.len() as usize);
-                }
+        let Some(mut record_meta) = self.read_sidecar(&encoded).await? else {
+            // No sidecar. By default that means "not a record"; with the opt-in
+            // flag we still serve the bytes, synthesizing dumb metadata (no type
+            // inference). A bare file is by definition at the key's own name.
+            if require_record_metadata {
+                return Ok(None);
             }
-
-            return Ok(Some((value_path, record_meta)));
-        }
-
-        // No sidecar. By default that means "not a record"; with the opt-in flag
-        // we still serve the bytes, synthesizing dumb metadata (no type inference).
-        if require_record_metadata {
-            return Ok(None);
-        }
-
-        let size = fs::metadata(&value_path)
-            .await
-            .ok()
-            .map(|file_meta| file_meta.len() as usize);
-        let record_meta = KeyValueStoreRecordMetadata {
-            key: key.to_string(),
-            content_type: "application/octet-stream".to_string(),
-            size,
+            let value_path = self.path.join(&encoded);
+            let Ok(file_meta) = fs::metadata(&value_path).await else {
+                return Ok(None);
+            };
+            return Ok(Some((
+                value_path,
+                KeyValueStoreRecordMetadata {
+                    key: key.to_string(),
+                    content_type: "application/octet-stream".to_string(),
+                    size: Some(file_meta.len() as usize),
+                    filename: None,
+                },
+            )));
         };
+
+        // The value file is always required: a sidecar pointing at a file that
+        // isn't there is not a record.
+        let value_path = self.value_path(&encoded, record_meta.filename.as_deref())?;
+        let Ok(file_meta) = fs::metadata(&value_path).await else {
+            return Ok(None);
+        };
+
+        // Backfill `size` for foreign/legacy sidecars that omit it (this library
+        // always writes it, but crawlee-JS / older Python clients may not).
+        if record_meta.size.is_none() {
+            record_meta.size = Some(file_meta.len() as usize);
+        }
 
         Ok(Some((value_path, record_meta)))
     }
@@ -808,15 +867,45 @@ impl FileSystemKeyValueStoreClient {
         None
     }
 
+    /// Resolve where a write for `encoded` should land, clearing a stale
+    /// binding: if the key was bound to a different file, that file is removed,
+    /// since left behind it would linger as an untracked bare file no longer
+    /// reachable through the key. Returns `(value_path, sidecar_path)`.
+    async fn prepare_write(
+        &self,
+        encoded: &str,
+        filename: Option<&str>,
+    ) -> Result<(PathBuf, PathBuf)> {
+        let value_path = self.value_path(encoded, filename)?;
+        if let Ok(Some(previous)) = self.read_sidecar(encoded).await {
+            if let Ok(previous_path) = self.value_path(encoded, previous.filename.as_deref()) {
+                if previous_path != value_path {
+                    let _ = fs::remove_file(&previous_path).await;
+                }
+            }
+        }
+        Ok((value_path, self.sidecar_path(encoded)))
+    }
+
     /// Write raw bytes for a key, with sidecar metadata and atomic write.
     ///
     /// The client is a pure byte transport: `data` is written verbatim and
     /// `content_type` is stored as-is in the sidecar — no inference, no
     /// serialization. Value semantics live at the `KeyValueStore` frontend.
-    pub async fn set_value(&self, key: &str, data: &[u8], content_type: String) -> Result<()> {
+    ///
+    /// `filename` binds the key to that on-disk name instead of the encoded key
+    /// (`INPUT` → `input.json`) and is recorded in the sidecar, so every read
+    /// path finds it. It must pass [`validate_filename`]. Re-binding a key
+    /// deletes the file it was bound to before.
+    pub async fn set_value(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: String,
+        filename: Option<&str>,
+    ) -> Result<()> {
         let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+        let (value_path, sidecar_path) = self.prepare_write(&encoded, filename).await?;
 
         atomic_write(&value_path, data).await?;
 
@@ -824,6 +913,7 @@ impl FileSystemKeyValueStoreClient {
             key: key.to_string(),
             content_type,
             size: Some(data.len()),
+            filename: filename.map(str::to_string),
         };
         let sidecar_json = json_dumps_value(&record_meta)?;
         atomic_write(&sidecar_path, sidecar_json.as_bytes()).await?;
@@ -853,17 +943,18 @@ impl FileSystemKeyValueStoreClient {
     /// file for `key`, write the sidecar metadata, and update store metadata.
     ///
     /// The caller is responsible for having already written the full value data
-    /// to `temp_path` (e.g. by piping a stream to it).
+    /// to `temp_path` (e.g. by piping a stream to it). `filename` binds the key
+    /// to an on-disk name, exactly as in [`set_value`](Self::set_value).
     pub async fn finalize_streamed_value(
         &self,
         key: &str,
         temp_path: &Path,
         size: usize,
         content_type: String,
+        filename: Option<&str>,
     ) -> Result<()> {
         let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
+        let (value_path, sidecar_path) = self.prepare_write(&encoded, filename).await?;
 
         // Atomic rename from temp → final value path
         fs::rename(temp_path, &value_path).await?;
@@ -873,6 +964,7 @@ impl FileSystemKeyValueStoreClient {
             key: key.to_string(),
             content_type,
             size: Some(size),
+            filename: filename.map(str::to_string),
         };
         let sidecar_json = json_dumps_value(&record_meta)?;
         atomic_write(&sidecar_path, sidecar_json.as_bytes()).await?;
@@ -892,21 +984,20 @@ impl FileSystemKeyValueStoreClient {
 
     /// Check if a record exists for a key.
     ///
-    /// When `require_record_metadata` is `true`, both the value file and its
-    /// metadata sidecar must exist. When `false`, a value file alone counts —
-    /// matching the relaxed [`get_value`](Self::get_value) lookup for reading
-    /// out-of-band files that have no sidecar.
+    /// When `require_record_metadata` is `true`, the metadata sidecar must exist
+    /// and the value file it points at must be there. When `false`, a bare value
+    /// file at the key's own name counts too — matching the relaxed
+    /// [`get_value`](Self::get_value) lookup for reading out-of-band files that
+    /// have no sidecar.
     pub async fn record_exists(&self, key: &str, require_record_metadata: bool) -> bool {
         let encoded = encode_key(key);
-        let value_path = self.path.join(&encoded);
-        if !value_path.exists() {
-            return false;
+        match self.read_sidecar(&encoded).await {
+            Ok(Some(meta)) => self
+                .value_path(&encoded, meta.filename.as_deref())
+                .is_ok_and(|path| path.exists()),
+            // No readable sidecar: only the relaxed bare-file lookup can match.
+            _ => !require_record_metadata && self.path.join(&encoded).exists(),
         }
-        if !require_record_metadata {
-            return true;
-        }
-        let sidecar_path = self.path.join(format!("{encoded}.{METADATA_FILENAME}"));
-        sidecar_path.exists()
     }
 }
 
@@ -941,6 +1032,7 @@ mod tests {
                 "test-key",
                 br#"{"x":1}"#,
                 "application/json; charset=utf-8".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -989,6 +1081,7 @@ mod tests {
                 "my-key",
                 payload,
                 "application/json; charset=utf-8".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -1013,6 +1106,7 @@ mod tests {
                 "greeting",
                 b"hello",
                 "text/plain; charset=utf-8".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -1033,7 +1127,7 @@ mod tests {
 
         // Null is represented by the frontend as empty bytes + the sentinel CT.
         client
-            .set_value("empty", b"", crate::NONE_CONTENT_TYPE.to_string())
+            .set_value("empty", b"", crate::NONE_CONTENT_TYPE.to_string(), None)
             .await
             .unwrap();
 
@@ -1099,6 +1193,7 @@ mod tests {
                 "binary-key",
                 &raw_bytes,
                 "application/octet-stream".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -1125,6 +1220,7 @@ mod tests {
                 "weird",
                 b"<svg/>",
                 "image/svg+xml; charset=utf-8".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -1156,7 +1252,12 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("key1", b"1", "application/json; charset=utf-8".to_string())
+            .set_value(
+                "key1",
+                b"1",
+                "application/json; charset=utf-8".to_string(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1224,7 +1325,7 @@ mod tests {
         // probe, and its verbatim sidecar content type is preserved (the
         // caller-declared fallback content types are NOT applied).
         client
-            .set_value("INPUT", br#"{"x":1}"#, "application/json".to_string())
+            .set_value("INPUT", br#"{"x":1}"#, "application/json".to_string(), None)
             .await
             .unwrap();
 
@@ -1331,7 +1432,7 @@ mod tests {
 
         // Tracked record resolves to the literal key.
         client
-            .set_value("tracked", b"x", "text/plain".to_string())
+            .set_value("tracked", b"x", "text/plain".to_string(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1364,7 +1465,12 @@ mod tests {
         // A properly-written record (value + sidecar) reads identically under
         // both flag values — the flag only affects the missing-sidecar branch.
         client
-            .set_value("tracked", b"hi", "text/plain; charset=utf-8".to_string())
+            .set_value(
+                "tracked",
+                b"hi",
+                "text/plain; charset=utf-8".to_string(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1373,6 +1479,192 @@ mod tests {
             assert_eq!(meta.content_type, "text/plain; charset=utf-8");
             assert!(client.record_exists("tracked", require).await);
         }
+    }
+
+    #[tokio::test]
+    async fn test_filename_binding_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        client
+            .set_value(
+                "INPUT",
+                br#"{"x":1}"#,
+                "application/json".to_string(),
+                Some("input.json"),
+            )
+            .await
+            .unwrap();
+
+        // The bytes live under the bound name; nothing is written at the key.
+        assert!(client.path().join("input.json").exists());
+        assert!(!client.path().join("INPUT").exists());
+        // The sidecar is still named after the key, and records the binding.
+        let sidecar =
+            tokio::fs::read_to_string(client.path().join(format!("INPUT.{METADATA_FILENAME}")))
+                .await
+                .unwrap();
+        assert!(sidecar.contains(r#""filename": "input.json""#), "{sidecar}");
+
+        let record = client.read_value("INPUT").await.unwrap().unwrap();
+        assert_eq!(record.key, "INPUT");
+        assert_eq!(record.value, br#"{"x":1}"#.to_vec());
+        assert_eq!(record.content_type, "application/json");
+        assert_eq!(record.size, 7);
+        assert!(client.record_exists("INPUT", true).await);
+
+        // Listing reports the key, not the file it is bound to.
+        let page = client.list_keys(None, None, None, &[]).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].key, "INPUT");
+        assert_eq!(page.items[0].size, Some(7));
+
+        assert_eq!(
+            client.get_public_url("INPUT").await,
+            format!("file://{}", client.path().join("input.json").display())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_a_key_removes_the_previous_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "application/json".to_string();
+        client
+            .set_value("INPUT", b"old", ct.clone(), None)
+            .await
+            .unwrap();
+        client
+            .set_value("INPUT", b"new", ct.clone(), Some("input.json"))
+            .await
+            .unwrap();
+
+        // An orphaned value file would linger as an untracked bare file that
+        // `delete_value` can no longer reach.
+        assert!(!client.path().join("INPUT").exists());
+        let record = client.read_value("INPUT").await.unwrap().unwrap();
+        assert_eq!(record.value, b"new".to_vec());
+
+        // ...and the same on the way back to the unbound name.
+        client.set_value("INPUT", b"back", ct, None).await.unwrap();
+        assert!(!client.path().join("input.json").exists());
+        assert_eq!(
+            client.read_value("INPUT").await.unwrap().unwrap().value,
+            b"back".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bound_file_is_deleted_and_kept_by_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        let ct = "text/plain".to_string();
+        client
+            .set_value("INPUT", b"in", ct.clone(), Some("input.json"))
+            .await
+            .unwrap();
+        client
+            .set_value("other", b"x", ct, Some("other.txt"))
+            .await
+            .unwrap();
+
+        // `keep` names keys; sparing one has to spare the file it is bound to.
+        client.purge(&["INPUT".to_string()]).await.unwrap();
+        assert!(client.path().join("input.json").exists());
+        assert!(!client.path().join("other.txt").exists());
+        assert!(!client
+            .path()
+            .join(format!("other.{METADATA_FILENAME}"))
+            .exists());
+
+        client.delete_value("INPUT").await.unwrap();
+        assert!(!client.path().join("input.json").exists());
+        assert!(!client
+            .path()
+            .join(format!("INPUT.{METADATA_FILENAME}"))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn test_filename_must_be_a_plain_name_in_the_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        for filename in [
+            "../escape",
+            "nested/name",
+            "",
+            ".",
+            METADATA_FILENAME,
+            "INPUT.__metadata__.json",
+        ] {
+            let err = client
+                .set_value("INPUT", b"x", "text/plain".to_string(), Some(filename))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, StorageError::InvalidArgs(_)),
+                "{filename:?} should be rejected, got {err:?}"
+            );
+        }
+        // Validation happens before anything is written.
+        assert!(!client.record_exists("INPUT", false).await);
+
+        // A hand-written sidecar doesn't get to escape the store either.
+        tokio::fs::write(
+            client.path().join(format!("EVIL.{METADATA_FILENAME}")),
+            br#"{"key":"EVIL","contentType":"text/plain","filename":"../escape"}"#,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            client.get_value("EVIL", true).await,
+            Err(StorageError::InvalidArgs(_))
+        ));
+        assert!(!client.record_exists("EVIL", true).await);
+    }
+
+    #[tokio::test]
+    async fn test_binding_to_a_missing_file_is_not_a_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+            .await
+            .unwrap();
+
+        tokio::fs::write(
+            client.path().join(format!("INPUT.{METADATA_FILENAME}")),
+            br#"{"key":"INPUT","contentType":"application/json","filename":"input.json"}"#,
+        )
+        .await
+        .unwrap();
+
+        assert!(client.get_value("INPUT", true).await.unwrap().is_none());
+        assert!(!client.record_exists("INPUT", true).await);
+        // The URL still points at where the record claims to live.
+        assert_eq!(
+            client.get_public_url("INPUT").await,
+            format!("file://{}", client.path().join("input.json").display())
+        );
     }
 
     #[tokio::test]
@@ -1385,8 +1677,14 @@ mod tests {
             .unwrap();
 
         let ct = "application/json; charset=utf-8".to_string();
-        client.set_value("INPUT", b"in", ct.clone()).await.unwrap();
-        client.set_value("other", b"x", ct.clone()).await.unwrap();
+        client
+            .set_value("INPUT", b"in", ct.clone(), None)
+            .await
+            .unwrap();
+        client
+            .set_value("other", b"x", ct.clone(), None)
+            .await
+            .unwrap();
 
         // A bare value file (no sidecar) placed out-of-band, NOT in the keep list.
         let bare_path = client.path().join("INPUT.json");
@@ -1416,8 +1714,8 @@ mod tests {
             .unwrap();
 
         let ct = "application/json; charset=utf-8".to_string();
-        client.set_value("a", b"1", ct.clone()).await.unwrap();
-        client.set_value("b", b"2", ct.clone()).await.unwrap();
+        client.set_value("a", b"1", ct.clone(), None).await.unwrap();
+        client.set_value("b", b"2", ct.clone(), None).await.unwrap();
         // A bare file too.
         tokio::fs::write(client.path().join("INPUT.json"), b"bare")
             .await
@@ -1447,9 +1745,18 @@ mod tests {
             .unwrap();
 
         let ct = "application/json; charset=utf-8".to_string();
-        client.set_value("alpha", b"1", ct.clone()).await.unwrap();
-        client.set_value("beta", b"2", ct.clone()).await.unwrap();
-        client.set_value("gamma", b"3", ct.clone()).await.unwrap();
+        client
+            .set_value("alpha", b"1", ct.clone(), None)
+            .await
+            .unwrap();
+        client
+            .set_value("beta", b"2", ct.clone(), None)
+            .await
+            .unwrap();
+        client
+            .set_value("gamma", b"3", ct.clone(), None)
+            .await
+            .unwrap();
 
         // Fetch all at once (large page_size)
         let page = client
@@ -1505,7 +1812,7 @@ mod tests {
 
         let ct = "application/json; charset=utf-8".to_string();
         for key in ["foo:1", "foo:2", "foo:3", "bar:1", "baz"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // Prefix filters to matching keys only, in lexical order.
@@ -1570,7 +1877,7 @@ mod tests {
         // One tracked record, plus a bare INPUT.json with no sidecar (as a
         // CLI/platform writer would leave it).
         let ct = "application/json; charset=utf-8".to_string();
-        client.set_value("alpha", b"1", ct).await.unwrap();
+        client.set_value("alpha", b"1", ct, None).await.unwrap();
         let payload = br#"{"foo":"bar"}"#;
         tokio::fs::write(client.path().join("INPUT.json"), payload)
             .await
@@ -1621,7 +1928,12 @@ mod tests {
         // bare fallback declared for the same on-disk name. The tracked record
         // must win — "INPUT.json" appears once, with the sidecar's content type.
         client
-            .set_value("INPUT.json", b"tracked", "application/json".to_string())
+            .set_value(
+                "INPUT.json",
+                b"tracked",
+                "application/json".to_string(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1651,8 +1963,11 @@ mod tests {
 
         // Tracked records under a prefix, plus a bare file inside and one outside it.
         let ct = "application/json".to_string();
-        client.set_value("foo:a", b"1", ct.clone()).await.unwrap();
-        client.set_value("foo:b", b"2", ct).await.unwrap();
+        client
+            .set_value("foo:a", b"1", ct.clone(), None)
+            .await
+            .unwrap();
+        client.set_value("foo:b", b"2", ct, None).await.unwrap();
         tokio::fs::write(client.path().join("foo%3Az.json"), b"bare-in")
             .await
             .unwrap();
@@ -1706,7 +2021,7 @@ mod tests {
 
         let ct = "application/json; charset=utf-8".to_string();
         for key in ["alpha", "beta", "gamma", "delta"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // Cursor "beta" exists → keys strictly greater than it, in lexical order.
@@ -1735,7 +2050,7 @@ mod tests {
 
             let ct = "text/plain".to_string();
             for key in keys {
-                client.set_value(key, b"x", ct.clone()).await.unwrap();
+                client.set_value(key, b"x", ct.clone(), None).await.unwrap();
             }
 
             let mut expected = keys.to_vec();
@@ -1782,8 +2097,14 @@ mod tests {
             .unwrap();
 
         let ct = "application/json; charset=utf-8".to_string();
-        client.set_value("alpha", b"x", ct.clone()).await.unwrap();
-        client.set_value("beta", b"x", ct.clone()).await.unwrap();
+        client
+            .set_value("alpha", b"x", ct.clone(), None)
+            .await
+            .unwrap();
+        client
+            .set_value("beta", b"x", ct.clone(), None)
+            .await
+            .unwrap();
 
         // A cursor that does not match any existing key must error, even though
         // there are keys lexically greater than it (the old behavior silently
@@ -1821,7 +2142,7 @@ mod tests {
 
         let ct = "application/json; charset=utf-8".to_string();
         for key in ["foo:1", "foo:2", "foo:3", "bar:1"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // A cursor that exists AND is within the prefix → paginates fine.
@@ -1862,7 +2183,7 @@ mod tests {
 
         let ct = "application/json; charset=utf-8".to_string();
         for key in ["a", "b", "c", "d", "z"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // Cursor "z" exists but sorts last; with a small page the result set
@@ -1910,7 +2231,7 @@ mod tests {
 
         let ct = "application/json; charset=utf-8".to_string();
         for key in ["alpha", "beta", "gamma"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // Full listing (limit larger than the store): all items, not truncated,
@@ -1986,7 +2307,7 @@ mod tests {
 
         let ct = "application/json".to_string();
         for key in ["foo:1", "foo:2", "foo:3", "bar:1"] {
-            client.set_value(key, b"x", ct.clone()).await.unwrap();
+            client.set_value(key, b"x", ct.clone(), None).await.unwrap();
         }
 
         // Prefix + limit: truncation and count reflect only the matching
@@ -2039,23 +2360,23 @@ mod tests {
 
         // The URL is derived from the key, so it is returned for a key with no
         // file on disk too.
-        assert_eq!(client.get_public_url("missing"), expected("missing"));
+        assert_eq!(client.get_public_url("missing").await, expected("missing"));
 
         client
-            .set_value("my-key", b"v", "text/plain".to_string())
+            .set_value("my-key", b"v", "text/plain".to_string(), None)
             .await
             .unwrap();
-        assert_eq!(client.get_public_url("my-key"), expected("my-key"));
+        assert_eq!(client.get_public_url("my-key").await, expected("my-key"));
 
         // Keys are percent-encoded the same way as the on-disk filename.
         assert_eq!(
-            client.get_public_url("path/to/key"),
+            client.get_public_url("path/to/key").await,
             expected(&encode_key("path/to/key"))
         );
 
         // Deleting the record does not invalidate the URL.
         client.delete_value("my-key").await.unwrap();
-        assert_eq!(client.get_public_url("my-key"), expected("my-key"));
+        assert_eq!(client.get_public_url("my-key").await, expected("my-key"));
     }
 
     #[tokio::test]
@@ -2072,6 +2393,7 @@ mod tests {
                 "path/to/key with spaces",
                 b"value",
                 "text/plain; charset=utf-8".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -2103,7 +2425,12 @@ mod tests {
         let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
 
         client
-            .set_value("big.bin", &payload, "application/octet-stream".to_string())
+            .set_value(
+                "big.bin",
+                &payload,
+                "application/octet-stream".to_string(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -2146,11 +2473,17 @@ mod tests {
                     "greeting",
                     b"hello",
                     "text/plain; charset=utf-8".to_string(),
+                    None,
                 )
                 .await
                 .unwrap();
             client
-                .set_value("payload", br#"{"x":1}"#, "application/json".to_string())
+                .set_value(
+                    "payload",
+                    br#"{"x":1}"#,
+                    "application/json".to_string(),
+                    None,
+                )
                 .await
                 .unwrap();
         }
@@ -2233,7 +2566,7 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("k", b"hello", "text/plain".to_string())
+            .set_value("k", b"hello", "text/plain".to_string(), None)
             .await
             .unwrap();
 
@@ -2288,7 +2621,7 @@ mod tests {
             .unwrap();
 
         client
-            .set_value("k", b"abcd", "application/json".to_string())
+            .set_value("k", b"abcd", "application/json".to_string(), None)
             .await
             .unwrap();
 

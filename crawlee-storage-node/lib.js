@@ -25,7 +25,12 @@ FileSystemKeyValueStoreClient.prototype.getValueStream = async function (key) {
 
 // setValueStream: pipes a ReadableStream directly to a temp file on disk,
 // then atomically renames it into place. No buffering in memory.
-FileSystemKeyValueStoreClient.prototype.setValueStream = async function (key, stream, contentType) {
+FileSystemKeyValueStoreClient.prototype.setValueStream = async function (
+    key,
+    stream,
+    contentType,
+    filename,
+) {
     const tempPath = this._getTempFilePath();
     const ws = createWriteStream(tempPath);
     const writable = Writable.toWeb(ws);
@@ -46,7 +51,7 @@ FileSystemKeyValueStoreClient.prototype.setValueStream = async function (key, st
     }
 
     const ct = contentType ?? 'application/octet-stream';
-    return this._finalizeStreamedValue(key, tempPath, size, ct);
+    return this._finalizeStreamedValue(key, tempPath, size, ct, filename);
 };
 
 export * from './index.js';

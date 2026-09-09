@@ -195,8 +195,22 @@ class FileSystemKeyValueStoreClient:
         points at the file that exists.
         """
     async def set_value(
-        self, key: builtins.str, value: builtins.bytes, content_type: builtins.str | None = None
-    ) -> None: ...
+        self,
+        key: builtins.str,
+        value: builtins.bytes,
+        content_type: builtins.str | None = None,
+        filename: builtins.str | None = None,
+    ) -> None:
+        r"""
+        Set a value from bytes.
+
+        ``filename`` binds the key to that on-disk name instead of the key
+        itself (``INPUT`` → ``input.json``), recorded in the sidecar so every
+        read path finds it. It is used as-is — unlike the key, it is not
+        percent-encoded — and must be a plain filename directly inside the
+        store directory. Re-binding a key deletes the file it was bound to
+        before.
+        """
     async def purge(self, keep: typing.Sequence[builtins.str] = []) -> None:
         r"""
         Delete all records except those whose keys are listed in `keep`.
@@ -246,10 +260,11 @@ class FileSystemKeyValueStoreClient:
         """
     async def get_public_url(self, key: builtins.str) -> builtins.str:
         r"""
-        Build a `file://` URL for `key`'s value file. Derived from the key alone —
-        the file need not exist, and bare-file extensions are not probed, so a
-        caller that needs the URL to point at the file on disk resolves the key
-        via `resolve_existing_key` first.
+        Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
+        `filename`, but does not stat the file, so the URL is returned whether
+        or not anything is there yet. Bare-file extensions are not probed — a
+        caller chasing a sidecar-less file resolves the key via
+        `resolve_existing_key` first.
         """
     async def record_exists(self, key: builtins.str) -> builtins.bool:
         r"""

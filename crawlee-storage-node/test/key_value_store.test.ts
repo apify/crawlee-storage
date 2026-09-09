@@ -306,6 +306,49 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.resolveExistingKey('nope', extensions)).toBeUndefined();
     });
 
+    it('setValue binds a key to a differently-named file', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        const payload = Buffer.from(JSON.stringify({ x: 1 }));
+        await client.setValue('INPUT', payload, 'application/json', 'input.json');
+
+        expect(existsSync(join(client.pathToKvs, 'input.json'))).toBe(true);
+        expect(existsSync(join(client.pathToKvs, 'INPUT'))).toBe(false);
+
+        const record = await client.getValue('INPUT');
+        expect(record).not.toBeUndefined();
+        expect(record!.key).toBe('INPUT');
+        expect(record!.value.equals(payload)).toBe(true);
+        expect(record!.contentType).toBe('application/json');
+        expect(await client.recordExists('INPUT')).toBe(true);
+        expect(await client.getPublicUrl('INPUT')).toBe(
+            `file://${join(client.pathToKvs, 'input.json')}`,
+        );
+
+        await expect(
+            client.setValue('INPUT', payload, 'application/json', '../escape'),
+        ).rejects.toThrow(/single path component/);
+    });
+
+    it('setValueStream binds a key to a differently-named file', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        const payload = Buffer.from('streamed');
+        const stream = new ReadableStream({
+            start(controller) {
+                controller.enqueue(payload);
+                controller.close();
+            },
+        });
+
+        await client.setValueStream('INPUT', stream, 'text/plain', 'input.txt');
+
+        expect(existsSync(join(client.pathToKvs, 'input.txt'))).toBe(true);
+        const record = await client.getValue('INPUT');
+        expect(record!.value.equals(payload)).toBe(true);
+        expect(record!.contentType).toBe('text/plain');
+    });
+
     it('should drop storage entirely', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
