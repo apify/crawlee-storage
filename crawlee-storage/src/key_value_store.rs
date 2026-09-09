@@ -10,8 +10,9 @@ use crate::models::{
     KeyValueStoreValueFileInfo, KvsKeysPage, KvsListKeysResult,
 };
 use crate::utils::{
-    atomic_write, crypto_random_object_id, encode_key, find_storage_by_id, json_dumps_value,
-    validate_exclusive_args, validate_subdirectory, Result, StorageError, METADATA_FILENAME,
+    atomic_write, crypto_random_object_id, decode_key, encode_key, find_storage_by_id,
+    json_dumps_value, validate_exclusive_args, validate_subdirectory, Result, StorageError,
+    METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -357,10 +358,11 @@ impl FileSystemKeyValueStoreClient {
     ///
     /// Tracked records (value file + sidecar) and caller-declared bare files (see
     /// [`iterate_keys_page`](Self::iterate_keys_page) for the `(name,
-    /// content_type)` shape) are merged into a single stream, sorted by encoded
-    /// value-file name, before the prefix/cursor/limit logic runs — so pagination
-    /// treats both kinds uniformly. A bare file whose on-disk name already has a
-    /// tracked record is dropped (the tracked record wins).
+    /// content_type)` shape) are merged into one stream sorted by key — not by
+    /// encoded filename, which puts `%XX` escapes before every character
+    /// `encode_key` leaves safe and would let a cursor skip keys. A bare file
+    /// whose on-disk name already has a tracked record is dropped (the tracked
+    /// record wins).
     async fn list_keys_raw(
         &self,
         exclusive_start_key: Option<&str>,
@@ -371,13 +373,10 @@ impl FileSystemKeyValueStoreClient {
         let mut results = Vec::new();
         let metadata_suffix = format!(".{METADATA_FILENAME}");
 
-        // Each candidate carries the encoded value-file name it sorts by, plus
-        // its (already finalized) metadata. `None` metadata means "read the
-        // sidecar lazily" — only tracked records defer; bare files are resolved
-        // eagerly up front (a handful of cheap stats).
         struct Candidate {
-            /// Encoded value-file name, used purely for deterministic ordering.
-            sort_name: String,
+            /// Ordering basis; decoded from the filename so sorting reads no
+            /// sidecars.
+            sort_key: String,
             /// Sidecar path to read lazily for tracked records; `None` for bare
             /// files whose metadata is already finalized in `meta`.
             sidecar_path: Option<PathBuf>,
@@ -403,16 +402,16 @@ impl FileSystemKeyValueStoreClient {
                     };
                     // Find sidecar files (but not the store-level metadata).
                     if name.ends_with(&metadata_suffix) && name != METADATA_FILENAME {
-                        let sort_name = name
+                        let encoded_name = name
                             .strip_suffix(&metadata_suffix)
                             .unwrap_or(name)
                             .to_string();
-                        tracked_value_names.insert(sort_name.clone());
                         candidates.push(Candidate {
-                            sort_name,
+                            sort_key: decode_key(&encoded_name),
                             sidecar_path: Some(path),
                             meta: None,
                         });
+                        tracked_value_names.insert(encoded_name);
                     }
                 }
             }
@@ -450,7 +449,7 @@ impl FileSystemKeyValueStoreClient {
                 (*content_type).to_string()
             };
             candidates.push(Candidate {
-                sort_name: candidate_name,
+                sort_key: (*name).to_string(),
                 sidecar_path: None,
                 meta: Some(KeyValueStoreRecordMetadata {
                     key: (*name).to_string(),
@@ -460,9 +459,7 @@ impl FileSystemKeyValueStoreClient {
             });
         }
 
-        // Sort by encoded value-file name for deterministic ordering (same basis
-        // the old sidecar-path sort used, now shared with bare files).
-        candidates.sort_by(|a, b| a.sort_name.cmp(&b.sort_name));
+        candidates.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
 
         // Track whether a key exactly equal to `exclusive_start_key` was seen
         // among the (prefix-filtered) candidates. The cursor key is skipped from
@@ -1725,6 +1722,53 @@ mod tests {
             ["delta", "gamma"]
         );
         assert!(!page.has_more);
+    }
+
+    #[tokio::test]
+    async fn test_iterate_keys_paginates_keys_whose_encoding_reorders_them() {
+        // These keys sort one way as keys and the other way as `%XX` filenames.
+        for keys in [["a.b", "a:b"], ["zz", "éz"]] {
+            let temp_dir = TempDir::new().unwrap();
+            let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+                .await
+                .unwrap();
+
+            let ct = "text/plain".to_string();
+            for key in keys {
+                client.set_value(key, b"x", ct.clone()).await.unwrap();
+            }
+
+            let mut expected = keys.to_vec();
+            expected.sort_unstable();
+
+            let page = client
+                .iterate_keys_page(None, None, 1000, None, &[])
+                .await
+                .unwrap();
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|m| m.key.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+
+            // Walk one key per page, the way the binding iterators do.
+            let mut walked: Vec<String> = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let page = client
+                    .iterate_keys_page(cursor.as_deref(), None, 1, None, &[])
+                    .await
+                    .unwrap();
+                walked.extend(page.items.iter().map(|m| m.key.clone()));
+                if !page.has_more {
+                    break;
+                }
+                cursor = walked.last().cloned();
+            }
+            assert_eq!(walked, expected);
+        }
     }
 
     #[tokio::test]
