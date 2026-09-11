@@ -72,6 +72,9 @@ fn storage_err(e: crawlee_storage::utils::StorageError) -> PyErr {
         // ValueError so the Python consumer can drop its preflight existence
         // guard and rely on the raise.
         StorageError::ExclusiveStartKeyNotFound(_) => PyValueError::new_err(e.to_string()),
+        // The Display names the key and every matched filename, which is the
+        // whole diagnostic.
+        StorageError::AmbiguousInput { .. } => PyValueError::new_err(e.to_string()),
     }
 }
 
@@ -228,8 +231,21 @@ struct FileSystemKeyValueStoreClient {
 #[gen_stub_pymethods]
 #[pymethods]
 impl FileSystemKeyValueStoreClient {
+    /// Open an existing key-value store or create a new one.
+    ///
+    /// ``adopt`` declares keys whose value file may already be on disk without
+    /// a metadata sidecar — written into the store directory out-of-band by a
+    /// CLI, say — so no key currently addresses it. Each entry
+    /// is a ``(key, [(filename, content_type), ...])`` pair: open writes the
+    /// missing sidecar, binding the key to whichever declared file it finds, so
+    /// the file becomes an ordinary record (readable via ``get_value``, visible
+    /// in ``list_keys``). Value bytes are never touched. A key that already has
+    /// a usable record is left alone; declaring several files that all exist
+    /// raises ``ValueError``, since there is no way to guess which one the key
+    /// means. The canonical case is a run's input (``INPUT``, ``INPUT.json``,
+    /// ...), but nothing here is specific to it.
     #[staticmethod]
-    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false))]
+    #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, adopt=vec![]))]
     #[gen_stub(override_return_type(type_repr = "FileSystemKeyValueStoreClient"))]
     fn open<'py>(
         py: Python<'py>,
@@ -238,9 +254,25 @@ impl FileSystemKeyValueStoreClient {
         alias: Option<String>,
         storage_dir: &str,
         use_test_clock: bool,
+        adopt: Vec<(String, Vec<(String, String)>)>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
         let (clock, test_clock) = pick_clock(use_test_clock);
+        let adopt: Vec<crawlee_storage::models::AdoptionCandidate> = adopt
+            .into_iter()
+            .map(|(key, files)| crawlee_storage::models::AdoptionCandidate {
+                key,
+                files: files
+                    .into_iter()
+                    .map(
+                        |(filename, content_type)| crawlee_storage::models::AdoptableFile {
+                            filename,
+                            content_type,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client =
                 crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open_with_clock(
@@ -248,6 +280,7 @@ impl FileSystemKeyValueStoreClient {
                     name,
                     alias,
                     &storage_dir,
+                    &adopt,
                     clock,
                 )
                 .await
@@ -298,9 +331,8 @@ impl FileSystemKeyValueStoreClient {
 
     /// Get a tracked record (value file + metadata sidecar) by key.
     ///
-    /// To read out-of-band files that have no metadata sidecar (e.g. a
-    /// CLI-written `INPUT.json`), use `resolve_value`, which probes the
-    /// conventional bare-file extensions.
+    /// A value file with no sidecar is not a record: declare it in ``adopt``
+    /// when opening the store and it becomes one.
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
     fn get_value<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
@@ -323,12 +355,17 @@ impl FileSystemKeyValueStoreClient {
     /// the returned record is always keyed by the requested `key`. Returns
     /// `None` if nothing resolves.
     ///
-    /// Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
-    /// instead of hand-rolling the extension probing in Python. The core does
-    /// no MIME inference of its own — the caller declares which extensions map
-    /// to which content type. An empty `content_type` keeps the matched file's
-    /// synthesized `application/octet-stream`.
+    /// The core does no MIME inference of its own — the caller declares which
+    /// extensions map to which content type. An empty ``content_type`` keeps
+    /// the matched file's synthesized ``application/octet-stream``.
+    ///
+    /// .. deprecated::
+    ///    Declare the file in ``open``'s ``adopt`` instead: adoption turns it
+    ///    into a real record once, so ``get_value`` and ``list_keys`` both see
+    ///    it, rather than every reader re-declaring the same probe list for a
+    ///    file that stays invisible to listings.
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreRecord | None"))]
+    #[allow(deprecated)]
     fn resolve_value<'py>(
         &self,
         py: Python<'py>,
@@ -357,7 +394,12 @@ impl FileSystemKeyValueStoreClient {
     /// Returns the matched key (the literal key or `key + extension`), or
     /// `None` if nothing exists. Pass the result to `get_public_url` so the URL
     /// points at the file that exists.
+    ///
+    /// .. deprecated::
+    ///    Declare the file in ``open``'s ``adopt`` instead, then pass ``key``
+    ///    straight to ``get_public_url``.
     #[gen_stub(override_return_type(type_repr = "builtins.str | None"))]
+    #[allow(deprecated)]
     fn resolve_existing_key<'py>(
         &self,
         py: Python<'py>,
@@ -447,12 +489,12 @@ impl FileSystemKeyValueStoreClient {
     /// `application/octet-stream`). Pass an empty list (the default) to list only
     /// tracked records.
     ///
-    /// Round-trip caveat: a surfaced bare key does NOT round-trip through the
-    /// strict read path. The listed key is the literal on-disk `name`, but
-    /// `get_value` / `record_exists` only see tracked records (value + sidecar)
-    /// and return `None` / `False` for a sidecar-less bare file. Read a listed
-    /// bare key back via `resolve_value` / `resolve_existing_key`, not
-    /// `get_value`.
+    /// .. deprecated::
+    ///    ``bare_fallbacks``: a surfaced bare key does NOT round-trip through
+    ///    the strict read path — ``get_value`` / ``record_exists`` only see
+    ///    tracked records, so it reads back as absent. Declare the file in
+    ///    ``open``'s ``adopt`` instead and it is both listed and readable as an
+    ///    ordinary record.
     #[gen_stub(override_return_type(type_repr = "KeyValueStoreListKeysResult"))]
     #[pyo3(signature = (exclusive_start_key=None, limit=None, prefix=None, bare_fallbacks=vec![]))]
     fn list_keys<'py>(
@@ -485,8 +527,7 @@ impl FileSystemKeyValueStoreClient {
     /// Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
     /// `filename`, but does not stat the file, so the URL is returned whether
     /// or not anything is there yet. Bare-file extensions are not probed — a
-    /// caller chasing a sidecar-less file resolves the key via
-    /// `resolve_existing_key` first.
+    /// sidecar-less file is addressable once it has been adopted on ``open``.
     #[gen_stub(override_return_type(type_repr = "builtins.str"))]
     fn get_public_url<'py>(
         &self,
@@ -500,8 +541,8 @@ impl FileSystemKeyValueStoreClient {
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for
-    /// `key`. To also match out-of-band files with no sidecar, use
-    /// `resolve_existing_key`, which probes the conventional bare-file extensions.
+    /// `key`. A sidecar whose bound value file is missing is not a record, and
+    /// neither is a value file with no sidecar until it is adopted on ``open``.
     #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
     fn record_exists<'py>(
         &self,

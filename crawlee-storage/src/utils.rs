@@ -28,6 +28,13 @@ pub enum StorageError {
          This is likely a bug — the key may have been deleted between paginated listKeys calls."
     )]
     ExclusiveStartKeyNotFound(String),
+
+    /// An [`AdoptionCandidate`](crate::models::AdoptionCandidate) matched more
+    /// than one file on disk, so there is no single value file to bind the key
+    /// to. Carries the key and the matched filenames so the binding can name
+    /// them in its message.
+    #[error("Multiple candidate files for key '{key}': {}", files.join(", "))]
+    AmbiguousInput { key: String, files: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -185,6 +192,11 @@ pub const METADATA_FILENAME: &str = "__metadata__.json";
 /// hardcoding the literal string.
 pub const NONE_CONTENT_TYPE: &str = "application/x-none";
 
+/// Whether a filename is the store's own metadata file or a record sidecar.
+pub fn is_metadata_filename(filename: &str) -> bool {
+    filename == METADATA_FILENAME || filename.ends_with(&format!(".{METADATA_FILENAME}"))
+}
+
 /// Validate the on-disk `filename` a KVS record binds its key to.
 ///
 /// Must be a single normal path component, so neither a `set_value` argument
@@ -204,7 +216,7 @@ pub fn validate_filename(filename: &str) -> Result<&str> {
             "Record filename must be a single path component, got '{filename}'"
         )));
     }
-    if filename == METADATA_FILENAME || filename.ends_with(&format!(".{METADATA_FILENAME}")) {
+    if is_metadata_filename(filename) {
         return Err(StorageError::InvalidArgs(format!(
             "Record filename must not be a metadata filename, got '{filename}'"
         )));

@@ -148,7 +148,23 @@ class FileSystemKeyValueStoreClient:
         alias: builtins.str | None = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
-    ) -> FileSystemKeyValueStoreClient: ...
+        adopt: typing.Sequence[tuple[builtins.str, typing.Sequence[tuple[builtins.str, builtins.str]]]] = [],
+    ) -> FileSystemKeyValueStoreClient:
+        r"""
+        Open an existing key-value store or create a new one.
+
+        ``adopt`` declares keys whose value file may already be on disk without
+        a metadata sidecar — written into the store directory out-of-band by a
+        CLI, say — so no key currently addresses it. Each entry
+        is a ``(key, [(filename, content_type), ...])`` pair: open writes the
+        missing sidecar, binding the key to whichever declared file it finds, so
+        the file becomes an ordinary record (readable via ``get_value``, visible
+        in ``list_keys``). Value bytes are never touched. A key that already has
+        a usable record is left alone; declaring several files that all exist
+        raises ``ValueError``, since there is no way to guess which one the key
+        means. The canonical case is a run's input (``INPUT``, ``INPUT.json``,
+        ...), but nothing here is specific to it.
+        """
     def advance_clock_for_testing(self, duration: datetime.timedelta) -> None:
         r"""
         Advance the client's clock by ``duration``. Only usable when the client
@@ -160,9 +176,8 @@ class FileSystemKeyValueStoreClient:
         r"""
         Get a tracked record (value file + metadata sidecar) by key.
 
-        To read out-of-band files that have no metadata sidecar (e.g. a
-        CLI-written `INPUT.json`), use `resolve_value`, which probes the
-        conventional bare-file extensions.
+        A value file with no sidecar is not a record: declare it in ``adopt``
+        when opening the store and it becomes one.
         """
     async def resolve_value(
         self, key: builtins.str, bare_fallbacks: typing.Sequence[tuple[builtins.str, builtins.str]]
@@ -178,11 +193,15 @@ class FileSystemKeyValueStoreClient:
         the returned record is always keyed by the requested `key`. Returns
         `None` if nothing resolves.
 
-        Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
-        instead of hand-rolling the extension probing in Python. The core does
-        no MIME inference of its own — the caller declares which extensions map
-        to which content type. An empty `content_type` keeps the matched file's
-        synthesized `application/octet-stream`.
+        The core does no MIME inference of its own — the caller declares which
+        extensions map to which content type. An empty ``content_type`` keeps
+        the matched file's synthesized ``application/octet-stream``.
+
+        .. deprecated::
+           Declare the file in ``open``'s ``adopt`` instead: adoption turns it
+           into a real record once, so ``get_value`` and ``list_keys`` both see
+           it, rather than every reader re-declaring the same probe list for a
+           file that stays invisible to listings.
         """
     async def resolve_existing_key(
         self, key: builtins.str, bare_fallbacks: typing.Sequence[builtins.str]
@@ -193,6 +212,10 @@ class FileSystemKeyValueStoreClient:
         Returns the matched key (the literal key or `key + extension`), or
         `None` if nothing exists. Pass the result to `get_public_url` so the URL
         points at the file that exists.
+
+        .. deprecated::
+           Declare the file in ``open``'s ``adopt`` instead, then pass ``key``
+           straight to ``get_public_url``.
         """
     async def set_value(
         self,
@@ -251,26 +274,25 @@ class FileSystemKeyValueStoreClient:
         `application/octet-stream`). Pass an empty list (the default) to list only
         tracked records.
 
-        Round-trip caveat: a surfaced bare key does NOT round-trip through the
-        strict read path. The listed key is the literal on-disk `name`, but
-        `get_value` / `record_exists` only see tracked records (value + sidecar)
-        and return `None` / `False` for a sidecar-less bare file. Read a listed
-        bare key back via `resolve_value` / `resolve_existing_key`, not
-        `get_value`.
+        .. deprecated::
+           ``bare_fallbacks``: a surfaced bare key does NOT round-trip through
+           the strict read path — ``get_value`` / ``record_exists`` only see
+           tracked records, so it reads back as absent. Declare the file in
+           ``open``'s ``adopt`` instead and it is both listed and readable as an
+           ordinary record.
         """
     async def get_public_url(self, key: builtins.str) -> builtins.str:
         r"""
         Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
         `filename`, but does not stat the file, so the URL is returned whether
         or not anything is there yet. Bare-file extensions are not probed — a
-        caller chasing a sidecar-less file resolves the key via
-        `resolve_existing_key` first.
+        sidecar-less file is addressable once it has been adopted on ``open``.
         """
     async def record_exists(self, key: builtins.str) -> builtins.bool:
         r"""
         Check whether a tracked record (value file + metadata sidecar) exists for
-        `key`. To also match out-of-band files with no sidecar, use
-        `resolve_existing_key`, which probes the conventional bare-file extensions.
+        `key`. A sidecar whose bound value file is missing is not a record, and
+        neither is a value file with no sidecar until it is adopted on ``open``.
         """
 
 @typing.final

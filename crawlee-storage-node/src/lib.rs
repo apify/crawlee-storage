@@ -183,6 +183,18 @@ pub struct FileSystemKeyValueStoreClient {
 
 #[napi]
 impl FileSystemKeyValueStoreClient {
+    /// Open an existing key-value store or create a new one.
+    ///
+    /// `adopt` declares keys whose value file may already be on disk without a
+    /// metadata sidecar — written into the store directory out-of-band by a
+    /// CLI, say — so no key currently addresses it. For each
+    /// candidate, open writes the missing sidecar (binding the key to whichever
+    /// declared file it finds), so the file becomes an ordinary record:
+    /// readable via `getValue`, visible in `listKeys`. Value bytes are never
+    /// touched. A key that already has a usable record is left alone;
+    /// declaring several files that all exist throws, since there is no way to
+    /// guess which one the key means. The canonical case is a run's input
+    /// (`INPUT`, `INPUT.json`, ...), but nothing here is specific to it.
     #[napi(factory)]
     pub async fn open(
         id: Option<String>,
@@ -190,15 +202,22 @@ impl FileSystemKeyValueStoreClient {
         alias: Option<String>,
         storage_dir: Option<String>,
         use_test_clock: Option<bool>,
+        adopt: Option<Vec<models::AdoptionCandidate>>,
     ) -> napi::Result<Self> {
         let storage_dir = PathBuf::from(storage_dir.unwrap_or_else(|| "./storage".to_string()));
         let (clock, test_clock) = pick_clock(use_test_clock);
+        let adopt: Vec<crawlee_storage::models::AdoptionCandidate> = adopt
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
         let client =
             crawlee_storage::key_value_store::FileSystemKeyValueStoreClient::open_with_clock(
                 id,
                 name,
                 alias,
                 &storage_dir,
+                &adopt,
                 clock,
             )
             .await
@@ -252,9 +271,8 @@ impl FileSystemKeyValueStoreClient {
     /// Get a tracked record (value file + metadata sidecar) by key. Returns the
     /// raw value bytes as a Buffer, or `undefined` if there is no such tracked record.
     ///
-    /// To read out-of-band files that have no metadata sidecar (e.g. a
-    /// CLI-written `INPUT.json`), use `resolveValue`, which probes the
-    /// conventional bare-file extensions.
+    /// A value file with no sidecar is not a record: declare it as an
+    /// `AdoptionCandidate` on `open` and it becomes one.
     #[napi]
     pub async fn get_value(
         &self,
@@ -277,9 +295,12 @@ impl FileSystemKeyValueStoreClient {
     /// a match. The first match wins; the returned record is always keyed by
     /// the requested `key`. Returns `undefined` if nothing resolves.
     ///
-    /// Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
-    /// instead of hand-rolling the extension probing in JS.
+    /// @deprecated Declare the file as an `AdoptionCandidate` on `open`
+    /// instead: adoption turns it into a real record once, so `getValue` and
+    /// `listKeys` both see it, rather than every reader re-declaring the same
+    /// probe list for a file that stays invisible to listings.
     #[napi]
+    #[allow(deprecated)]
     pub async fn resolve_value(
         &self,
         key: String,
@@ -305,7 +326,11 @@ impl FileSystemKeyValueStoreClient {
     /// Returns the matched key (the literal key or `key + extension`), or
     /// `undefined` if nothing exists. Pass the result to `getPublicUrl` so the URL
     /// points at the file that exists.
+    ///
+    /// @deprecated Declare the file as an `AdoptionCandidate` on `open`
+    /// instead, then pass `key` straight to `getPublicUrl`.
     #[napi]
+    #[allow(deprecated)]
     pub async fn resolve_existing_key(
         &self,
         key: String,
@@ -422,11 +447,10 @@ impl FileSystemKeyValueStoreClient {
     /// under `name`. Pass an empty array (the default) to list only tracked
     /// records.
     ///
-    /// Round-trip caveat: a surfaced bare key does NOT round-trip through the
-    /// strict read path. The listed key is the literal on-disk `name`, but
-    /// `getValue` / `recordExists` only see tracked records (value + sidecar) and
-    /// return `null` / `false` for a sidecar-less bare file. Read a listed bare
-    /// key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
+    /// `bareFallbacks` is deprecated: a surfaced bare key does NOT round-trip
+    /// through the strict read path — `getValue` / `recordExists` only see
+    /// tracked records, so it reads back as absent. Adopt the file on `open`
+    /// instead and it is both listed and readable as an ordinary record.
     #[napi]
     pub async fn list_keys(
         &self,
@@ -460,16 +484,15 @@ impl FileSystemKeyValueStoreClient {
     /// Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
     /// `filename`, but does not stat the file, so the URL is returned whether
     /// or not anything is there yet. Bare-file extensions are not probed — a
-    /// caller chasing a sidecar-less file resolves the key via
-    /// `resolveExistingKey` first.
+    /// sidecar-less file is addressable once it has been adopted on `open`.
     #[napi]
     pub async fn get_public_url(&self, key: String) -> String {
         self.inner.get_public_url(&key).await
     }
 
     /// Check whether a tracked record (value file + metadata sidecar) exists for
-    /// `key`. To also match out-of-band files with no sidecar, use
-    /// `resolveExistingKey`, which probes the conventional bare-file extensions.
+    /// `key`. A sidecar whose bound value file is missing is not a record, and
+    /// neither is a value file with no sidecar until it is adopted on `open`.
     #[napi]
     pub async fn record_exists(&self, key: String) -> bool {
         self.inner.record_exists(&key, true).await
