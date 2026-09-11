@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, existsSync } from 'fs';
-import { rm } from 'fs/promises';
+import { rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -216,7 +216,6 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('getValue/recordExists are strict: a sidecar-less file is invisible to them', async () => {
-        const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         // Hand-place a bare value file (no metadata sidecar), like a CLI-written INPUT.json.
@@ -230,7 +229,6 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('listKeys surfaces caller-declared bare files alongside tracked records', async () => {
-        const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         await client.setValue('alpha', Buffer.from('1'), 'application/json');
@@ -269,7 +267,6 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('resolveValue falls back to a bare file and applies the declared content type', async () => {
-        const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
@@ -292,7 +289,6 @@ describe('FileSystemKeyValueStoreClient', () => {
     });
 
     it('resolveExistingKey returns the matched on-disk key', async () => {
-        const { writeFile } = await import('fs/promises');
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 
         const extensions = ['', '.json', '.txt', '.bin'];
@@ -304,6 +300,62 @@ describe('FileSystemKeyValueStoreClient', () => {
         expect(await client.resolveExistingKey('INPUT', extensions)).toBe('INPUT.json');
 
         expect(await client.resolveExistingKey('nope', extensions)).toBeUndefined();
+    });
+
+    it('open adopts a declared sidecar-less file into a real record', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        const payload = Buffer.from(JSON.stringify({ foo: 'bar' }));
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), payload);
+
+        const adopt = [
+            {
+                key: 'INPUT',
+                files: [
+                    { filename: 'INPUT', contentType: 'application/octet-stream' },
+                    { filename: 'INPUT.json', contentType: 'application/json' },
+                ],
+            },
+        ];
+        const adopted = await FileSystemKeyValueStoreClient.open(
+            null,
+            null,
+            null,
+            storageDir,
+            null,
+            adopt,
+        );
+
+        const record = await adopted.getValue('INPUT');
+        expect(record).not.toBeUndefined();
+        expect(record!.key).toBe('INPUT');
+        expect(record!.contentType).toBe('application/json');
+        expect(record!.value.equals(payload)).toBe(true);
+        expect(await adopted.recordExists('INPUT')).toBe(true);
+        expect((await adopted.listKeys()).items.map((e) => e.key)).toEqual(['INPUT']);
+        expect(await adopted.getPublicUrl('INPUT')).toBe(
+            `file://${join(adopted.pathToKvs, 'INPUT.json')}`,
+        );
+    });
+
+    it('open rejects a candidate whose declared files all exist', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await writeFile(join(client.pathToKvs, 'INPUT'), Buffer.from('raw'));
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), Buffer.from('{}'));
+
+        const adopt = [
+            {
+                key: 'INPUT',
+                files: [
+                    { filename: 'INPUT', contentType: 'application/octet-stream' },
+                    { filename: 'INPUT.json', contentType: 'application/json' },
+                ],
+            },
+        ];
+        await expect(
+            FileSystemKeyValueStoreClient.open(null, null, null, storageDir, null, adopt),
+        ).rejects.toThrow(/INPUT, INPUT\.json/);
     });
 
     it('setValue binds a key to a differently-named file', async () => {

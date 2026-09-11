@@ -6,13 +6,13 @@ use tracing::warn;
 
 use crate::clock::{system_clock, ClockRef};
 use crate::models::{
-    KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata,
+    AdoptionCandidate, KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata,
     KeyValueStoreValueFileInfo, KvsKeysPage, KvsListKeysResult,
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, decode_key, encode_key, find_storage_by_id,
-    json_dumps_value, validate_exclusive_args, validate_filename, validate_subdirectory, Result,
-    StorageError, METADATA_FILENAME,
+    is_metadata_filename, json_dumps_value, validate_exclusive_args, validate_filename,
+    validate_subdirectory, Result, StorageError, METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -48,8 +48,30 @@ impl FileSystemKeyValueStoreClient {
     /// - `name`: Open by name (used as directory name, written to metadata).
     /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
     /// - `storage_dir`: Base storage directory (e.g., "./storage").
+    /// - `adopt`: Keys whose sidecar-less value file should be adopted into a
+    ///   tracked record, if one is there. See below; pass an empty slice to
+    ///   skip adoption entirely.
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
+    ///
+    /// # Adopting sidecar-less files
+    ///
+    /// A value file can be sitting in the store directory with no metadata
+    /// sidecar — written there out-of-band by a CLI, say — so no key addresses
+    /// it. For each [`AdoptionCandidate`], open writes the
+    /// missing sidecar, binding the key to the file it found, so every ordinary
+    /// read path (`get_value`, `list_keys`, `get_public_url`) sees a normal
+    /// record from then on. Value bytes are never touched. The canonical case
+    /// is a run's input (`INPUT`, `INPUT.json`, ...), but nothing here is
+    /// specific to it.
+    ///
+    /// A key that already has a usable record is left alone; a sidecar whose
+    /// bound file is missing (or which won't parse) is not usable, so it gets
+    /// rewritten. Which filenames to adopt, and what content type each implies,
+    /// is entirely the caller's declaration — the core infers nothing from an
+    /// extension. Declaring several files that all exist is an error
+    /// ([`StorageError::AmbiguousInput`]): there is no way to guess which one
+    /// the key means.
     ///
     /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
     /// custom clock (e.g. for tests), use [`open_with_clock`](Self::open_with_clock).
@@ -58,8 +80,9 @@ impl FileSystemKeyValueStoreClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
+        adopt: &[AdoptionCandidate],
     ) -> Result<Self> {
-        Self::open_with_clock(id, name, alias, storage_dir, system_clock()).await
+        Self::open_with_clock(id, name, alias, storage_dir, adopt, system_clock()).await
     }
 
     /// Open an existing KVS or create a new one, using the supplied clock.
@@ -68,6 +91,7 @@ impl FileSystemKeyValueStoreClient {
         name: Option<String>,
         alias: Option<String>,
         storage_dir: &Path,
+        adopt: &[AdoptionCandidate],
         clock: ClockRef,
     ) -> Result<Self> {
         validate_exclusive_args(&id, &name, &alias)?;
@@ -107,11 +131,73 @@ impl FileSystemKeyValueStoreClient {
             meta
         };
 
-        Ok(Self {
+        let client = Self {
             metadata: Mutex::new(metadata),
             path,
             clock,
-        })
+        };
+        client.adopt_files(adopt).await?;
+        Ok(client)
+    }
+
+    /// Write the missing sidecar for each adoption candidate that resolves to
+    /// exactly one on-disk file. See [`open`](Self::open) for the contract.
+    async fn adopt_files(&self, candidates: &[AdoptionCandidate]) -> Result<()> {
+        for candidate in candidates {
+            let encoded = encode_key(&candidate.key);
+
+            // An unreadable sidecar, or one bound to a file that isn't there,
+            // is not a record the key can be read through — so it is replaced
+            // rather than honored.
+            let tracked = match self.read_sidecar(&encoded).await.ok().flatten() {
+                Some(meta) => self
+                    .value_path(&encoded, meta.filename.as_deref())
+                    .is_ok_and(|path| path.is_file()),
+                None => false,
+            };
+            if tracked {
+                continue;
+            }
+
+            let mut present: Vec<(&str, &str, u64)> = Vec::new();
+            for file in &candidate.files {
+                // A sidecar is never itself an adoptable value file. Anything
+                // else that can't name a file inside the store is a caller bug.
+                if is_metadata_filename(&file.filename) {
+                    continue;
+                }
+                let filename = validate_filename(&file.filename)?;
+                match fs::metadata(self.path.join(filename)).await {
+                    Ok(meta) if meta.is_file() => {
+                        present.push((filename, &file.content_type, meta.len()))
+                    }
+                    _ => {}
+                }
+            }
+
+            let (filename, content_type, size) = match present[..] {
+                [] => continue,
+                [only] => only,
+                _ => {
+                    return Err(StorageError::AmbiguousInput {
+                        key: candidate.key.clone(),
+                        files: present.iter().map(|(name, ..)| name.to_string()).collect(),
+                    })
+                }
+            };
+
+            let record_meta = KeyValueStoreRecordMetadata {
+                key: candidate.key.clone(),
+                content_type: content_type.to_string(),
+                size: Some(size as usize),
+                // Omitted for the ordinary case, so the sidecar stays
+                // byte-identical to what a plain `set_value` would write.
+                filename: (filename != encoded).then(|| filename.to_string()),
+            };
+            let json = json_dumps_value(&record_meta)?;
+            atomic_write(&self.sidecar_path(&encoded), json.as_bytes()).await?;
+        }
+        Ok(())
     }
 
     /// Return a reference to this client's clock.
@@ -187,13 +273,18 @@ impl FileSystemKeyValueStoreClient {
             let encoded = encode_key(key);
             // A bound value file lives under a name the key alone doesn't
             // reveal; an unreadable sidecar just means we can't spare it.
-            if let Ok(Some(record_meta)) = self.read_sidecar(&encoded).await {
-                if let Some(Ok(filename)) = record_meta.filename.as_deref().map(validate_filename) {
-                    keep_files.insert(filename.to_string());
-                }
-            }
+            let bound = self
+                .read_sidecar(&encoded)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|record_meta| record_meta.filename)
+                .filter(|filename| validate_filename(filename).is_ok());
             keep_files.insert(format!("{encoded}.{METADATA_FILENAME}"));
-            keep_files.insert(encoded);
+            // Only the file the key actually resolves to: sparing `encoded` as
+            // well would let a stray file under that name outlive every purge,
+            // unreachable through the key that bound its way elsewhere.
+            keep_files.insert(bound.unwrap_or(encoded));
         }
 
         match fs::read_dir(&self.path).await {
@@ -279,14 +370,12 @@ impl FileSystemKeyValueStoreClient {
     /// `.json` implies" policy stays at the caller. Pass an empty slice to list
     /// only tracked records.
     ///
-    /// **Round-trip caveat:** a surfaced bare key does **not** round-trip through
-    /// the strict read path. The listed key is the literal on-disk `name`, but
-    /// [`get_value`](Self::get_value) / [`record_exists`](Self::record_exists)
-    /// only ever see tracked records (value file + sidecar) and therefore return
-    /// `None` / `false` for a sidecar-less bare file. To read a listed bare key
-    /// back, go through [`resolve_value`](Self::resolve_value) /
-    /// [`resolve_existing_key`](Self::resolve_existing_key) (with an empty-string
-    /// extension fallback for the literal `name`), not `get_value`.
+    /// **`bare_fallbacks` is deprecated.** A key surfaced this way does not
+    /// round-trip: [`get_value`](Self::get_value) /
+    /// [`record_exists`](Self::record_exists) only see tracked records, so a
+    /// listed bare key reads back as absent. Adopt the file at open time
+    /// instead (see [`open`](Self::open)'s `adopt` parameter) and it is listed
+    /// — and readable — as an ordinary record.
     pub async fn iterate_keys_page(
         &self,
         exclusive_start_key: Option<&str>,
@@ -334,7 +423,7 @@ impl FileSystemKeyValueStoreClient {
     /// the fetch size for this single page *and* the value echoed back as
     /// `KvsListKeysResult::limit`.
     ///
-    /// `prefix` and `bare_fallbacks` behave exactly as in
+    /// `prefix` and the deprecated `bare_fallbacks` behave exactly as in
     /// [`iterate_keys_page`](Self::iterate_keys_page) — the same shared
     /// pagination + bare-file dedup logic in
     /// [`list_keys_raw`](Self::list_keys_raw) backs both. In particular, a bare
@@ -656,9 +745,12 @@ impl FileSystemKeyValueStoreClient {
     /// treated as absent. When `false`, a value file with no sidecar is still
     /// returned, with synthesized metadata: `content_type` is the generic
     /// `application/octet-stream` sentinel (the client never infers a type from
-    /// the file extension — that foreign-file convention lives at the frontend)
-    /// and `size` is the value-file length. This is the escape hatch for reading
-    /// out-of-band files (e.g. a CLI-written `INPUT.json` that has no sidecar).
+    /// the file extension) and `size` is the value-file length.
+    ///
+    /// **Passing `false` is deprecated**, along with the rest of the
+    /// sidecar-less read path: adopt such files at open time (see
+    /// [`open`](Self::open)'s `adopt` parameter) so they become ordinary
+    /// records instead of being read behind the listing's back.
     pub async fn get_value(
         &self,
         key: &str,
@@ -779,8 +871,15 @@ impl FileSystemKeyValueStoreClient {
 
     /// Like [`resolve_value`](Self::resolve_value), but reads the matched value
     /// file into a [`KeyValueStoreRecord`] (bytes + non-optional `size`) in one
-    /// call. This is the bare-file-aware read counterpart binding layers should
-    /// use so they don't re-implement the read + size-finalization.
+    /// call.
+    ///
+    /// **Deprecated**: adopt sidecar-less files at open time (the `adopt`
+    /// parameter of [`open`](Self::open)) and read them back through
+    /// [`read_value`](Self::read_value).
+    #[deprecated(
+        note = "adopt sidecar-less files via `open`'s `adopt` parameter, then `read_value`"
+    )]
+    #[allow(deprecated)]
     pub async fn resolve_and_read_value(
         &self,
         key: &str,
@@ -795,28 +894,27 @@ impl FileSystemKeyValueStoreClient {
     /// Resolve a key to a value, transparently falling back to out-of-band
     /// ("bare") value files that have no metadata sidecar.
     ///
-    /// This bundles the lookup that binding layers would otherwise hand-roll: a
-    /// run's input may be a properly-tracked record, or an out-of-band file a
-    /// CLI/platform dropped on disk under one of several conventional names
-    /// (`INPUT`, `INPUT.json`, `INPUT.bin`, ...). The probe order is:
+    /// **Deprecated**: a bare file resolved this way stays untracked — it is
+    /// invisible to `list_keys`, and every reader has to re-declare the same
+    /// probe list. Declare it as an [`AdoptionCandidate`] on
+    /// [`open`](Self::open) instead, which turns it into an ordinary record
+    /// once.
+    ///
+    /// The probe order is:
     ///
     /// 1. The tracked record for the literal `key` (value file + sidecar). Its
     ///    `content_type` comes verbatim from the sidecar.
     /// 2. For each `(extension, content_type)` in `bare_fallbacks`, the bare
     ///    file at `key + extension` (no sidecar required). On a match the
-    ///    supplied `content_type` is used.
+    ///    supplied `content_type` is used (an empty one keeps the synthesized
+    ///    `application/octet-stream`).
     ///
     /// The first match wins. The returned [`KeyValueStoreRecordMetadata`] is
     /// always keyed by the originally-requested `key` (never the on-disk
     /// filename of a matched bare file), so callers see a stable key.
     ///
-    /// The core still performs **no** MIME inference of its own: the caller
-    /// declares which extensions to probe and what content type each implies
-    /// (the `(extension, content_type)` pairs). That keeps the "which files are
-    /// input, and what type is a `.json`" policy at the frontend while the
-    /// probing/lookup mechanism lives here, shared by every binding.
-    ///
     /// Returns `(value_path, metadata)` for the first match, or `None`.
+    #[deprecated(note = "declare the file as an `AdoptionCandidate` on `open` instead")]
     pub async fn resolve_value(
         &self,
         key: &str,
@@ -854,6 +952,11 @@ impl FileSystemKeyValueStoreClient {
     /// The matched key is what a caller should pass to
     /// [`get_public_url`](Self::get_public_url) so the URL points at the file
     /// that exists.
+    ///
+    /// **Deprecated**: adopt the file at open time (see
+    /// [`open`](Self::open)'s `adopt` parameter) and hand `key` straight to
+    /// [`get_public_url`](Self::get_public_url).
+    #[deprecated(note = "declare the file as an `AdoptionCandidate` on `open` instead")]
     pub async fn resolve_existing_key(&self, key: &str, bare_fallbacks: &[&str]) -> Option<String> {
         if self.record_exists(key, true).await {
             return Some(key.to_string());
@@ -984,11 +1087,13 @@ impl FileSystemKeyValueStoreClient {
 
     /// Check if a record exists for a key.
     ///
-    /// When `require_record_metadata` is `true`, the metadata sidecar must exist
-    /// and the value file it points at must be there. When `false`, a bare value
-    /// file at the key's own name counts too — matching the relaxed
-    /// [`get_value`](Self::get_value) lookup for reading out-of-band files that
-    /// have no sidecar.
+    /// The metadata sidecar must exist *and* the value file it binds must be
+    /// there — a dangling sidecar is not a record, matching
+    /// [`get_value`](Self::get_value).
+    ///
+    /// When `require_record_metadata` is `false`, a bare value file at the
+    /// key's own name counts too. **That is deprecated**, like the rest of the
+    /// sidecar-less read path; adopt the file on [`open`](Self::open) instead.
     pub async fn record_exists(&self, key: &str, require_record_metadata: bool) -> bool {
         let encoded = encode_key(key);
         match self.read_sidecar(&encoded).await {
@@ -1005,6 +1110,7 @@ impl FileSystemKeyValueStoreClient {
 mod tests {
     use super::*;
 
+    use crate::models::AdoptableFile;
     use tempfile::TempDir;
 
     /// Read back the raw value bytes + content type for a key via the byte-only
@@ -1023,7 +1129,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1070,7 +1176,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1097,7 +1203,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1121,7 +1227,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1145,7 +1251,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1181,7 +1287,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1209,7 +1315,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1235,7 +1341,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1247,7 +1353,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1271,7 +1377,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1313,11 +1419,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_value_prefers_tracked_record() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1342,16 +1449,17 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_value_falls_back_to_bare_file_with_inferred_type() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
         // No tracked "INPUT" record; instead a bare "INPUT.json" file (no
-        // sidecar), as a CLI/platform writer would leave it.
+        // sidecar), as an out-of-band writer would leave it.
         let payload = br#"{"foo":"bar"}"#;
         tokio::fs::write(client.path().join("INPUT.json"), payload)
             .await
@@ -1378,11 +1486,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_value_bare_empty_extension_keeps_octet_stream() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1403,11 +1512,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_value_missing_returns_none() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1420,11 +1530,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_existing_key() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1453,12 +1564,249 @@ mod tests {
         assert_eq!(client.resolve_existing_key("nope", &fallbacks).await, None);
     }
 
+    /// The adoption candidate a caller declares for the run input: the key
+    /// `INPUT`, adoptable from either the extension-less file or `INPUT.json`.
+    fn input_candidates() -> Vec<AdoptionCandidate> {
+        vec![AdoptionCandidate {
+            key: "INPUT".to_string(),
+            files: vec![
+                AdoptableFile {
+                    filename: "INPUT".to_string(),
+                    content_type: "application/octet-stream".to_string(),
+                },
+                AdoptableFile {
+                    filename: "INPUT.json".to_string(),
+                    content_type: "application/json".to_string(),
+                },
+            ],
+        }]
+    }
+
+    async fn raw_sidecar(
+        client: &FileSystemKeyValueStoreClient,
+        key: &str,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let path = client.sidecar_path(&encode_key(key));
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_adopt_with_no_candidate_file_present() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let client = FileSystemKeyValueStoreClient::open(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            &input_candidates(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!client.record_exists("INPUT", true).await);
+        assert!(!client.sidecar_path("INPUT").exists());
+    }
+
+    #[tokio::test]
+    async fn test_adopt_binds_the_single_present_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
+            .await
+            .unwrap();
+        let payload = br#"{"foo":"bar"}"#;
+        tokio::fs::write(client.path().join("INPUT.json"), payload)
+            .await
+            .unwrap();
+
+        let client =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &input_candidates())
+                .await
+                .unwrap();
+
+        // The bare file is now an ordinary record: readable under the declared
+        // key, with the declared content type and a size stated from disk.
+        let record = client.read_value("INPUT").await.unwrap().unwrap();
+        assert_eq!(record.value, payload);
+        assert_eq!(record.content_type, "application/json");
+        assert_eq!(record.size, payload.len());
+        // ... and listed, which a bare file never was.
+        let page = client.list_keys(None, None, None, &[]).await.unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|m| m.key.as_str())
+                .collect::<Vec<_>>(),
+            ["INPUT"]
+        );
+
+        let sidecar = raw_sidecar(&client, "INPUT").await;
+        assert_eq!(sidecar["filename"], "INPUT.json");
+        assert_eq!(sidecar["size"], payload.len());
+        // Bytes untouched — adoption only ever writes the sidecar.
+        assert_eq!(
+            tokio::fs::read(client.path().join("INPUT.json"))
+                .await
+                .unwrap(),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_omits_filename_for_the_default_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
+            .await
+            .unwrap();
+        tokio::fs::write(client.path().join("INPUT"), b"raw")
+            .await
+            .unwrap();
+
+        let client =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &input_candidates())
+                .await
+                .unwrap();
+
+        // The adopted file already is the encoded key, so the sidecar carries no
+        // binding and stays byte-identical to a plain `set_value` one.
+        let sidecar = raw_sidecar(&client, "INPUT").await;
+        assert!(!sidecar.contains_key("filename"), "got: {sidecar:?}");
+        assert_eq!(
+            client.read_value("INPUT").await.unwrap().unwrap().value,
+            b"raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_rejects_several_present_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
+            .await
+            .unwrap();
+        tokio::fs::write(client.path().join("INPUT"), b"raw")
+            .await
+            .unwrap();
+        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
+            .await
+            .unwrap();
+
+        let result =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &input_candidates())
+                .await;
+
+        match result {
+            Err(StorageError::AmbiguousInput { key, files }) => {
+                assert_eq!(key, "INPUT");
+                assert_eq!(files, ["INPUT", "INPUT.json"]);
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected adoption to reject two candidate files"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_adopt_leaves_a_tracked_record_alone() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
+            .await
+            .unwrap();
+        client
+            .set_value("INPUT", b"tracked", "text/plain".to_string(), None)
+            .await
+            .unwrap();
+        // A second candidate file exists too — irrelevant, since the key already
+        // resolves, so this must not trip the ambiguity check either.
+        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
+            .await
+            .unwrap();
+
+        let client =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &input_candidates())
+                .await
+                .unwrap();
+
+        let record = client.read_value("INPUT").await.unwrap().unwrap();
+        assert_eq!(record.value, b"tracked");
+        assert_eq!(record.content_type, "text/plain");
+    }
+
+    #[tokio::test]
+    async fn test_adopt_rewrites_a_dangling_sidecar() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
+            .await
+            .unwrap();
+        client
+            .set_value("INPUT", b"old", "text/plain".to_string(), None)
+            .await
+            .unwrap();
+        // Someone removed the value file behind the sidecar's back.
+        tokio::fs::remove_file(client.path().join("INPUT"))
+            .await
+            .unwrap();
+        assert!(!client.record_exists("INPUT", true).await);
+        assert!(client.get_value("INPUT", true).await.unwrap().is_none());
+
+        tokio::fs::write(client.path().join("INPUT.json"), b"{}")
+            .await
+            .unwrap();
+        let client =
+            FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &input_candidates())
+                .await
+                .unwrap();
+
+        let record = client.read_value("INPUT").await.unwrap().unwrap();
+        assert_eq!(record.value, b"{}");
+        assert_eq!(record.content_type, "application/json");
+    }
+
+    #[tokio::test]
+    async fn test_purge_does_not_keep_the_encoded_name_of_a_bound_key() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
+            .await
+            .unwrap();
+        client
+            .set_value(
+                "INPUT",
+                b"{}",
+                "application/json".to_string(),
+                Some("INPUT.json"),
+            )
+            .await
+            .unwrap();
+        // A stray file under the key's own name: unreachable through "INPUT",
+        // which the sidecar binds to "INPUT.json".
+        let stray = client.path().join("INPUT");
+        tokio::fs::write(&stray, b"stray").await.unwrap();
+
+        client.purge(&["INPUT".to_string()]).await.unwrap();
+
+        assert!(!stray.exists());
+        assert_eq!(
+            client.read_value("INPUT").await.unwrap().unwrap().value,
+            b"{}"
+        );
+    }
+
     #[tokio::test]
     async fn test_sidecar_present_ignores_flag() {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1486,7 +1834,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1534,7 +1882,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1568,7 +1916,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1604,7 +1952,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1647,7 +1995,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1672,7 +2020,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1709,7 +2057,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1740,7 +2088,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1806,7 +2154,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1870,12 +2218,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
-        // One tracked record, plus a bare INPUT.json with no sidecar (as a
-        // CLI/platform writer would leave it).
+        // One tracked record, plus a bare INPUT.json with no sidecar (as an
+        // out-of-band writer would leave it).
         let ct = "application/json; charset=utf-8".to_string();
         client.set_value("alpha", b"1", ct, None).await.unwrap();
         let payload = br#"{"foo":"bar"}"#;
@@ -1920,7 +2268,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -1957,7 +2305,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2015,7 +2363,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2044,9 +2392,10 @@ mod tests {
         // These keys sort one way as keys and the other way as `%XX` filenames.
         for keys in [["a.b", "a:b"], ["zz", "éz"]] {
             let temp_dir = TempDir::new().unwrap();
-            let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
-                .await
-                .unwrap();
+            let client =
+                FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
+                    .await
+                    .unwrap();
 
             let ct = "text/plain".to_string();
             for key in keys {
@@ -2092,7 +2441,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2136,7 +2485,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2177,7 +2526,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2215,7 +2564,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2301,7 +2650,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2352,7 +2701,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2384,7 +2733,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2415,7 +2764,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage_dir = temp_dir.path();
 
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir)
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, &[])
             .await
             .unwrap();
 
@@ -2464,6 +2813,7 @@ mod tests {
                 Some("kvs".to_string()),
                 None,
                 storage_dir,
+                &[],
             )
             .await
             .unwrap();
@@ -2489,10 +2839,15 @@ mod tests {
         }
 
         // Reopen the same store by name, emulating a fresh process.
-        let reopened =
-            FileSystemKeyValueStoreClient::open(None, Some("kvs".to_string()), None, storage_dir)
-                .await
-                .unwrap();
+        let reopened = FileSystemKeyValueStoreClient::open(
+            None,
+            Some("kvs".to_string()),
+            None,
+            storage_dir,
+            &[],
+        )
+        .await
+        .unwrap();
 
         let (bytes, content_type, _) = read_back(&reopened, "greeting").await.unwrap();
         assert_eq!(bytes, b"hello");
@@ -2536,6 +2891,7 @@ mod tests {
             Some("legacy-kvs".to_string()),
             None,
             storage_dir,
+            &[],
         )
         .await
         .unwrap();
@@ -2561,7 +2917,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_value_returns_bytes_and_size() {
         let temp_dir = TempDir::new().unwrap();
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
             .await
             .unwrap();
 
@@ -2591,7 +2947,7 @@ mod tests {
         // A sidecar written by crawlee-JS / older Python may omit `size`.
         // read_value must finalize it from the actual byte count, never None.
         let temp_dir = TempDir::new().unwrap();
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
             .await
             .unwrap();
 
@@ -2616,7 +2972,7 @@ mod tests {
     #[tokio::test]
     async fn test_value_file_info_has_size_without_reading_bytes() {
         let temp_dir = TempDir::new().unwrap();
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
             .await
             .unwrap();
 
@@ -2637,13 +2993,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_resolve_and_read_value_bare_fallback() {
         let temp_dir = TempDir::new().unwrap();
-        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path())
+        let client = FileSystemKeyValueStoreClient::open(None, None, None, temp_dir.path(), &[])
             .await
             .unwrap();
 
-        // Bare INPUT.json with no sidecar, as a CLI/platform writer leaves it.
+        // Bare INPUT.json with no sidecar, as an out-of-band writer leaves it.
         let payload = br#"{"foo":"bar"}"#;
         tokio::fs::write(client.path().join("INPUT.json"), payload)
             .await

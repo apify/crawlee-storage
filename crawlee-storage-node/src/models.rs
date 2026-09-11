@@ -65,6 +65,41 @@ impl From<crawlee_storage::models::KeyValueStoreRecordMetadata> for KeyValueStor
     }
 }
 
+/// One on-disk file an `AdoptionCandidate` may bind its key to. `filename` is
+/// used verbatim (never percent-encoded) and must be a plain filename directly
+/// inside the store directory; `contentType` is what the written sidecar will
+/// report, since the core infers nothing from the extension.
+#[napi(object)]
+pub struct AdoptableFile {
+    pub filename: String,
+    pub content_type: String,
+}
+
+/// A key whose value file may already be on disk without a sidecar, plus the
+/// files the caller is willing to adopt for it. See
+/// `FileSystemKeyValueStoreClient.open`.
+#[napi(object)]
+pub struct AdoptionCandidate {
+    pub key: String,
+    pub files: Vec<AdoptableFile>,
+}
+
+impl From<AdoptionCandidate> for crawlee_storage::models::AdoptionCandidate {
+    fn from(c: AdoptionCandidate) -> Self {
+        Self {
+            key: c.key,
+            files: c
+                .files
+                .into_iter()
+                .map(|f| crawlee_storage::models::AdoptableFile {
+                    filename: f.filename,
+                    content_type: f.content_type,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One out-of-band ("bare") file fallback for `resolveValue` / `resolveExistingKey`:
 /// an extension appended to the looked-up key, plus the content type to report
 /// when a bare file with that extension is matched. An empty `contentType`
@@ -72,6 +107,8 @@ impl From<crawlee_storage::models::KeyValueStoreRecordMetadata> for KeyValueStor
 ///
 /// The core does no MIME inference of its own — the caller declares this
 /// extension→content-type policy (e.g. `.json` → `application/json`).
+///
+/// @deprecated Declare the file as an `AdoptionCandidate` on `open` instead.
 #[napi(object)]
 pub struct BareFallback {
     pub extension: String,
@@ -128,6 +165,9 @@ impl From<crawlee_storage::models::KvsListKeysResult> for KeyValueStoreListKeysR
 ///
 /// As with `resolveValue`, the core does no MIME inference — the caller declares
 /// this name→content-type policy.
+///
+/// @deprecated Declare the file as an `AdoptionCandidate` on `open` instead,
+/// which lists it as an ordinary record.
 #[napi(object)]
 pub struct ListBareFallback {
     pub name: String,

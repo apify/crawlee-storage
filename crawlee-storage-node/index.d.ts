@@ -28,12 +28,27 @@ export declare class FileSystemDatasetClient {
 }
 
 export declare class FileSystemKeyValueStoreClient {
+    /**
+     * Open an existing key-value store or create a new one.
+     *
+     * `adopt` declares keys whose value file may already be on disk without a
+     * metadata sidecar — written into the store directory out-of-band by a
+     * CLI, say — so no key currently addresses it. For each
+     * candidate, open writes the missing sidecar (binding the key to whichever
+     * declared file it finds), so the file becomes an ordinary record:
+     * readable via `getValue`, visible in `listKeys`. Value bytes are never
+     * touched. A key that already has a usable record is left alone;
+     * declaring several files that all exist throws, since there is no way to
+     * guess which one the key means. The canonical case is a run's input
+     * (`INPUT`, `INPUT.json`, ...), but nothing here is specific to it.
+     */
     static open(
         id?: string | undefined | null,
         name?: string | undefined | null,
         alias?: string | undefined | null,
         storageDir?: string | undefined | null,
         useTestClock?: boolean | undefined | null,
+        adopt?: Array<AdoptionCandidate> | undefined | null,
     ): Promise<FileSystemKeyValueStoreClient>;
     /**
      * Advance the client's clock by `millis` milliseconds. Only usable when
@@ -55,9 +70,8 @@ export declare class FileSystemKeyValueStoreClient {
      * Get a tracked record (value file + metadata sidecar) by key. Returns the
      * raw value bytes as a Buffer, or `undefined` if there is no such tracked record.
      *
-     * To read out-of-band files that have no metadata sidecar (e.g. a
-     * CLI-written `INPUT.json`), use `resolveValue`, which probes the
-     * conventional bare-file extensions.
+     * A value file with no sidecar is not a record: declare it as an
+     * `AdoptionCandidate` on `open` and it becomes one.
      */
     getValue(key: string): Promise<KeyValueStoreRecord | undefined>;
     /**
@@ -70,8 +84,10 @@ export declare class FileSystemKeyValueStoreClient {
      * a match. The first match wins; the returned record is always keyed by
      * the requested `key`. Returns `undefined` if nothing resolves.
      *
-     * Use this for run-input lookup (`INPUT`, `INPUT.json`, `INPUT.bin`, ...)
-     * instead of hand-rolling the extension probing in JS.
+     * @deprecated Declare the file as an `AdoptionCandidate` on `open`
+     * instead: adoption turns it into a real record once, so `getValue` and
+     * `listKeys` both see it, rather than every reader re-declaring the same
+     * probe list for a file that stays invisible to listings.
      */
     resolveValue(
         key: string,
@@ -83,6 +99,9 @@ export declare class FileSystemKeyValueStoreClient {
      * Returns the matched key (the literal key or `key + extension`), or
      * `undefined` if nothing exists. Pass the result to `getPublicUrl` so the URL
      * points at the file that exists.
+     *
+     * @deprecated Declare the file as an `AdoptionCandidate` on `open`
+     * instead, then pass `key` straight to `getPublicUrl`.
      */
     resolveExistingKey(key: string, bareFallbacks: Array<string>): Promise<string | undefined>;
     /**
@@ -122,11 +141,10 @@ export declare class FileSystemKeyValueStoreClient {
      * under `name`. Pass an empty array (the default) to list only tracked
      * records.
      *
-     * Round-trip caveat: a surfaced bare key does NOT round-trip through the
-     * strict read path. The listed key is the literal on-disk `name`, but
-     * `getValue` / `recordExists` only see tracked records (value + sidecar) and
-     * return `null` / `false` for a sidecar-less bare file. Read a listed bare
-     * key back via `resolveValue` / `resolveExistingKey`, not `getValue`.
+     * `bareFallbacks` is deprecated: a surfaced bare key does NOT round-trip
+     * through the strict read path — `getValue` / `recordExists` only see
+     * tracked records, so it reads back as absent. Adopt the file on `open`
+     * instead and it is both listed and readable as an ordinary record.
      */
     listKeys(
         exclusiveStartKey?: string | undefined | null,
@@ -138,14 +156,13 @@ export declare class FileSystemKeyValueStoreClient {
      * Build a `file://` URL for `key`'s value file. Honors a sidecar's bound
      * `filename`, but does not stat the file, so the URL is returned whether
      * or not anything is there yet. Bare-file extensions are not probed — a
-     * caller chasing a sidecar-less file resolves the key via
-     * `resolveExistingKey` first.
+     * sidecar-less file is addressable once it has been adopted on `open`.
      */
     getPublicUrl(key: string): Promise<string>;
     /**
      * Check whether a tracked record (value file + metadata sidecar) exists for
-     * `key`. To also match out-of-band files with no sidecar, use
-     * `resolveExistingKey`, which probes the conventional bare-file extensions.
+     * `key`. A sidecar whose bound value file is missing is not a record, and
+     * neither is a value file with no sidecar until it is adopted on `open`.
      */
     recordExists(key: string): Promise<boolean>;
 }
@@ -213,6 +230,27 @@ export interface AddRequestsResponse {
 }
 
 /**
+ * One on-disk file an `AdoptionCandidate` may bind its key to. `filename` is
+ * used verbatim (never percent-encoded) and must be a plain filename directly
+ * inside the store directory; `contentType` is what the written sidecar will
+ * report, since the core infers nothing from the extension.
+ */
+export interface AdoptableFile {
+    filename: string;
+    contentType: string;
+}
+
+/**
+ * A key whose value file may already be on disk without a sidecar, plus the
+ * files the caller is willing to adopt for it. See
+ * `FileSystemKeyValueStoreClient.open`.
+ */
+export interface AdoptionCandidate {
+    key: string;
+    files: Array<AdoptableFile>;
+}
+
+/**
  * One out-of-band ("bare") file fallback for `resolveValue` / `resolveExistingKey`:
  * an extension appended to the looked-up key, plus the content type to report
  * when a bare file with that extension is matched. An empty `contentType`
@@ -220,6 +258,8 @@ export interface AddRequestsResponse {
  *
  * The core does no MIME inference of its own — the caller declares this
  * extension→content-type policy (e.g. `.json` → `application/json`).
+ *
+ * @deprecated Declare the file as an `AdoptionCandidate` on `open` instead.
  */
 export interface BareFallback {
     extension: string;
@@ -332,6 +372,9 @@ export interface KeyValueStoreRecordMetadata {
  *
  * As with `resolveValue`, the core does no MIME inference — the caller declares
  * this name→content-type policy.
+ *
+ * @deprecated Declare the file as an `AdoptionCandidate` on `open` instead,
+ * which lists it as an ordinary record.
  */
 export interface ListBareFallback {
     name: string;

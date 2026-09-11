@@ -181,6 +181,31 @@ pub struct KeyValueStoreValueFileInfo {
     pub path: std::path::PathBuf,
 }
 
+// ─── Key-Value Store Adoption ───────────────────────────────────────────────
+
+/// One on-disk file an [`AdoptionCandidate`] may bind its key to.
+///
+/// `filename` is used verbatim (never percent-encoded) and must pass
+/// [`crate::utils::validate_filename`]. `content_type` is what the written
+/// sidecar will report; the core infers nothing from the extension.
+#[derive(Debug, Clone)]
+pub struct AdoptableFile {
+    pub filename: String,
+    pub content_type: String,
+}
+
+/// A key whose value file may already be on disk without a sidecar, together
+/// with the files the caller is willing to adopt for it.
+///
+/// See
+/// [`FileSystemKeyValueStoreClient::open`](crate::key_value_store::FileSystemKeyValueStoreClient::open)
+/// for when adoption runs and what it writes.
+#[derive(Debug, Clone)]
+pub struct AdoptionCandidate {
+    pub key: String,
+    pub files: Vec<AdoptableFile>,
+}
+
 // ─── Request Queue Metadata ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
