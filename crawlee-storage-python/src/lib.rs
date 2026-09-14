@@ -221,6 +221,11 @@ impl FileSystemDatasetClient {
 
 // ─── Key-Value Store Client ─────────────────────────────────────────────────
 
+/// One `adopt` entry as it crosses the FFI:
+/// `(key, [(filename, content_type), ...])`. A `None` key makes it a sweep,
+/// whose filenames are glob patterns.
+type AdoptSpec = (Option<String>, Vec<(String, String)>);
+
 #[gen_stub_pyclass]
 #[pyclass]
 struct FileSystemKeyValueStoreClient {
@@ -233,17 +238,25 @@ struct FileSystemKeyValueStoreClient {
 impl FileSystemKeyValueStoreClient {
     /// Open an existing key-value store or create a new one.
     ///
-    /// ``adopt`` declares keys whose value file may already be on disk without
-    /// a metadata sidecar — written into the store directory out-of-band by a
-    /// CLI, say — so no key currently addresses it. Each entry
-    /// is a ``(key, [(filename, content_type), ...])`` pair: open writes the
-    /// missing sidecar, binding the key to whichever declared file it finds, so
-    /// the file becomes an ordinary record (readable via ``get_value``, visible
-    /// in ``list_keys``). Value bytes are never touched. A key that already has
-    /// a usable record is left alone; declaring several files that all exist
-    /// raises ``ValueError``, since there is no way to guess which one the key
-    /// means. The canonical case is a run's input (``INPUT``, ``INPUT.json``,
-    /// ...), but nothing here is specific to it.
+    /// ``adopt`` pulls value files that are on disk without a metadata sidecar
+    /// — written into the store directory out-of-band by a CLI, say, so no key
+    /// currently addresses them — into ordinary records: open writes the
+    /// missing sidecar, and from then on they are readable via ``get_value``
+    /// and visible in ``list_keys``. Value bytes are never touched.
+    ///
+    /// Each entry is a ``(key, [(filename, content_type), ...])`` pair binding
+    /// ``key`` to whichever of the declared filenames is there. A key that
+    /// already has a usable record is left alone; declaring several files that
+    /// all exist raises ``ValueError``, since there is no way to guess which
+    /// one the key means.
+    ///
+    /// An entry whose key is ``None`` is a sweep: the filenames are glob
+    /// patterns (``*``, ``?``), and every matching file nothing else owns is
+    /// adopted under its own filename as the key, first matching pattern
+    /// winning. A sweep skips dotfiles, anything that already has a sidecar or
+    /// is bound by one, and any filename a keyed entry declared — those run
+    /// first, whatever order they were passed in. An empty pattern, or one
+    /// containing ``/``, raises ``ValueError``.
     #[staticmethod]
     #[pyo3(signature = (id=None, name=None, alias=None, storage_dir="./storage", use_test_clock=false, adopt=vec![]))]
     #[gen_stub(override_return_type(type_repr = "FileSystemKeyValueStoreClient"))]
@@ -254,23 +267,36 @@ impl FileSystemKeyValueStoreClient {
         alias: Option<String>,
         storage_dir: &str,
         use_test_clock: bool,
-        adopt: Vec<(String, Vec<(String, String)>)>,
+        adopt: Vec<AdoptSpec>,
     ) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let storage_dir = PathBuf::from(storage_dir);
         let (clock, test_clock) = pick_clock(use_test_clock);
         let adopt: Vec<crawlee_storage::models::AdoptionCandidate> = adopt
             .into_iter()
-            .map(|(key, files)| crawlee_storage::models::AdoptionCandidate {
-                key,
-                files: files
-                    .into_iter()
-                    .map(
-                        |(filename, content_type)| crawlee_storage::models::AdoptableFile {
-                            filename,
-                            content_type,
-                        },
-                    )
-                    .collect(),
+            .map(|(key, files)| match key {
+                Some(key) => crawlee_storage::models::AdoptionCandidate::Key {
+                    key,
+                    files: files
+                        .into_iter()
+                        .map(
+                            |(filename, content_type)| crawlee_storage::models::AdoptableFile {
+                                filename,
+                                content_type,
+                            },
+                        )
+                        .collect(),
+                },
+                None => crawlee_storage::models::AdoptionCandidate::Sweep {
+                    rules: files
+                        .into_iter()
+                        .map(
+                            |(pattern, content_type)| crawlee_storage::models::AdoptionRule {
+                                pattern,
+                                content_type,
+                            },
+                        )
+                        .collect(),
+                },
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

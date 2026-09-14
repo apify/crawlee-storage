@@ -241,6 +241,29 @@ async def test_open_rejects_several_adoptable_files(storage_dir: str) -> None:
         await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=_INPUT_CANDIDATES)
 
 
+async def test_open_sweeps_unowned_files(storage_dir: str) -> None:
+    """An `adopt` entry with a `None` key sweeps files matching its patterns, under
+    their own names, leaving whatever a keyed entry declared to that entry."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(b"{}")
+    (Path(client.path_to_kvs) / "proxies.json").write_bytes(b"[]")
+
+    adopt = [*_INPUT_CANDIDATES, (None, [("*.json", "application/json; charset=utf-8")])]
+    adopted = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=adopt)
+
+    page = await adopted.list_keys()
+    assert [item["key"] for item in page["items"]] == ["INPUT", "proxies.json"]
+    assert [item["contentType"] for item in page["items"]] == [
+        "application/json",
+        "application/json; charset=utf-8",
+    ]
+
+
+async def test_open_rejects_an_invalid_sweep_pattern(storage_dir: str) -> None:
+    with pytest.raises(ValueError, match="pattern"):
+        await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=[(None, [("a/b", "text/plain")])])
+
+
 async def test_set_value_binds_key_to_a_filename(storage_dir: str) -> None:
     """`filename` binds a key to a file whose name doesn't match it, and the read
     paths follow the binding rather than the key's own encoded name."""

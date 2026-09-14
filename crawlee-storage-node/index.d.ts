@@ -31,16 +31,23 @@ export declare class FileSystemKeyValueStoreClient {
     /**
      * Open an existing key-value store or create a new one.
      *
-     * `adopt` declares keys whose value file may already be on disk without a
-     * metadata sidecar — written into the store directory out-of-band by a
-     * CLI, say — so no key currently addresses it. For each
-     * candidate, open writes the missing sidecar (binding the key to whichever
-     * declared file it finds), so the file becomes an ordinary record:
-     * readable via `getValue`, visible in `listKeys`. Value bytes are never
-     * touched. A key that already has a usable record is left alone;
-     * declaring several files that all exist throws, since there is no way to
-     * guess which one the key means. The canonical case is a run's input
-     * (`INPUT`, `INPUT.json`, ...), but nothing here is specific to it.
+     * `adopt` pulls value files that are on disk without a metadata sidecar —
+     * written into the store directory out-of-band by a CLI, say, so no key
+     * currently addresses them — into ordinary records: open writes the
+     * missing sidecar, and from then on they are readable via `getValue` and
+     * visible in `listKeys`. Value bytes are never touched.
+     *
+     * A candidate `{ key, files }` binds `key` to whichever of the declared
+     * filenames is there. A key that already has a usable record is left
+     * alone; declaring several files that all exist throws, since there is no
+     * way to guess which one the key means.
+     *
+     * A candidate without a `key` is a sweep: its `files` are glob patterns
+     * (`*`, `?`), and every matching file nothing else owns is adopted under
+     * its own filename as the key, first matching pattern winning. A sweep
+     * skips dotfiles, anything that already has a sidecar or is bound by one,
+     * and any filename a keyed candidate declared — those run first, whatever
+     * order they were passed in.
      */
     static open(
         id?: string | undefined | null,
@@ -230,10 +237,14 @@ export interface AddRequestsResponse {
 }
 
 /**
- * One on-disk file an `AdoptionCandidate` may bind its key to. `filename` is
- * used verbatim (never percent-encoded) and must be a plain filename directly
- * inside the store directory; `contentType` is what the written sidecar will
- * report, since the core infers nothing from the extension.
+ * One file an `AdoptionCandidate` may adopt.
+ *
+ * With a `key`, `filename` is an exact on-disk name the key may be bound to;
+ * without one, it is a glob pattern (`*` and `?`) matched against filenames in
+ * the store directory. Either way it is used verbatim — never
+ * percent-encoded — and names a file directly inside the store.
+ * `contentType` is what the written sidecar will report, since the core
+ * infers nothing from the extension.
  */
 export interface AdoptableFile {
     filename: string;
@@ -241,12 +252,15 @@ export interface AdoptableFile {
 }
 
 /**
- * A key whose value file may already be on disk without a sidecar, plus the
- * files the caller is willing to adopt for it. See
+ * Something `open` may adopt into a tracked record.
+ *
+ * With `key`, the key is bound to whichever of its `files` is on disk. Without
+ * it, `files` are patterns and every unowned file matching one is adopted
+ * under its own filename as the key, first match winning. See
  * `FileSystemKeyValueStoreClient.open`.
  */
 export interface AdoptionCandidate {
-    key: string;
+    key?: string;
     files: Array<AdoptableFile>;
 }
 

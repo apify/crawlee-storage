@@ -358,6 +358,39 @@ describe('FileSystemKeyValueStoreClient', () => {
         ).rejects.toThrow(/INPUT, INPUT\.json/);
     });
 
+    it('open sweeps unowned files while a keyed candidate takes its own', async () => {
+        const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
+
+        await writeFile(join(client.pathToKvs, 'INPUT.json'), Buffer.from('{}'));
+        await writeFile(join(client.pathToKvs, 'proxies.json'), Buffer.from('[]'));
+
+        const adopted = await FileSystemKeyValueStoreClient.open(
+            null,
+            null,
+            null,
+            storageDir,
+            null,
+            [
+                {
+                    key: 'INPUT',
+                    files: [
+                        { filename: 'INPUT', contentType: 'application/octet-stream' },
+                        { filename: 'INPUT.json', contentType: 'application/json' },
+                    ],
+                },
+                { files: [{ filename: '*.json', contentType: 'application/json; charset=utf-8' }] },
+            ],
+        );
+
+        const keys = (await adopted.listKeys()).items;
+        expect(keys.map((e) => e.key)).toEqual(['INPUT', 'proxies.json']);
+        // INPUT.json belongs to the keyed candidate, so the sweep left it alone.
+        expect(keys.map((e) => e.contentType)).toEqual([
+            'application/json',
+            'application/json; charset=utf-8',
+        ]);
+    });
+
     it('setValue binds a key to a differently-named file', async () => {
         const client = await FileSystemKeyValueStoreClient.open(null, null, null, storageDir);
 

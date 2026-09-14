@@ -65,37 +65,56 @@ impl From<crawlee_storage::models::KeyValueStoreRecordMetadata> for KeyValueStor
     }
 }
 
-/// One on-disk file an `AdoptionCandidate` may bind its key to. `filename` is
-/// used verbatim (never percent-encoded) and must be a plain filename directly
-/// inside the store directory; `contentType` is what the written sidecar will
-/// report, since the core infers nothing from the extension.
+/// One file an `AdoptionCandidate` may adopt.
+///
+/// With a `key`, `filename` is an exact on-disk name the key may be bound to;
+/// without one, it is a glob pattern (`*` and `?`) matched against filenames in
+/// the store directory. Either way it is used verbatim — never
+/// percent-encoded — and names a file directly inside the store.
+/// `contentType` is what the written sidecar will report, since the core
+/// infers nothing from the extension.
 #[napi(object)]
 pub struct AdoptableFile {
     pub filename: String,
     pub content_type: String,
 }
 
-/// A key whose value file may already be on disk without a sidecar, plus the
-/// files the caller is willing to adopt for it. See
+/// Something `open` may adopt into a tracked record.
+///
+/// With `key`, the key is bound to whichever of its `files` is on disk. Without
+/// it, `files` are patterns and every unowned file matching one is adopted
+/// under its own filename as the key, first match winning. See
 /// `FileSystemKeyValueStoreClient.open`.
 #[napi(object)]
 pub struct AdoptionCandidate {
-    pub key: String,
+    pub key: Option<String>,
     pub files: Vec<AdoptableFile>,
 }
 
 impl From<AdoptionCandidate> for crawlee_storage::models::AdoptionCandidate {
     fn from(c: AdoptionCandidate) -> Self {
-        Self {
-            key: c.key,
-            files: c
-                .files
-                .into_iter()
-                .map(|f| crawlee_storage::models::AdoptableFile {
-                    filename: f.filename,
-                    content_type: f.content_type,
-                })
-                .collect(),
+        match c.key {
+            Some(key) => Self::Key {
+                key,
+                files: c
+                    .files
+                    .into_iter()
+                    .map(|f| crawlee_storage::models::AdoptableFile {
+                        filename: f.filename,
+                        content_type: f.content_type,
+                    })
+                    .collect(),
+            },
+            None => Self::Sweep {
+                rules: c
+                    .files
+                    .into_iter()
+                    .map(|f| crawlee_storage::models::AdoptionRule {
+                        pattern: f.filename,
+                        content_type: f.content_type,
+                    })
+                    .collect(),
+            },
         }
     }
 }

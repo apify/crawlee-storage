@@ -148,22 +148,30 @@ class FileSystemKeyValueStoreClient:
         alias: builtins.str | None = None,
         storage_dir: builtins.str = "./storage",
         use_test_clock: builtins.bool = False,
-        adopt: typing.Sequence[tuple[builtins.str, typing.Sequence[tuple[builtins.str, builtins.str]]]] = [],
+        adopt: typing.Sequence[tuple[builtins.str | None, typing.Sequence[tuple[builtins.str, builtins.str]]]] = [],
     ) -> FileSystemKeyValueStoreClient:
         r"""
         Open an existing key-value store or create a new one.
 
-        ``adopt`` declares keys whose value file may already be on disk without
-        a metadata sidecar — written into the store directory out-of-band by a
-        CLI, say — so no key currently addresses it. Each entry
-        is a ``(key, [(filename, content_type), ...])`` pair: open writes the
-        missing sidecar, binding the key to whichever declared file it finds, so
-        the file becomes an ordinary record (readable via ``get_value``, visible
-        in ``list_keys``). Value bytes are never touched. A key that already has
-        a usable record is left alone; declaring several files that all exist
-        raises ``ValueError``, since there is no way to guess which one the key
-        means. The canonical case is a run's input (``INPUT``, ``INPUT.json``,
-        ...), but nothing here is specific to it.
+        ``adopt`` pulls value files that are on disk without a metadata sidecar
+        — written into the store directory out-of-band by a CLI, say, so no key
+        currently addresses them — into ordinary records: open writes the
+        missing sidecar, and from then on they are readable via ``get_value``
+        and visible in ``list_keys``. Value bytes are never touched.
+
+        Each entry is a ``(key, [(filename, content_type), ...])`` pair binding
+        ``key`` to whichever of the declared filenames is there. A key that
+        already has a usable record is left alone; declaring several files that
+        all exist raises ``ValueError``, since there is no way to guess which
+        one the key means.
+
+        An entry whose key is ``None`` is a sweep: the filenames are glob
+        patterns (``*``, ``?``), and every matching file nothing else owns is
+        adopted under its own filename as the key, first matching pattern
+        winning. A sweep skips dotfiles, anything that already has a sidecar or
+        is bound by one, and any filename a keyed entry declared — those run
+        first, whatever order they were passed in. An empty pattern, or one
+        containing ``/``, raises ``ValueError``.
         """
     def advance_clock_for_testing(self, duration: datetime.timedelta) -> None:
         r"""

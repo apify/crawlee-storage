@@ -224,6 +224,65 @@ pub fn validate_filename(filename: &str) -> Result<&str> {
     Ok(filename)
 }
 
+/// Match a filename against a glob-ish `pattern`: whole string, case
+/// sensitive, `*` matches any run of characters (including none), `?` matches
+/// exactly one, everything else is literal.
+///
+/// Deliberately not a path glob — adoption rules name files in one directory,
+/// so there are no path semantics, character classes or brace expansion to
+/// support, and no dependency to take on for them.
+pub fn matches_pattern(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    let (mut p, mut n) = (0, 0);
+    // Where to resume when the most recent `*` has to swallow one more char.
+    let mut star: Option<(usize, usize)> = None;
+
+    while n < name.len() {
+        match pattern.get(p) {
+            Some('*') => {
+                star = Some((p, n));
+                p += 1;
+            }
+            Some('?') => {
+                p += 1;
+                n += 1;
+            }
+            Some(c) if *c == name[n] => {
+                p += 1;
+                n += 1;
+            }
+            // Mismatch: backtrack to the last `*` and let it eat one more.
+            _ => match star {
+                Some((star_p, star_n)) => {
+                    p = star_p + 1;
+                    n = star_n + 1;
+                    star = Some((star_p, star_n + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+
+    pattern[p..].iter().all(|c| *c == '*')
+}
+
+/// Validate an adoption rule's filename pattern: non-empty and naming a file
+/// in the store directory itself, never a path into it.
+pub fn validate_pattern(pattern: &str) -> Result<()> {
+    if pattern.is_empty() {
+        return Err(StorageError::InvalidArgs(
+            "Adoption pattern must not be empty".to_string(),
+        ));
+    }
+    if pattern.contains('/') {
+        return Err(StorageError::InvalidArgs(format!(
+            "Adoption pattern must name a file directly in the store, got '{pattern}'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate that at most one of the given options is Some.
 /// Equivalent to Python's `raise_if_too_many_kwargs`.
 pub fn validate_exclusive_args(
@@ -345,6 +404,27 @@ pub async fn find_storage_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_matches_pattern() {
+        assert!(matches_pattern("*.json", "a.json"));
+        assert!(matches_pattern("*", "anything"));
+        assert!(matches_pattern("*", ""));
+        assert!(matches_pattern("INPUT", "INPUT"));
+        assert!(!matches_pattern("INPUT", "input"));
+        assert!(!matches_pattern("*.json", "a.json.txt"));
+        assert!(matches_pattern("?.json", "a.json"));
+        assert!(!matches_pattern("?.json", "ab.json"));
+        // Backtracking: the first `*` must give a character back so the literal
+        // tail can still land.
+        assert!(matches_pattern("a*b*c", "axxbyyc"));
+        assert!(matches_pattern("*.json", ".json"));
+        assert!(!matches_pattern("a*c", "abd"));
+        // Trailing stars can match nothing at all.
+        assert!(matches_pattern("report**", "report"));
+        // `?` counts characters, not bytes.
+        assert!(matches_pattern("?.txt", "é.txt"));
+    }
 
     #[test]
     fn test_encode_key_matches_quote_safe_empty() {

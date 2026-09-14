@@ -183,7 +183,7 @@ pub struct KeyValueStoreValueFileInfo {
 
 // ─── Key-Value Store Adoption ───────────────────────────────────────────────
 
-/// One on-disk file an [`AdoptionCandidate`] may bind its key to.
+/// One on-disk file an [`AdoptionCandidate::Key`] may bind its key to.
 ///
 /// `filename` is used verbatim (never percent-encoded) and must pass
 /// [`crate::utils::validate_filename`]. `content_type` is what the written
@@ -194,16 +194,39 @@ pub struct AdoptableFile {
     pub content_type: String,
 }
 
-/// A key whose value file may already be on disk without a sidecar, together
-/// with the files the caller is willing to adopt for it.
+/// One filename pattern an [`AdoptionCandidate::Sweep`] adopts, and the content
+/// type to record for the files it matches.
+///
+/// `pattern` is matched against the whole filename by
+/// [`crate::utils::matches_pattern`] — `*` and `?` wildcards, no path
+/// semantics.
+#[derive(Debug, Clone)]
+pub struct AdoptionRule {
+    pub pattern: String,
+    pub content_type: String,
+}
+
+/// A declaration of what `open` may adopt into a tracked record.
+///
+/// - [`Key`](Self::Key) binds one declared key to at most one of its declared
+///   files — the caller knows the key it wants and which filenames could carry
+///   it.
+/// - [`Sweep`](Self::Sweep) adopts every unowned regular file matching a rule,
+///   under its own filename as the key. Rules are first-match-wins; a file
+///   matching no rule is left alone.
 ///
 /// See
 /// [`FileSystemKeyValueStoreClient::open`](crate::key_value_store::FileSystemKeyValueStoreClient::open)
-/// for when adoption runs and what it writes.
+/// for when adoption runs, what counts as owned, and what it writes.
 #[derive(Debug, Clone)]
-pub struct AdoptionCandidate {
-    pub key: String,
-    pub files: Vec<AdoptableFile>,
+pub enum AdoptionCandidate {
+    Key {
+        key: String,
+        files: Vec<AdoptableFile>,
+    },
+    Sweep {
+        rules: Vec<AdoptionRule>,
+    },
 }
 
 // ─── Request Queue Metadata ─────────────────────────────────────────────────

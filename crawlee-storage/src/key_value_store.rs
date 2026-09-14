@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
@@ -6,13 +7,14 @@ use tracing::warn;
 
 use crate::clock::{system_clock, ClockRef};
 use crate::models::{
-    AdoptionCandidate, KeyValueStoreMetadata, KeyValueStoreRecord, KeyValueStoreRecordMetadata,
-    KeyValueStoreValueFileInfo, KvsKeysPage, KvsListKeysResult,
+    AdoptableFile, AdoptionCandidate, AdoptionRule, KeyValueStoreMetadata, KeyValueStoreRecord,
+    KeyValueStoreRecordMetadata, KeyValueStoreValueFileInfo, KvsKeysPage, KvsListKeysResult,
 };
 use crate::utils::{
     atomic_write, crypto_random_object_id, decode_key, encode_key, find_storage_by_id,
-    is_metadata_filename, json_dumps_value, validate_exclusive_args, validate_filename,
-    validate_subdirectory, Result, StorageError, METADATA_FILENAME,
+    is_metadata_filename, json_dumps_value, matches_pattern, validate_exclusive_args,
+    validate_filename, validate_pattern, validate_subdirectory, Result, StorageError,
+    METADATA_FILENAME,
 };
 
 const STORAGE_SUBDIR: &str = "key_value_stores";
@@ -46,11 +48,8 @@ impl FileSystemKeyValueStoreClient {
     ///
     /// - `id`: Open by ID (scans directories for matching metadata).
     /// - `name`: Open by name (used as directory name, written to metadata).
-    /// - `alias`: Open by alias (used as directory name, but NOT written to metadata).
-    /// - `storage_dir`: Base storage directory (e.g., "./storage").
-    /// - `adopt`: Keys whose sidecar-less value file should be adopted into a
-    ///   tracked record, if one is there. See below; pass an empty slice to
-    ///   skip adoption entirely.
+    /// - `adopt`: Sidecar-less files to pull into tracked records. See below;
+    ///   pass an empty slice to skip adoption entirely.
     ///
     /// At most one of `id`, `name`, or `alias` may be provided.
     ///
@@ -58,20 +57,32 @@ impl FileSystemKeyValueStoreClient {
     ///
     /// A value file can be sitting in the store directory with no metadata
     /// sidecar — written there out-of-band by a CLI, say — so no key addresses
-    /// it. For each [`AdoptionCandidate`], open writes the
-    /// missing sidecar, binding the key to the file it found, so every ordinary
-    /// read path (`get_value`, `list_keys`, `get_public_url`) sees a normal
-    /// record from then on. Value bytes are never touched. The canonical case
-    /// is a run's input (`INPUT`, `INPUT.json`, ...), but nothing here is
-    /// specific to it.
+    /// it. For each [`AdoptionCandidate`], open writes the missing sidecar so
+    /// every ordinary read path (`get_value`, `list_keys`, `get_public_url`)
+    /// sees a normal record from then on. Value bytes are never touched, and
+    /// neither is the store's own metadata.
     ///
-    /// A key that already has a usable record is left alone; a sidecar whose
-    /// bound file is missing (or which won't parse) is not usable, so it gets
-    /// rewritten. Which filenames to adopt, and what content type each implies,
-    /// is entirely the caller's declaration — the core infers nothing from an
-    /// extension. Declaring several files that all exist is an error
+    /// [`Key`](AdoptionCandidate::Key) names the key and the filenames that
+    /// could carry it, and binds the key to whichever one is there. A key that
+    /// already has a usable record is left alone; a sidecar whose bound file is
+    /// missing (or which won't parse) is not usable, so it gets rewritten.
+    /// Declaring several files that all exist is an error
     /// ([`StorageError::AmbiguousInput`]): there is no way to guess which one
     /// the key means.
+    ///
+    /// [`Sweep`](AdoptionCandidate::Sweep) adopts by pattern instead, keying
+    /// each file by its own filename verbatim. Its rules are first-match-wins,
+    /// and a file matching none is left alone. A sweep only ever claims a file
+    /// nothing else owns, so it skips: sidecars themselves, dotfiles (including
+    /// this crate's own `.tmp.*` write leftovers), a file that has its own
+    /// sidecar (even a dangling one — a sweep never overwrites a sidecar), a
+    /// file bound by some other record's sidecar, and any filename a `Key`
+    /// candidate declared. Every `Key` runs before every `Sweep`, whatever
+    /// order they were declared in, so a specific claim always beats a blanket
+    /// one.
+    ///
+    /// The core infers nothing from an extension: the caller's declarations are
+    /// the only source of content types.
     ///
     /// Uses the default [`SystemClock`](crate::clock::SystemClock). To inject a
     /// custom clock (e.g. for tests), use [`open_with_clock`](Self::open_with_clock).
@@ -140,64 +151,222 @@ impl FileSystemKeyValueStoreClient {
         Ok(client)
     }
 
-    /// Write the missing sidecar for each adoption candidate that resolves to
-    /// exactly one on-disk file. See [`open`](Self::open) for the contract.
+    /// Adopt sidecar-less files per the caller's candidates. See
+    /// [`open`](Self::open) for the contract.
     async fn adopt_files(&self, candidates: &[AdoptionCandidate]) -> Result<()> {
-        for candidate in candidates {
-            let encoded = encode_key(&candidate.key);
+        if candidates.is_empty() {
+            return Ok(());
+        }
 
-            // An unreadable sidecar, or one bound to a file that isn't there,
-            // is not a record the key can be read through — so it is replaced
-            // rather than honored.
-            let tracked = match self.read_sidecar(&encoded).await.ok().flatten() {
-                Some(meta) => self
-                    .value_path(&encoded, meta.filename.as_deref())
-                    .is_ok_and(|path| path.is_file()),
-                None => false,
+        let listing = self.list_regular_files().await?;
+        let mut owned = self.owned_filenames(&listing, candidates).await;
+
+        // Keys first, whatever order the caller declared them in: a `Key` is a
+        // specific claim on a filename, a sweep is a blanket one.
+        for candidate in candidates {
+            let AdoptionCandidate::Key { key, files } = candidate else {
+                continue;
             };
-            if tracked {
+            if let Some(filename) = self.adopt_for_key(key, files).await? {
+                let encoded = encode_key(key);
+                owned.insert(filename);
+                owned.insert(encoded);
+            }
+        }
+
+        for candidate in candidates {
+            let AdoptionCandidate::Sweep { rules } = candidate else {
+                continue;
+            };
+            self.sweep(rules, &listing, &mut owned).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Names of the regular files directly in the store directory. Symlinks are
+    /// followed (`read_dir` file types aren't), directories and non-UTF-8 names
+    /// are skipped. Sorted, so a sweep adopts in a deterministic order.
+    async fn list_regular_files(&self) -> Result<BTreeSet<String>> {
+        let mut listing = BTreeSet::new();
+        let mut entries = match fs::read_dir(&self.path).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(listing),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+                listing.insert(name.to_string());
+            }
+        }
+        Ok(listing)
+    }
+
+    /// Filenames a sweep must not touch because something already claims them:
+    /// the value file of every existing record, and every filename a `Key`
+    /// candidate declares.
+    async fn owned_filenames(
+        &self,
+        listing: &BTreeSet<String>,
+        candidates: &[AdoptionCandidate],
+    ) -> std::collections::HashSet<String> {
+        let metadata_suffix = format!(".{METADATA_FILENAME}");
+        let mut owned = std::collections::HashSet::new();
+
+        for name in listing {
+            let Some(encoded) = name.strip_suffix(&metadata_suffix) else {
+                continue;
+            };
+            if encoded.is_empty() {
                 continue;
             }
-
-            let mut present: Vec<(&str, &str, u64)> = Vec::new();
-            for file in &candidate.files {
-                // A sidecar is never itself an adoptable value file. Anything
-                // else that can't name a file inside the store is a caller bug.
-                if is_metadata_filename(&file.filename) {
-                    continue;
-                }
-                let filename = validate_filename(&file.filename)?;
-                match fs::metadata(self.path.join(filename)).await {
-                    Ok(meta) if meta.is_file() => {
-                        present.push((filename, &file.content_type, meta.len()))
+            // A record whose value file sits under the sidecar's own name binds
+            // nothing else — it couldn't, without leaving that file a stray. So
+            // only the sidecars whose own name is missing are worth reading,
+            // which in a normal store is none of them. An unreadable one is
+            // ignored here; repairing it is a `Key` candidate's job.
+            if !listing.contains(encoded) {
+                if let Ok(Some(meta)) = self.read_sidecar(encoded).await {
+                    if let Some(Ok(filename)) = meta.filename.as_deref().map(validate_filename) {
+                        owned.insert(filename.to_string());
                     }
-                    _ => {}
                 }
             }
-
-            let (filename, content_type, size) = match present[..] {
-                [] => continue,
-                [only] => only,
-                _ => {
-                    return Err(StorageError::AmbiguousInput {
-                        key: candidate.key.clone(),
-                        files: present.iter().map(|(name, ..)| name.to_string()).collect(),
-                    })
-                }
-            };
-
-            let record_meta = KeyValueStoreRecordMetadata {
-                key: candidate.key.clone(),
-                content_type: content_type.to_string(),
-                size: Some(size as usize),
-                // Omitted for the ordinary case, so the sidecar stays
-                // byte-identical to what a plain `set_value` would write.
-                filename: (filename != encoded).then(|| filename.to_string()),
-            };
-            let json = json_dumps_value(&record_meta)?;
-            atomic_write(&self.sidecar_path(&encoded), json.as_bytes()).await?;
+            owned.insert(encoded.to_string());
         }
+
+        // Declared, not adopted, is the criterion: a `Key` may end up adopting
+        // none of its files (or failing), and a sweep still must not claim the
+        // ones it was offered.
+        for candidate in candidates {
+            let AdoptionCandidate::Key { files, .. } = candidate else {
+                continue;
+            };
+            owned.extend(
+                files
+                    .iter()
+                    .map(|file| &file.filename)
+                    .filter(|filename| !is_metadata_filename(filename))
+                    .cloned(),
+            );
+        }
+
+        owned
+    }
+
+    /// Write the missing sidecar for one `Key` candidate. Returns the adopted
+    /// filename, or `None` when the key is already tracked or nothing matched.
+    async fn adopt_for_key(&self, key: &str, files: &[AdoptableFile]) -> Result<Option<String>> {
+        let encoded = encode_key(key);
+
+        // An unreadable sidecar, or one bound to a file that isn't there, is
+        // not a record the key can be read through — so it is replaced rather
+        // than honored.
+        let tracked = match self.read_sidecar(&encoded).await.ok().flatten() {
+            Some(meta) => self
+                .value_path(&encoded, meta.filename.as_deref())
+                .is_ok_and(|path| path.is_file()),
+            None => false,
+        };
+        if tracked {
+            return Ok(None);
+        }
+
+        let mut present: Vec<(&str, &str, u64)> = Vec::new();
+        for file in files {
+            // A sidecar is never itself an adoptable value file. Anything else
+            // that can't name a file inside the store is a caller bug.
+            if is_metadata_filename(&file.filename) {
+                continue;
+            }
+            let filename = validate_filename(&file.filename)?;
+            match fs::metadata(self.path.join(filename)).await {
+                Ok(meta) if meta.is_file() => {
+                    present.push((filename, &file.content_type, meta.len()))
+                }
+                _ => {}
+            }
+        }
+
+        let (filename, content_type, size) = match present[..] {
+            [] => return Ok(None),
+            [only] => only,
+            _ => {
+                return Err(StorageError::AmbiguousInput {
+                    key: key.to_string(),
+                    files: present.iter().map(|(name, ..)| name.to_string()).collect(),
+                })
+            }
+        };
+
+        self.write_adopted_sidecar(key, &encoded, filename, content_type, size)
+            .await?;
+        Ok(Some(filename.to_string()))
+    }
+
+    /// Adopt every unowned file matching one of `rules`, keyed by its own name.
+    async fn sweep(
+        &self,
+        rules: &[AdoptionRule],
+        listing: &BTreeSet<String>,
+        owned: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        for rule in rules {
+            validate_pattern(&rule.pattern)?;
+        }
+
+        for name in listing {
+            // Dotfiles are never anyone's record: `.DS_Store`, `.gitkeep`, and
+            // our own `.tmp.*` leftovers from an interrupted write.
+            if is_metadata_filename(name) || name.starts_with('.') || owned.contains(name) {
+                continue;
+            }
+            // A file with its own sidecar is a record already, even a broken
+            // one — a sweep never overwrites a sidecar.
+            if listing.contains(&format!("{name}.{METADATA_FILENAME}")) {
+                continue;
+            }
+            let Some(rule) = rules
+                .iter()
+                .find(|rule| matches_pattern(&rule.pattern, name))
+            else {
+                continue;
+            };
+
+            let size = fs::metadata(self.path.join(name)).await?.len();
+            let encoded = encode_key(name);
+            self.write_adopted_sidecar(name, &encoded, name, &rule.content_type, size)
+                .await?;
+            owned.insert(name.clone());
+            owned.insert(encoded);
+        }
+
         Ok(())
+    }
+
+    /// Write the sidecar that makes `filename` the value file of `key`.
+    async fn write_adopted_sidecar(
+        &self,
+        key: &str,
+        encoded: &str,
+        filename: &str,
+        content_type: &str,
+        size: u64,
+    ) -> Result<()> {
+        let record_meta = KeyValueStoreRecordMetadata {
+            key: key.to_string(),
+            content_type: content_type.to_string(),
+            size: Some(size as usize),
+            // Omitted for the ordinary case, so the sidecar stays
+            // byte-identical to what a plain `set_value` would write.
+            filename: (filename != encoded).then(|| filename.to_string()),
+        };
+        let json = json_dumps_value(&record_meta)?;
+        atomic_write(&self.sidecar_path(encoded), json.as_bytes()).await
     }
 
     /// Return a reference to this client's clock.
@@ -1567,7 +1736,7 @@ mod tests {
     /// The adoption candidate a caller declares for the run input: the key
     /// `INPUT`, adoptable from either the extension-less file or `INPUT.json`.
     fn input_candidates() -> Vec<AdoptionCandidate> {
-        vec![AdoptionCandidate {
+        vec![AdoptionCandidate::Key {
             key: "INPUT".to_string(),
             files: vec![
                 AdoptableFile {
@@ -1580,6 +1749,24 @@ mod tests {
                 },
             ],
         }]
+    }
+
+    fn sweep(rules: &[(&str, &str)]) -> AdoptionCandidate {
+        AdoptionCandidate::Sweep {
+            rules: rules
+                .iter()
+                .map(|(pattern, content_type)| AdoptionRule {
+                    pattern: (*pattern).to_string(),
+                    content_type: (*content_type).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    async fn write_bare(client: &FileSystemKeyValueStoreClient, name: &str, bytes: &[u8]) {
+        tokio::fs::write(client.path().join(name), bytes)
+            .await
+            .unwrap();
     }
 
     async fn raw_sidecar(
@@ -1799,6 +1986,332 @@ mod tests {
             client.read_value("INPUT").await.unwrap().unwrap().value,
             b"{}"
         );
+    }
+
+    async fn open_with(
+        storage_dir: &Path,
+        adopt: &[AdoptionCandidate],
+    ) -> Result<FileSystemKeyValueStoreClient> {
+        FileSystemKeyValueStoreClient::open(None, None, None, storage_dir, adopt).await
+    }
+
+    fn has_sidecar(client: &FileSystemKeyValueStoreClient, key: &str) -> bool {
+        client.sidecar_path(&encode_key(key)).exists()
+    }
+
+    async fn listed_keys(client: &FileSystemKeyValueStoreClient) -> Vec<String> {
+        let page = client.list_keys(None, None, None, &[]).await.unwrap();
+        page.items.into_iter().map(|item| item.key).collect()
+    }
+
+    #[tokio::test]
+    async fn test_sweep_adopts_by_first_matching_rule() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        let payload = br#"{"a":1}"#;
+        write_bare(&client, "a.json", payload).await;
+
+        let client = open_with(
+            storage_dir,
+            &[sweep(&[
+                ("*.json", "application/json; charset=utf-8"),
+                ("*", "application/octet-stream"),
+            ])],
+        )
+        .await
+        .unwrap();
+
+        let record = client.read_value("a.json").await.unwrap().unwrap();
+        assert_eq!(record.value, payload);
+        assert_eq!(record.content_type, "application/json; charset=utf-8");
+        assert_eq!(record.size, payload.len());
+
+        let sidecar = raw_sidecar(&client, "a.json").await;
+        assert_eq!(sidecar["size"], payload.len());
+        // The file already sits at the encoded key, so no binding is recorded.
+        assert!(!sidecar.contains_key("filename"), "got: {sidecar:?}");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_catch_all_rule() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "blob.xyz", b"...").await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*", "application/octet-stream")])])
+            .await
+            .unwrap();
+
+        let record = client.read_value("blob.xyz").await.unwrap().unwrap();
+        assert_eq!(record.content_type, "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_leaves_unmatched_files_alone() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "notes.txt", b"hi").await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*.json", "application/json")])])
+            .await
+            .unwrap();
+
+        assert!(!has_sidecar(&client, "notes.txt"));
+        assert!(listed_keys(&client).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sweep_skips_dotfiles() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, ".gitkeep", b"").await;
+        write_bare(&client, ".tmp.abc", b"half-written").await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*", "application/octet-stream")])])
+            .await
+            .unwrap();
+
+        assert!(!has_sidecar(&client, ".gitkeep"));
+        assert!(!has_sidecar(&client, ".tmp.abc"));
+        assert!(listed_keys(&client).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sweep_skips_files_with_their_own_sidecar() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        client
+            .set_value("a", b"tracked", "text/plain".to_string(), None)
+            .await
+            .unwrap();
+        // A sidecar bound to a file that isn't there, next to a bare file under
+        // the key's own name. Broken, but still a record's sidecar.
+        write_bare(&client, "b", b"bare").await;
+        write_bare(
+            &client,
+            &format!("b.{METADATA_FILENAME}"),
+            br#"{"key":"b","contentType":"text/plain","size":0,"filename":"gone"}"#,
+        )
+        .await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*", "application/octet-stream")])])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.read_value("a").await.unwrap().unwrap().content_type,
+            "text/plain"
+        );
+        assert_eq!(raw_sidecar(&client, "b").await["filename"], "gone");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_skips_files_declared_by_a_key_candidate() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "INPUT.json", b"{}").await;
+
+        let mut adopt = input_candidates();
+        adopt.push(sweep(&[("*", "application/octet-stream")]));
+        let client = open_with(storage_dir, &adopt).await.unwrap();
+
+        // The key candidate took the file; the sweep must not key it a second
+        // time under its own name.
+        assert_eq!(listed_keys(&client).await, ["INPUT"]);
+        assert_eq!(
+            raw_sidecar(&client, "INPUT").await["filename"],
+            "INPUT.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_skips_key_candidate_files_even_when_the_key_is_tracked() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        client
+            .set_value(
+                "INPUT",
+                b"{}",
+                "application/json".to_string(),
+                Some("INPUT.json"),
+            )
+            .await
+            .unwrap();
+        // A stray under the key's own name, which the key candidate also
+        // declares. The key is already tracked, so nothing adopts it — but
+        // "declared" is what bars the sweep, not "adopted".
+        write_bare(&client, "INPUT", b"stray").await;
+
+        let mut adopt = input_candidates();
+        adopt.push(sweep(&[("*", "application/octet-stream")]));
+        let client = open_with(storage_dir, &adopt).await.unwrap();
+
+        assert_eq!(listed_keys(&client).await, ["INPUT"]);
+        assert_eq!(
+            raw_sidecar(&client, "INPUT").await["filename"],
+            "INPUT.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_skips_files_bound_by_another_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        client
+            .set_value("latest", b"a,b", "text/csv".to_string(), Some("report.csv"))
+            .await
+            .unwrap();
+
+        let client = open_with(storage_dir, &[sweep(&[("*", "application/octet-stream")])])
+            .await
+            .unwrap();
+
+        assert_eq!(listed_keys(&client).await, ["latest"]);
+        assert!(!has_sidecar(&client, "report.csv"));
+    }
+
+    #[tokio::test]
+    async fn test_key_candidates_run_before_sweeps_regardless_of_order() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "INPUT.json", b"{}").await;
+
+        let mut adopt = vec![sweep(&[("*", "application/octet-stream")])];
+        adopt.extend(input_candidates());
+        let client = open_with(storage_dir, &adopt).await.unwrap();
+
+        assert_eq!(listed_keys(&client).await, ["INPUT"]);
+        assert_eq!(
+            client
+                .read_value("INPUT")
+                .await
+                .unwrap()
+                .unwrap()
+                .content_type,
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_two_sweeps_do_not_double_adopt() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "a.json", b"{}").await;
+
+        let client = open_with(
+            storage_dir,
+            &[
+                sweep(&[("*.json", "application/json")]),
+                sweep(&[("*", "application/octet-stream")]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(listed_keys(&client).await, ["a.json"]);
+        assert_eq!(
+            client
+                .read_value("a.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .content_type,
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_records_filename_when_encoding_differs() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        write_bare(&client, "my file.json", b"{}").await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*.json", "application/json")])])
+            .await
+            .unwrap();
+
+        // The key is the filename verbatim; the sidecar is named after its
+        // *encoded* form, so it has to record the binding back to the file.
+        let sidecar_path = client.path().join("my%20file.json.__metadata__.json");
+        assert!(sidecar_path.exists(), "expected {}", sidecar_path.display());
+        assert_eq!(
+            raw_sidecar(&client, "my file.json").await["filename"],
+            "my file.json"
+        );
+        assert_eq!(
+            client
+                .read_value("my file.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"{}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_rejects_invalid_pattern() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        for pattern in ["", "a/b"] {
+            match open_with(storage_dir, &[sweep(&[(pattern, "text/plain")])]).await {
+                Err(StorageError::InvalidArgs(_)) => {}
+                Err(e) => panic!("unexpected error for {pattern:?}: {e}"),
+                Ok(_) => panic!("expected {pattern:?} to be rejected"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_swept_record_is_ordinary() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_dir = temp_dir.path();
+
+        let client = open_with(storage_dir, &[]).await.unwrap();
+        client
+            .set_value("zebra", b"z", "text/plain".to_string(), None)
+            .await
+            .unwrap();
+        write_bare(&client, "proxies.json", b"[]").await;
+
+        let client = open_with(storage_dir, &[sweep(&[("*.json", "application/json")])])
+            .await
+            .unwrap();
+
+        assert!(client.record_exists("proxies.json", true).await);
+        assert_eq!(listed_keys(&client).await, ["proxies.json", "zebra"]);
+        assert_eq!(
+            client.get_public_url("proxies.json").await,
+            format!("file://{}", client.path().join("proxies.json").display())
+        );
+
+        client.delete_value("proxies.json").await.unwrap();
+        assert!(!client.path().join("proxies.json").exists());
+        assert!(!has_sidecar(&client, "proxies.json"));
+        assert_eq!(listed_keys(&client).await, ["zebra"]);
     }
 
     #[tokio::test]
