@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - Allow storing the filename in key-value store item metadata to override the default one ([#78](https://github.com/apify/crawlee-storage/pull/78)) ([1373316](https://github.com/apify/crawlee-storage/commit/13733161a3b6ecacdbc4255d334b632ede9b40cf)) by [@janbuchar](https://github.com/janbuchar)
+- **kvs:** Implement adopting sidecar-less files on open ([#79](https://github.com/apify/crawlee-storage/pull/79)) ([e44c55f](https://github.com/apify/crawlee-storage/commit/e44c55ffbd7a8f0111a01411dbf71ee3f109557e)) by [@janbuchar](https://github.com/janbuchar)
 
 ### 🐛 Bug Fixes
 
