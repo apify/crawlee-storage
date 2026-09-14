@@ -28,6 +28,13 @@ pub enum StorageError {
          This is likely a bug — the key may have been deleted between paginated listKeys calls."
     )]
     ExclusiveStartKeyNotFound(String),
+
+    /// An [`AdoptionCandidate`](crate::models::AdoptionCandidate) matched more
+    /// than one file on disk, so there is no single value file to bind the key
+    /// to. Carries the key and the matched filenames so the binding can name
+    /// them in its message.
+    #[error("Multiple candidate files for key '{key}': {}", files.join(", "))]
+    AmbiguousInput { key: String, files: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -185,6 +192,11 @@ pub const METADATA_FILENAME: &str = "__metadata__.json";
 /// hardcoding the literal string.
 pub const NONE_CONTENT_TYPE: &str = "application/x-none";
 
+/// Whether a filename is the store's own metadata file or a record sidecar.
+pub fn is_metadata_filename(filename: &str) -> bool {
+    filename == METADATA_FILENAME || filename.ends_with(&format!(".{METADATA_FILENAME}"))
+}
+
 /// Validate the on-disk `filename` a KVS record binds its key to.
 ///
 /// Must be a single normal path component, so neither a `set_value` argument
@@ -204,12 +216,71 @@ pub fn validate_filename(filename: &str) -> Result<&str> {
             "Record filename must be a single path component, got '{filename}'"
         )));
     }
-    if filename == METADATA_FILENAME || filename.ends_with(&format!(".{METADATA_FILENAME}")) {
+    if is_metadata_filename(filename) {
         return Err(StorageError::InvalidArgs(format!(
             "Record filename must not be a metadata filename, got '{filename}'"
         )));
     }
     Ok(filename)
+}
+
+/// Match a filename against a glob-ish `pattern`: whole string, case
+/// sensitive, `*` matches any run of characters (including none), `?` matches
+/// exactly one, everything else is literal.
+///
+/// Deliberately not a path glob — adoption rules name files in one directory,
+/// so there are no path semantics, character classes or brace expansion to
+/// support, and no dependency to take on for them.
+pub fn matches_pattern(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    let (mut p, mut n) = (0, 0);
+    // Where to resume when the most recent `*` has to swallow one more char.
+    let mut star: Option<(usize, usize)> = None;
+
+    while n < name.len() {
+        match pattern.get(p) {
+            Some('*') => {
+                star = Some((p, n));
+                p += 1;
+            }
+            Some('?') => {
+                p += 1;
+                n += 1;
+            }
+            Some(c) if *c == name[n] => {
+                p += 1;
+                n += 1;
+            }
+            // Mismatch: backtrack to the last `*` and let it eat one more.
+            _ => match star {
+                Some((star_p, star_n)) => {
+                    p = star_p + 1;
+                    n = star_n + 1;
+                    star = Some((star_p, star_n + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+
+    pattern[p..].iter().all(|c| *c == '*')
+}
+
+/// Validate an adoption rule's filename pattern: non-empty and naming a file
+/// in the store directory itself, never a path into it.
+pub fn validate_pattern(pattern: &str) -> Result<()> {
+    if pattern.is_empty() {
+        return Err(StorageError::InvalidArgs(
+            "Adoption pattern must not be empty".to_string(),
+        ));
+    }
+    if pattern.contains('/') {
+        return Err(StorageError::InvalidArgs(format!(
+            "Adoption pattern must name a file directly in the store, got '{pattern}'"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate that at most one of the given options is Some.
@@ -333,6 +404,27 @@ pub async fn find_storage_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_matches_pattern() {
+        assert!(matches_pattern("*.json", "a.json"));
+        assert!(matches_pattern("*", "anything"));
+        assert!(matches_pattern("*", ""));
+        assert!(matches_pattern("INPUT", "INPUT"));
+        assert!(!matches_pattern("INPUT", "input"));
+        assert!(!matches_pattern("*.json", "a.json.txt"));
+        assert!(matches_pattern("?.json", "a.json"));
+        assert!(!matches_pattern("?.json", "ab.json"));
+        // Backtracking: the first `*` must give a character back so the literal
+        // tail can still land.
+        assert!(matches_pattern("a*b*c", "axxbyyc"));
+        assert!(matches_pattern("*.json", ".json"));
+        assert!(!matches_pattern("a*c", "abdd"));
+        // Trailing stars can match nothing at all.
+        assert!(matches_pattern("report**", "report"));
+        // `?` counts characters, not bytes.
+        assert!(matches_pattern("?.txt", "é.txt"));
+    }
 
     #[test]
     fn test_encode_key_matches_quote_safe_empty() {

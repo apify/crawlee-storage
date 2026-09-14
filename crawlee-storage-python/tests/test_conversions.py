@@ -170,7 +170,7 @@ async def test_resolve_value_falls_back_to_bare_file(storage_dir: str) -> None:
         (".bin", ""),
     ]
 
-    # Hand-place a bare INPUT.json (no sidecar), like a CLI/platform writer would.
+    # Hand-place a bare INPUT.json (no sidecar), like an out-of-band writer would.
     payload = b'{"foo":"bar"}'
     (Path(client.path_to_kvs) / "INPUT.json").write_bytes(payload)
 
@@ -203,6 +203,65 @@ async def test_resolve_existing_key_returns_matched_key(storage_dir: str) -> Non
     assert await client.resolve_existing_key("INPUT", extensions) == "INPUT.json"
 
     assert await client.resolve_existing_key("nope", extensions) is None
+
+
+_INPUT_CANDIDATES = [
+    (
+        "INPUT",
+        [("INPUT", "application/octet-stream"), ("INPUT.json", "application/json")],
+    )
+]
+
+
+async def test_open_adopts_a_sidecar_less_file(storage_dir: str) -> None:
+    """`adopt` takes `(key, [(filename, content_type)])` tuples and turns the
+    matching out-of-band file into an ordinary record."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    payload = b'{"foo":"bar"}'
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(payload)
+
+    adopted = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=_INPUT_CANDIDATES)
+
+    record = await adopted.get_value("INPUT")
+    assert record is not None
+    assert record["key"] == "INPUT"
+    assert record["contentType"] == "application/json"
+    assert record["value"] == payload
+    assert await adopted.record_exists("INPUT")
+    page = await adopted.list_keys()
+    assert [item["key"] for item in page["items"]] == ["INPUT"]
+
+
+async def test_open_rejects_several_adoptable_files(storage_dir: str) -> None:
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    (Path(client.path_to_kvs) / "INPUT").write_bytes(b"raw")
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(b"{}")
+
+    with pytest.raises(ValueError, match="INPUT, INPUT.json"):
+        await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=_INPUT_CANDIDATES)
+
+
+async def test_open_sweeps_unowned_files(storage_dir: str) -> None:
+    """An `adopt` entry with a `None` key sweeps files matching its patterns, under
+    their own names, leaving whatever a keyed entry declared to that entry."""
+    client = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir)
+    (Path(client.path_to_kvs) / "INPUT.json").write_bytes(b"{}")
+    (Path(client.path_to_kvs) / "proxies.json").write_bytes(b"[]")
+
+    adopt = [*_INPUT_CANDIDATES, (None, [("*.json", "application/json; charset=utf-8")])]
+    adopted = await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=adopt)
+
+    page = await adopted.list_keys()
+    assert [item["key"] for item in page["items"]] == ["INPUT", "proxies.json"]
+    assert [item["contentType"] for item in page["items"]] == [
+        "application/json",
+        "application/json; charset=utf-8",
+    ]
+
+
+async def test_open_rejects_an_invalid_sweep_pattern(storage_dir: str) -> None:
+    with pytest.raises(ValueError, match="pattern"):
+        await FileSystemKeyValueStoreClient.open(storage_dir=storage_dir, adopt=[(None, [("a/b", "text/plain")])])
 
 
 async def test_set_value_binds_key_to_a_filename(storage_dir: str) -> None:
