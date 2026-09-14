@@ -419,7 +419,7 @@ mod tests {
         // tail can still land.
         assert!(matches_pattern("a*b*c", "axxbyyc"));
         assert!(matches_pattern("*.json", ".json"));
-        assert!(!matches_pattern("a*c", "abd"));
+        assert!(!matches_pattern("a*c", "abdd"));
         // Trailing stars can match nothing at all.
         assert!(matches_pattern("report**", "report"));
         // `?` counts characters, not bytes.
