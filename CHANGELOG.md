@@ -2,8 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-<!-- git-cliff-unreleased-start -->
-## 0.2.1 - **not yet released**
+## [0.2.1](https://github.com/apify/crawlee-storage/releases/tag/v0.2.1) (2026-09-15)
 
 ### 🚀 Features
 
@@ -16,7 +15,6 @@ All notable changes to this project will be documented in this file.
 - Fix ordering after key decoding in KeyValueStore ([#77](https://github.com/apify/crawlee-storage/pull/77)) ([dbaf891](https://github.com/apify/crawlee-storage/commit/dbaf89101c8a8a36e9f856ca209b232074d6590e)) by [@janbuchar](https://github.com/janbuchar)
 
 
-<!-- git-cliff-unreleased-end -->
 ## [0.2.0](https://github.com/apify/crawlee-storage/releases/tag/v0.2.0) (2026-08-27)
 
 ### 🚀 Features

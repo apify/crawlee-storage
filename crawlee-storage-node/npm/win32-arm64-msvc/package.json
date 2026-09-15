@@ -1,6 +1,6 @@
 {
   "name": "@crawlee/fs-storage-native-win32-arm64-msvc",
-  "version": "0.2.1-beta.3",
+  "version": "0.2.1",
   "cpu": [
     "arm64"
   ],
