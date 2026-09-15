@@ -412,6 +412,45 @@ describe('FileSystemRequestQueueClient', () => {
             const fetched = await clientB.fetchNextRequest();
             expect(fetched).not.toBeUndefined();
         });
+
+        it('prolongs only the live lock acquired by this client', async () => {
+            const clientA = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+                'shared',
+            );
+            await clientA.addBatchOfRequests(
+                [{ uniqueKey: 'prolonged', url: 'https://example.com/p', method: 'GET' }],
+                false,
+            );
+            const request = await clientA.fetchNextRequest();
+            if (!request || typeof request.id !== 'string') {
+                throw new Error('fetched request is missing its id');
+            }
+            const requestId = request.id;
+
+            expect(await clientA.prolongRequestLock(requestId, 120)).toBe(true);
+
+            const clientB = await FileSystemRequestQueueClient.open(
+                null,
+                null,
+                null,
+                storageDir,
+                true,
+                'shared',
+            );
+            clientB.advanceClockForTesting(181_000);
+            expect(await clientB.fetchNextRequest()).toBeUndefined();
+
+            clientB.advanceClockForTesting(120_000);
+            expect((await clientB.fetchNextRequest())!.id).toBe(requestId);
+
+            expect(await clientA.prolongRequestLock(requestId, 60)).toBe(false);
+            expect(await clientB.prolongRequestLock(requestId, 60)).toBe(true);
+        });
     });
 
     // ─── requestQueueAccess mode ───────────────────────────────────────────

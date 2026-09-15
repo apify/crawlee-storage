@@ -44,6 +44,12 @@ struct RequestEntry {
     insertion_seq: u64,
 }
 
+#[derive(Clone)]
+struct HeldRequestLock {
+    unique_key: String,
+    order_no: i64,
+}
+
 /// Internal state protected by a mutex.
 struct InnerState {
     metadata: RequestQueueMetadata,
@@ -51,6 +57,10 @@ struct InnerState {
     /// file on disk; this map is a fast index that is kept in sync and
     /// re-read from disk when lock state matters.
     requests: HashMap<String, RequestEntry>,
+    /// request_id -> lock acquired by this client instance. The exact persisted
+    /// orderNo is retained so a stale consumer cannot prolong a lock that
+    /// expired and was subsequently acquired by another client.
+    held_locks: HashMap<String, HeldRequestLock>,
     /// Monotonic counter feeding `RequestEntry::insertion_seq`. In-memory only.
     ///
     /// (The forefront ordering list lives in `metadata.forefront_request_ids`,
@@ -179,6 +189,7 @@ impl FileSystemRequestQueueClient {
             inner: Mutex::new(InnerState {
                 metadata,
                 requests: HashMap::new(),
+                held_locks: HashMap::new(),
                 insertion_counter: 0,
                 lock_millis: DEFAULT_LOCK_MILLIS,
             }),
@@ -220,6 +231,7 @@ impl FileSystemRequestQueueClient {
 
         let mut inner = self.inner.lock().await;
         inner.requests.clear();
+        inner.held_locks.clear();
 
         Ok(())
     }
@@ -233,6 +245,7 @@ impl FileSystemRequestQueueClient {
         }
 
         inner.requests.clear();
+        inner.held_locks.clear();
         inner.insertion_counter = 0;
         inner.metadata.forefront_request_ids.clear();
 
@@ -495,6 +508,15 @@ impl FileSystemRequestQueueClient {
                     let meta_json = json_dumps_value(&inner.metadata)?;
                     atomic_write(&self.path.join(METADATA_FILENAME), meta_json.as_bytes()).await?;
 
+                    let request_id = unique_key_to_request_id(&unique_key);
+                    inner.held_locks.insert(
+                        request_id,
+                        HeldRequestLock {
+                            unique_key: unique_key.clone(),
+                            order_no: locked,
+                        },
+                    );
+
                     // Strip the queue-owned lock field before handing the
                     // request to the caller; we persisted the locked orderNo to
                     // disk above. The caller hands the request back to
@@ -568,6 +590,7 @@ impl FileSystemRequestQueueClient {
         let file_path = self.get_request_path(&unique_key);
         if !file_path.exists() && !inner.requests.contains_key(&unique_key) {
             // Unknown request — nothing to do.
+            inner.held_locks.remove(&request_id);
             return Ok(None);
         }
 
@@ -578,6 +601,7 @@ impl FileSystemRequestQueueClient {
             .map(|e| e.order_no.is_none())
             .unwrap_or(false);
         if was_handled {
+            inner.held_locks.remove(&request_id);
             return Ok(Some(ProcessedRequest {
                 request_id,
                 unique_key,
@@ -598,6 +622,7 @@ impl FileSystemRequestQueueClient {
 
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
+        inner.held_locks.remove(&request_id);
 
         let insertion_seq = inner
             .requests
@@ -652,6 +677,7 @@ impl FileSystemRequestQueueClient {
 
         let file_path = self.get_request_path(&unique_key);
         if !file_path.exists() && !inner.requests.contains_key(&unique_key) {
+            inner.held_locks.remove(&request_id);
             return Ok(None);
         }
 
@@ -662,6 +688,7 @@ impl FileSystemRequestQueueClient {
             .map(|e| e.order_no.is_none())
             .unwrap_or(false);
         if was_handled {
+            inner.held_locks.remove(&request_id);
             return Ok(None);
         }
 
@@ -678,6 +705,7 @@ impl FileSystemRequestQueueClient {
 
         let json = json_dumps(&request)?;
         atomic_write(&file_path, json.as_bytes()).await?;
+        inner.held_locks.remove(&request_id);
 
         // Preserve the original insertion order for a reclaim; only mint a new
         // sequence if (somehow) the request wasn't already indexed.
@@ -767,6 +795,91 @@ impl FileSystemRequestQueueClient {
         if millis > inner.lock_millis {
             inner.lock_millis = millis;
         }
+    }
+
+    /// Extend a live lock acquired by this client instance.
+    ///
+    /// The extension is added to the current expiry rather than measured from
+    /// now, matching a caller that extends its processing deadline by the same
+    /// amount. Returns `false` if the request is unknown, no longer locked, or
+    /// the on-disk lock no longer matches the one this client acquired.
+    pub async fn prolong_request_lock(
+        &self,
+        request_id: &str,
+        duration: chrono::Duration,
+    ) -> Result<bool> {
+        let extension_millis = duration.num_milliseconds();
+        if extension_millis <= 0 {
+            return Err(StorageError::InvalidArgs(
+                "lock extension must be greater than zero".to_string(),
+            ));
+        }
+
+        let mut inner = self.inner.lock().await;
+        let Some(held) = inner.held_locks.get(request_id).cloned() else {
+            return Ok(false);
+        };
+        let file_path = self.get_request_path(&held.unique_key);
+        let content = match fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                inner.held_locks.remove(request_id);
+                inner.requests.remove(&held.unique_key);
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut request: Value = serde_json::from_str(&content)?;
+        let same_request = Self::extract_unique_key(&request)
+            .map(|key| key == held.unique_key)
+            .unwrap_or(false)
+            && request.get("id").and_then(Value::as_str) == Some(request_id);
+        let disk_order = Self::read_order_no(&request);
+        let now = self.clock.now().timestamp_millis();
+
+        if !same_request
+            || disk_order != Some(held.order_no)
+            || !Self::is_locked_order(held.order_no, now)
+        {
+            inner.held_locks.remove(request_id);
+            if let Some(entry) = inner.requests.get_mut(&held.unique_key) {
+                entry.order_no = disk_order;
+            }
+            return Ok(false);
+        }
+
+        let magnitude = held
+            .order_no
+            .checked_abs()
+            .and_then(|expiry| expiry.checked_add(extension_millis))
+            .ok_or_else(|| {
+                StorageError::InvalidArgs("lock extension exceeds the supported range".to_string())
+            })?;
+        let sign = if held.order_no > 0 { 1 } else { -1 };
+        let extended = magnitude.checked_mul(sign).ok_or_else(|| {
+            StorageError::InvalidArgs("lock extension exceeds the supported range".to_string())
+        })?;
+
+        if let Value::Object(ref mut map) = request {
+            map.insert("orderNo".to_string(), Value::Number(extended.into()));
+        }
+        atomic_write(&file_path, json_dumps(&request)?.as_bytes()).await?;
+
+        if let Some(entry) = inner.requests.get_mut(&held.unique_key) {
+            entry.order_no = Some(extended);
+        }
+        inner.held_locks.insert(
+            request_id.to_string(),
+            HeldRequestLock {
+                unique_key: held.unique_key,
+                order_no: extended,
+            },
+        );
+        inner.metadata.base.accessed_at = self.clock.now();
+        let metadata = json_dumps_value(&inner.metadata)?;
+        atomic_write(&self.path.join(METADATA_FILENAME), metadata.as_bytes()).await?;
+
+        Ok(true)
     }
 
     /// Retained for binding compatibility. The orderNo lock model persists
@@ -891,6 +1004,7 @@ impl FileSystemRequestQueueClient {
 
         let mut inner = self.inner.lock().await;
         inner.requests.clear();
+        inner.held_locks.clear();
         let prior_forefront = std::mem::take(&mut inner.metadata.forefront_request_ids);
 
         let now = self.clock.now().timestamp_millis();
@@ -1369,6 +1483,70 @@ mod tests {
             again.is_some(),
             "after advancing the test clock past the lock window, the request must be re-fetchable"
         );
+    }
+
+    #[tokio::test]
+    async fn test_prolong_request_lock_requires_the_current_live_lock() {
+        use crate::clock::TestClock;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let clock = Arc::new(TestClock::new());
+        let client_a = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        client_a
+            .add_batch_of_requests(vec![req("req1")], false)
+            .await
+            .unwrap();
+        let request = client_a.fetch_next_request().await.unwrap().unwrap();
+        let request_id = request["id"].as_str().unwrap();
+
+        assert!(client_a
+            .prolong_request_lock(request_id, chrono::Duration::minutes(2))
+            .await
+            .unwrap());
+
+        let client_b = FileSystemRequestQueueClient::open_with_clock(
+            None,
+            None,
+            None,
+            temp_dir.path(),
+            clock.clone(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        clock.advance(chrono::Duration::minutes(3) + chrono::Duration::seconds(1));
+        assert!(
+            client_b.fetch_next_request().await.unwrap().is_none(),
+            "the request must remain reserved past its original lock expiry"
+        );
+
+        clock.advance(chrono::Duration::minutes(2));
+        let reacquired = client_b.fetch_next_request().await.unwrap().unwrap();
+        assert_eq!(reacquired["id"], request_id);
+
+        assert!(
+            !client_a
+                .prolong_request_lock(request_id, chrono::Duration::minutes(1))
+                .await
+                .unwrap(),
+            "a stale consumer must not extend the new consumer's lock"
+        );
+        assert!(client_b
+            .prolong_request_lock(request_id, chrono::Duration::minutes(1))
+            .await
+            .unwrap());
     }
 
     /// A [`TestClock`](crate::clock::TestClock) can be shared by multiple
