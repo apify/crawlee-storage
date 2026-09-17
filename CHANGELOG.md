@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+<!-- git-cliff-unreleased-start -->
+## 0.2.2 - **not yet released**
+
+### 🚀 Features
+
+- Prolong individual request queue locks ([#74](https://github.com/apify/crawlee-storage/pull/74)) ([d528cfd](https://github.com/apify/crawlee-storage/commit/d528cfdf8412f8b4d8809099bcc78560596c8681)) by [@atirna](https://github.com/atirna)
+
+
+<!-- git-cliff-unreleased-end -->
 ## [0.2.1](https://github.com/apify/crawlee-storage/releases/tag/v0.2.1) (2026-09-15)
 
 ### 🚀 Features
