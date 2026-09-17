@@ -89,6 +89,47 @@ async def test_set_expected_request_processing_time_rejects_non_timedelta(storag
         await client.set_expected_request_processing_time(60.5)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("forefront", [False, True])
+async def test_prolong_request_lock_accepts_timedelta(storage_dir: str, forefront: bool) -> None:
+    client = await FileSystemRequestQueueClient.open(
+        storage_dir=storage_dir, use_test_clock=True, request_queue_access="shared"
+    )
+    await client.add_batch_of_requests([{"uniqueKey": "prolonged"}], forefront=forefront)
+    request = await client.fetch_next_request()
+    assert request is not None
+    assert await client.prolong_request_lock(request_id=request["id"], duration=datetime.timedelta(minutes=2)) is True
+
+    peer = await FileSystemRequestQueueClient.open(
+        storage_dir=storage_dir, use_test_clock=True, request_queue_access="shared"
+    )
+    assert await peer.prolong_request_lock(request["id"], datetime.timedelta(minutes=1)) is False
+    peer.advance_clock_for_testing(datetime.timedelta(seconds=181))
+    assert await peer.fetch_next_request() is None
+    peer.advance_clock_for_testing(datetime.timedelta(minutes=2))
+    refetched = await peer.fetch_next_request()
+    assert refetched is not None
+    assert refetched["id"] == request["id"]
+    assert await client.prolong_request_lock(request["id"], datetime.timedelta(minutes=1)) is False
+
+
+@pytest.mark.parametrize(
+    ("duration", "error", "message"),
+    [
+        (60, TypeError, None),
+        (60.5, TypeError, None),
+        (datetime.timedelta(0), ValueError, "lock extension must be greater than zero"),
+        (datetime.timedelta(seconds=-1), ValueError, "lock extension must be greater than zero"),
+        (datetime.timedelta(microseconds=500), ValueError, "lock extension must be greater than zero"),
+    ],
+)
+async def test_prolong_request_lock_rejects_invalid_duration(
+    storage_dir: str, duration: object, error: type[Exception], message: str | None
+) -> None:
+    client = await FileSystemRequestQueueClient.open(storage_dir=storage_dir)
+    with pytest.raises(error, match=message):
+        await client.prolong_request_lock("missing", duration)  # type: ignore[arg-type]
+
+
 async def test_advance_clock_for_testing_accepts_timedelta(storage_dir: str) -> None:
     """Each client's `advance_clock_for_testing` now takes a `timedelta`."""
     for opener in (
