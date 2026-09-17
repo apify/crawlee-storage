@@ -824,6 +824,22 @@ impl FileSystemRequestQueueClient {
         })
     }
 
+    #[gen_stub(override_return_type(type_repr = "builtins.bool"))]
+    fn prolong_request_lock<'py>(
+        &self,
+        py: Python<'py>,
+        request_id: String,
+        duration: Duration,
+    ) -> PyResult<Bound<'py, pyo3::PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client
+                .prolong_request_lock(&request_id, duration)
+                .await
+                .map_err(storage_err)
+        })
+    }
+
     #[gen_stub(override_return_type(type_repr = "None"))]
     fn persist_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
         let client = self.inner.clone();
