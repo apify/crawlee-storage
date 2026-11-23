@@ -63,6 +63,7 @@ jobs:
     name: Changelog & version bump
     needs: [release_metadata]
     runs-on: ubuntu-latest
+    environment: npm
     outputs:
       release_commit_sha: ${{ steps.commit.outputs.commit_long_sha }}
     steps:
@@ -110,6 +111,7 @@ jobs:
     if: needs.release_metadata.outputs.is_prerelease != 'true'
     needs: [release_metadata, update_changelog]
     runs-on: ubuntu-latest
+    environment: npm
     env:
       GITHUB_TOKEN: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
     steps:
@@ -125,6 +127,7 @@ jobs:
     name: Publish to npm
     needs: [release_metadata, update_changelog]
     runs-on: ubuntu-latest
+    environment: npm
     steps:
       # Publishing happens in the single npm-OIDC-trusted workflow, dispatched
       # against the freshly bumped commit.
