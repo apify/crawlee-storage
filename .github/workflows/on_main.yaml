@@ -49,7 +49,9 @@ jobs:
     name: Changelog & version bump
     needs: [release_metadata]
     runs-on: ubuntu-latest
-    environment: npm
+    environment:
+      name: npm
+      deployment: false
     permissions:
       contents: write
     outputs:
@@ -94,7 +96,9 @@ jobs:
     name: Publish pre-release to npm
     needs: [update_changelog]
     runs-on: ubuntu-latest
-    environment: npm
+    environment:
+      name: npm
+      deployment: false
     permissions:
       actions: write # Required to dispatch publish_to_npm.yaml.
     steps:
